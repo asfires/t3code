@@ -14,6 +14,7 @@ import { buildThreadFeed, type ThreadFeedActivity } from "../../mobile/src/lib/t
 import { deriveLatestContextWindowSnapshot } from "../../web/src/lib/contextWindow.ts";
 import { deriveWorkLogEntries } from "../../web/src/session-logic.ts";
 import {
+  MAX_PROJECTED_TOOL_RESULT_CHARS,
   projectActivityEvent,
   projectActivityPayload,
   projectThreadDetailSnapshot,
@@ -79,6 +80,13 @@ const fixtures = [
       commandActions: [{ type: "unknown", output: "y".repeat(5_000) }],
     },
     command: "fallback data",
+    toolName: "Bash",
+    input: { command: "pnpm test", cwd: "/repo" },
+    result: {
+      type: "tool_result",
+      content: "full command output\nsecond line",
+      is_error: false,
+    },
     kind: "execute",
     toolCallId: "tool-command",
     rawOutput: {
@@ -117,8 +125,15 @@ const fixtures = [
       server: "repository",
       tool: "search",
       arguments: { query: "activity projection" },
+      result: {
+        content: [
+          { type: "text", text: "first MCP result line" },
+          { type: "text", text: "second MCP result line" },
+        ],
+      },
       aggregatedOutput: "mcp bulk is dropped",
     },
+    result: { content: "duplicate top-level MCP result" },
     ignored: "top-level bulk",
   }),
   makeActivity("search", "web_search", {
@@ -156,7 +171,7 @@ describe("projectActivityPayload", () => {
     );
   }
 
-  it("drops unread bulk while retaining command, file, tool, and summary inputs", () => {
+  it("drops unread bulk while retaining full command results and tool inputs", () => {
     const projected = projectActivityPayload(fixtures[0]!);
     expect(projected.payload).toEqual({
       itemType: "command_execution",
@@ -167,13 +182,19 @@ describe("projectActivityPayload", () => {
       data: {
         item: {
           command: ["bash", "-lc", "pnpm test"],
-          input: { command: "fallback input" },
-          result: { command: "fallback result" },
+          input: { command: "fallback input", ignored: "input bulk" },
+          result: { command: "fallback result", aggregatedOutput: "x".repeat(10_000) },
         },
         command: "fallback data",
+        toolName: "Bash",
+        input: { command: "pnpm test", cwd: "/repo" },
         toolCallId: "tool-command",
         kind: "execute",
-        rawOutput: { content: "first useful line" },
+        rawOutput: {
+          content: "\n```\nfirst useful line\nsecond line",
+          stdout: "unused stdout",
+          ignored: "raw bulk",
+        },
       },
     });
 
@@ -184,7 +205,7 @@ describe("projectActivityPayload", () => {
     });
   });
 
-  it("slims MCP tool data to the fields the expanded row renders", () => {
+  it("slims MCP tool data while retaining its full result", () => {
     expect(projectActivityPayload(fixtures[4]!).payload).toEqual({
       itemType: "mcp_tool_call",
       title: "mcp_tool_call",
@@ -196,27 +217,103 @@ describe("projectActivityPayload", () => {
           server: "repository",
           tool: "search",
           arguments: { query: "activity projection" },
+          result: {
+            content: [
+              { type: "text", text: "first MCP result line" },
+              { type: "text", text: "second MCP result line" },
+            ],
+          },
         },
       },
     });
   });
 
-  it("keeps current web and mobile derived output identical for every tool item type", () => {
+  it("truncates oversized result text and marks the projected data", () => {
+    const escapedOutput = '"\n\\'.repeat(MAX_PROJECTED_TOOL_RESULT_CHARS);
+    const projected = projectActivityPayload(
+      makeActivity("oversized", "command_execution", {
+        toolName: "Bash",
+        result: {
+          type: "tool_result",
+          content: escapedOutput,
+        },
+      }),
+    );
+    const payload = projected.payload as Record<string, unknown>;
+    const data = payload.data as Record<string, unknown>;
+    const result = data.result as { readonly content: string };
+
+    expect(result.content.endsWith("…[truncated]")).toBe(true);
+    expect(JSON.stringify(result).length).toBeLessThanOrEqual(MAX_PROJECTED_TOOL_RESULT_CHARS);
+    expect(data.resultTruncated).toBe(true);
+  });
+
+  it("caps oversized values without text under the serialized limit", () => {
+    const projected = projectActivityPayload(
+      makeActivity("oversized-no-text", "command_execution", {
+        result: Array.from({ length: MAX_PROJECTED_TOOL_RESULT_CHARS }, () => 0),
+      }),
+    );
+    const payload = projected.payload as Record<string, unknown>;
+    const data = payload.data as Record<string, unknown>;
+
+    expect(JSON.stringify(data.result).length).toBeLessThanOrEqual(MAX_PROJECTED_TOOL_RESULT_CHARS);
+    expect(data.resultTruncated).toBe(true);
+  });
+
+  it("leaves unserializable live values unchanged without throwing", () => {
+    const circular: Record<string, unknown> = { content: "live output" };
+    circular.self = circular;
+
+    const projected = projectActivityPayload(
+      makeActivity("circular", "command_execution", { result: circular }),
+    );
+    const payload = projected.payload as Record<string, unknown>;
+    const data = payload.data as Record<string, unknown>;
+
+    expect(data.result).toBe(circular);
+    expect(data).not.toHaveProperty("resultTruncated");
+  });
+
+  it("does not duplicate item results at the top level", () => {
+    const commandData = (projectActivityPayload(fixtures[0]!).payload as Record<string, unknown>)
+      .data as Record<string, unknown>;
+    const mcpData = (projectActivityPayload(fixtures[4]!).payload as Record<string, unknown>)
+      .data as Record<string, unknown>;
+
+    expect(commandData.item).toHaveProperty("result");
+    expect(commandData).not.toHaveProperty("result");
+    expect(mcpData.item).toHaveProperty("result");
+    expect(mcpData).not.toHaveProperty("result");
+  });
+
+  it("does not mark input-only truncation as truncated output", () => {
+    const projected = projectActivityPayload(
+      makeActivity("oversized-input", "command_execution", {
+        input: "x".repeat(MAX_PROJECTED_TOOL_RESULT_CHARS + 1_000),
+      }),
+    );
+    const payload = projected.payload as Record<string, unknown>;
+    const data = payload.data as Record<string, unknown>;
+
+    expect(JSON.stringify(data.input).length).toBeLessThanOrEqual(MAX_PROJECTED_TOOL_RESULT_CHARS);
+    expect(data).not.toHaveProperty("resultTruncated");
+  });
+
+  it("keeps current web presentation and mobile derived output equivalent", () => {
     for (const activity of fixtures) {
       const projected = projectActivityPayload(activity);
-      if (activity === fixtures[4]) {
-        // MCP is the one deliberate difference: the expanded row's toolData
-        // loses result bulk but keeps the rendered identity fields.
-        const [entry] = deriveWorkLogEntries([projected]);
-        expect(entry?.toolData).toEqual({
-          server: "repository",
-          tool: "search",
-          arguments: { query: "activity projection" },
-        });
-        continue;
+      const [before] = deriveWorkLogEntries([activity]);
+      const [after] = deriveWorkLogEntries([projected]);
+      const { toolData: _beforeToolData, ...beforePresentation } = before ?? {};
+      const { toolData: _afterToolData, ...afterPresentation } = after ?? {};
+      expect(afterPresentation).toEqual(beforePresentation);
+      expect(after?.toolData).toEqual((projected.payload as { readonly data?: unknown }).data);
+      // Mobile serializes every MCP item field in its debug expansion, so
+      // dropping unrelated item bulk is intentionally not byte-equivalent.
+      if (activity !== fixtures[4]) {
+        expect(comparableThreadFeed([projected])).toEqual(comparableThreadFeed([activity]));
       }
-      expect(deriveWorkLogEntries([projected])).toEqual(deriveWorkLogEntries([activity]));
-      expect(comparableThreadFeed([projected])).toEqual(comparableThreadFeed([activity]));
     }
   });
 

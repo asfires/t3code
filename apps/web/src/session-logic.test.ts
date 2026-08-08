@@ -989,7 +989,7 @@ describe("deriveWorkLogEntries", () => {
 
     const [entry] = deriveWorkLogEntries(activities);
     expect(entry?.toolTitle).toBe("t3-code · preview_status");
-    expect(entry?.toolData).toEqual(item);
+    expect(entry?.toolData).toEqual({ item });
   });
 
   it("keeps MCP payloads while collapsing lifecycle updates", () => {
@@ -1023,7 +1023,79 @@ describe("deriveWorkLogEntries", () => {
     ];
 
     const [entry] = deriveWorkLogEntries(activities);
-    expect(entry?.toolData).toEqual(item);
+    expect(entry?.toolData).toEqual({ item });
+  });
+
+  it("keeps the latest non-MCP tool result while collapsing lifecycle updates", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "command-progress",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "tool.updated",
+        summary: "Ran command",
+        payload: {
+          itemType: "command_execution",
+          data: {
+            toolCallId: "command-1",
+            rawOutput: { stdout: "partial output" },
+          },
+        },
+      }),
+      makeActivity({
+        id: "command-complete",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "tool.completed",
+        summary: "Ran command",
+        payload: {
+          itemType: "command_execution",
+          data: {
+            toolCallId: "command-1",
+            rawOutput: { stdout: "full output" },
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities);
+    expect(entry?.toolData).toEqual({
+      toolCallId: "command-1",
+      rawOutput: { stdout: "full output" },
+    });
+  });
+
+  it("keeps rich update tool data when the completion payload is sparse", () => {
+    const updateToolData = {
+      toolCallId: "command-sparse",
+      rawOutput: { stdout: "complete output from update" },
+    };
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "command-sparse-progress",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "tool.updated",
+        summary: "Ran command",
+        payload: {
+          itemType: "command_execution",
+          data: updateToolData,
+        },
+      }),
+      makeActivity({
+        id: "command-sparse-complete",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "tool.completed",
+        summary: "Ran command",
+        payload: {
+          itemType: "command_execution",
+          data: {
+            toolCallId: "command-sparse",
+            toolName: "Bash",
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities);
+    expect(entry?.toolData).toEqual(updateToolData);
   });
 
   it("unwraps PowerShell command wrappers for displayed command text", () => {

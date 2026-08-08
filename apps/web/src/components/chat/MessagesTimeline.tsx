@@ -2035,13 +2035,154 @@ function workEntryRawCommand(
   return rawCommand === workEntry.command.trim() ? null : rawCommand;
 }
 
-function buildToolCallExpandedBody(
+function asToolDataRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function prettyPrintToolValue(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function extractKnownToolText(value: unknown): string | null {
+  if (typeof value === "string") {
+    return value.trim().length > 0 ? value : null;
+  }
+  if (Array.isArray(value)) {
+    const texts = value
+      .map((entry) => extractKnownToolText(entry))
+      .filter((entry): entry is string => entry !== null);
+    return texts.length > 0 ? texts.join("\n") : null;
+  }
+  const record = asToolDataRecord(value);
+  if (!record) {
+    return null;
+  }
+  for (const key of [
+    "content",
+    "stdout",
+    "output",
+    "aggregatedOutput",
+    "text",
+    "diff",
+    "patch",
+    "error",
+    "message",
+  ]) {
+    if (!(key in record)) {
+      continue;
+    }
+    const text = extractKnownToolText(record[key]);
+    if (text) {
+      return text;
+    }
+  }
+  return null;
+}
+
+function extractToolResultOutput(toolData: unknown): {
+  readonly text: string;
+  readonly isError: boolean;
+  readonly truncated: boolean;
+} | null {
+  const data = asToolDataRecord(toolData);
+  if (!data) {
+    return null;
+  }
+  const item = asToolDataRecord(data.item);
+  const rawOutput = data.rawOutput;
+  const state = data.state;
+  const result = data.result ?? item?.result;
+  const content = data.content;
+  const candidates = [
+    { kind: "result", value: result },
+    { kind: "rawOutput", value: rawOutput },
+    { kind: "state", value: state },
+    { kind: "content", value: content },
+  ] as const;
+  for (const candidate of candidates) {
+    const text = extractKnownToolText(candidate.value);
+    if (!text) {
+      continue;
+    }
+    const record = asToolDataRecord(candidate.value);
+    return {
+      text,
+      isError:
+        candidate.kind === "result"
+          ? record?.is_error === true
+          : candidate.kind === "state"
+            ? record?.status === "error" || record?.error != null
+            : false,
+      truncated: data.resultTruncated === true,
+    };
+  }
+
+  const fallback = result ?? content;
+  if (fallback === undefined || fallback === null) {
+    return null;
+  }
+  const text = prettyPrintToolValue(fallback);
+  if (text.trim().length === 0) {
+    return null;
+  }
+  return {
+    text,
+    isError: fallback === result && asToolDataRecord(result)?.is_error === true,
+    truncated: data.resultTruncated === true,
+  };
+}
+
+function toolDataHasExpandedBody(toolData: unknown): boolean {
+  const data = asToolDataRecord(toolData);
+  if (!data) {
+    return false;
+  }
+  const item = asToolDataRecord(data.item);
+  return (
+    (item !== null && "result" in item && item.result != null) ||
+    ["result", "rawOutput", "state", "content"].some((key) => key in data && data[key] != null)
+  );
+}
+
+function mcpToolCallMetadata(toolData: unknown): unknown {
+  const data = asToolDataRecord(toolData);
+  const source = asToolDataRecord(data?.item) ?? data;
+  if (!source) {
+    return toolData;
+  }
+  const {
+    result: _result,
+    rawOutput: _rawOutput,
+    state: _state,
+    resultTruncated: _resultTruncated,
+    ...metadata
+  } = source;
+  return metadata;
+}
+
+export function buildToolCallExpandedBody(
   workEntry: TimelineWorkEntry,
   workspaceRoot: string | undefined,
 ): string | null {
   const blocks: string[] = [];
   if (workEntry.itemType === "mcp_tool_call" && workEntry.toolData !== undefined) {
-    blocks.push(`MCP call\n${JSON.stringify(workEntry.toolData, null, 2)}`);
+    blocks.push(`MCP call\n${prettyPrintToolValue(mcpToolCallMetadata(workEntry.toolData))}`);
+  }
+  const resultOutput = extractToolResultOutput(workEntry.toolData);
+  if (resultOutput) {
+    blocks.push(`${resultOutput.isError ? "Error output" : "Output"}\n${resultOutput.text}`);
+    if (resultOutput.truncated) {
+      blocks.push("Output truncated");
+    }
   }
   const raw = workEntryRawCommand(workEntry);
   if (raw?.trim()) {
@@ -2062,6 +2203,41 @@ function buildToolCallExpandedBody(
   }
   return blocks.length > 0 ? blocks.join("\n\n") : null;
 }
+
+function workEntryHasExpandedBody(workEntry: TimelineWorkEntry): boolean {
+  return (
+    (workEntry.itemType === "mcp_tool_call" && workEntry.toolData !== undefined) ||
+    toolDataHasExpandedBody(workEntry.toolData) ||
+    Boolean(workEntry.command?.trim()) ||
+    Boolean(workEntry.detail?.trim()) ||
+    (workEntry.changedFiles?.length ?? 0) > 0
+  );
+}
+
+const WorkEntryExpandedBody = memo(function WorkEntryExpandedBody(props: {
+  workEntry: TimelineWorkEntry;
+  workspaceRoot: string | undefined;
+}) {
+  const { workEntry, workspaceRoot } = props;
+  const expandedBody = useMemo(
+    () => buildToolCallExpandedBody(workEntry, workspaceRoot),
+    [workEntry, workspaceRoot],
+  );
+  if (!expandedBody) {
+    return null;
+  }
+  return (
+    <div
+      className="mt-1 ms-7 cursor-default border-s border-border/45 ps-3 pt-0.5"
+      onClick={stopRowToggle}
+      onPointerDown={stopRowToggle}
+    >
+      <pre className="max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-secondary-label text-[11px] leading-relaxed select-text">
+        {expandedBody}
+      </pre>
+    </div>
+  );
+});
 
 function workEntryIconName(workEntry: TimelineWorkEntry): WorkEntryIconName {
   if (
@@ -2242,8 +2418,7 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
       ? null
       : rawPreview;
   const displayText = preview ? `${heading} - ${preview}` : heading;
-  const expandedBody = buildToolCallExpandedBody(workEntry, workspaceRoot);
-  const canExpand = expandedBody !== null;
+  const canExpand = workEntryHasExpandedBody(workEntry);
   const showFailedIndicator = workEntryIndicatesToolFailure(workEntry);
   const showDestructiveRowStyle =
     showFailedIndicator &&
@@ -2367,16 +2542,8 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
           </div>
         </div>
       </div>
-      {expanded && canExpand && expandedBody ? (
-        <div
-          className="mt-1 ms-7 cursor-default border-s border-border/45 ps-3 pt-0.5"
-          onClick={stopRowToggle}
-          onPointerDown={stopRowToggle}
-        >
-          <pre className="max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-secondary-label text-[11px] leading-relaxed select-text">
-            {expandedBody}
-          </pre>
-        </div>
+      {expanded && canExpand ? (
+        <WorkEntryExpandedBody workEntry={workEntry} workspaceRoot={workspaceRoot} />
       ) : null}
     </div>
   );

@@ -862,10 +862,10 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   if (title) {
     entry.toolTitle = title;
   }
-  if (itemType === "mcp_tool_call") {
+  if (itemType) {
     const data = asRecord(payload?.data);
-    if (data?.item !== undefined) {
-      entry.toolData = data.item;
+    if (data) {
+      entry.toolData = data;
     }
   }
   if (itemType) {
@@ -1042,7 +1042,11 @@ function mergeDerivedWorkLogEntries(
   const collapseKey = next.collapseKey ?? previous.collapseKey;
   const toolCallId = next.toolCallId ?? previous.toolCallId;
   const toolLifecycleStatus = next.toolLifecycleStatus ?? previous.toolLifecycleStatus;
-  const toolData = next.toolData ?? previous.toolData;
+  const nextToolData = asRecord(next.toolData);
+  const nextToolDataHasContent =
+    nextToolData !== null &&
+    ["item", "result", "rawOutput", "state"].some((key) => key in nextToolData);
+  const toolData = nextToolDataHasContent ? next.toolData : previous.toolData;
   return {
     ...previous,
     ...next,

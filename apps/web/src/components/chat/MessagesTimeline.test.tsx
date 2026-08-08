@@ -134,6 +134,7 @@ function matchMedia() {
 }
 
 let MessagesTimeline: typeof import("./MessagesTimeline").MessagesTimeline;
+let buildToolCallExpandedBody: typeof import("./MessagesTimeline").buildToolCallExpandedBody;
 
 beforeAll(async () => {
   const classList = {
@@ -167,7 +168,7 @@ beforeAll(async () => {
     },
   });
 
-  ({ MessagesTimeline } = await import("./MessagesTimeline"));
+  ({ MessagesTimeline, buildToolCallExpandedBody } = await import("./MessagesTimeline"));
 }, 30_000);
 
 const ACTIVE_THREAD_ENVIRONMENT_ID = EnvironmentId.make("environment-local");
@@ -226,6 +227,87 @@ function buildUserTimelineEntry(text: string) {
 }
 
 describe("MessagesTimeline", () => {
+  it("extracts full provider tool output for expanded work rows", () => {
+    const makeEntry = (toolData: unknown) => ({
+      id: "work-output",
+      createdAt: MESSAGE_CREATED_AT,
+      label: "Tool output",
+      tone: "tool" as const,
+      itemType: "command_execution" as const,
+      toolData,
+    });
+
+    expect(
+      buildToolCallExpandedBody(
+        makeEntry({
+          result: {
+            type: "tool_result",
+            content: [
+              { type: "text", text: "first Claude line" },
+              { type: "text", text: "second Claude line" },
+            ],
+            is_error: true,
+          },
+          resultTruncated: true,
+        }),
+        undefined,
+      ),
+    ).toContain("Error output\nfirst Claude line\nsecond Claude line\n\nOutput truncated");
+    expect(
+      buildToolCallExpandedBody(
+        makeEntry({ rawOutput: { stdout: "ACP stdout\nsecond line" } }),
+        undefined,
+      ),
+    ).toContain("Output\nACP stdout\nsecond line");
+    expect(
+      buildToolCallExpandedBody(
+        makeEntry({ tool: "bash", state: { status: "completed", output: "OpenCode output" } }),
+        undefined,
+      ),
+    ).toContain("Output\nOpenCode output");
+    expect(
+      buildToolCallExpandedBody(makeEntry({ result: { values: [1, 2] } }), undefined),
+    ).toContain('"values": [');
+  });
+
+  it("uses the first tool result candidate with renderable text", () => {
+    const body = buildToolCallExpandedBody(
+      {
+        id: "work-output-priority",
+        createdAt: MESSAGE_CREATED_AT,
+        label: "Tool output",
+        tone: "tool",
+        itemType: "command_execution",
+        toolData: {
+          result: { command: "pnpm test", exitCode: 0 },
+          rawOutput: { stdout: "real stdout" },
+          state: { status: "error", error: "unrelated state error" },
+        },
+      },
+      undefined,
+    );
+
+    expect(body).toContain("Output\nreal stdout");
+    expect(body).not.toContain("Error output");
+  });
+
+  it("treats a null state error as successful output", () => {
+    const body = buildToolCallExpandedBody(
+      {
+        id: "work-output-null-error",
+        createdAt: MESSAGE_CREATED_AT,
+        label: "Tool output",
+        tone: "tool",
+        itemType: "dynamic_tool_call",
+        toolData: { state: { status: "completed", error: null, output: "successful output" } },
+      },
+      undefined,
+    );
+
+    expect(body).toContain("Output\nsuccessful output");
+    expect(body).not.toContain("Error output");
+  });
+
   it("uses the larger leading inset only when the top fade is enabled", () => {
     const timelineEntries = [buildUserTimelineEntry("Hello")];
 
