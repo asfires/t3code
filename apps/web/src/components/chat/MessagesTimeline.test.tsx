@@ -125,6 +125,14 @@ vi.mock("@pierre/diffs/react", () => {
   return { FileDiff: MockFileDiff };
 });
 
+vi.mock("../ui/copy-text-button", () => ({
+  CopyTextButton: ({ text, label }: { text: string; label: string }) => (
+    <button type="button" data-copy-text={text}>
+      {label}
+    </button>
+  ),
+}));
+
 function matchMedia() {
   return {
     matches: false,
@@ -135,6 +143,7 @@ function matchMedia() {
 
 let MessagesTimeline: typeof import("./MessagesTimeline").MessagesTimeline;
 let buildToolCallExpandedBody: typeof import("./MessagesTimeline").buildToolCallExpandedBody;
+let WorkEntryExpandedBody: typeof import("./MessagesTimeline").WorkEntryExpandedBody;
 
 beforeAll(async () => {
   const classList = {
@@ -168,7 +177,8 @@ beforeAll(async () => {
     },
   });
 
-  ({ MessagesTimeline, buildToolCallExpandedBody } = await import("./MessagesTimeline"));
+  ({ MessagesTimeline, WorkEntryExpandedBody, buildToolCallExpandedBody } =
+    await import("./MessagesTimeline"));
 }, 30_000);
 
 const ACTIVE_THREAD_ENVIRONMENT_ID = EnvironmentId.make("environment-local");
@@ -252,22 +262,49 @@ describe("MessagesTimeline", () => {
         }),
         undefined,
       ),
-    ).toContain("Error output\nfirst Claude line\nsecond Claude line\n\nOutput truncated");
+    ).toEqual({
+      blocks: [
+        {
+          kind: "output",
+          text: "first Claude line\nsecond Claude line",
+          isError: true,
+          truncated: true,
+        },
+      ],
+    });
     expect(
       buildToolCallExpandedBody(
         makeEntry({ rawOutput: { stdout: "ACP stdout\nsecond line" } }),
         undefined,
       ),
-    ).toContain("Output\nACP stdout\nsecond line");
+    ).toEqual({
+      blocks: [
+        {
+          kind: "output",
+          text: "ACP stdout\nsecond line",
+          isError: false,
+          truncated: false,
+        },
+      ],
+    });
     expect(
       buildToolCallExpandedBody(
         makeEntry({ tool: "bash", state: { status: "completed", output: "OpenCode output" } }),
         undefined,
       ),
-    ).toContain("Output\nOpenCode output");
+    ).toEqual({
+      blocks: [
+        {
+          kind: "output",
+          text: "OpenCode output",
+          isError: false,
+          truncated: false,
+        },
+      ],
+    });
     expect(
       buildToolCallExpandedBody(makeEntry({ result: { values: [1, 2] } }), undefined),
-    ).toContain('"values": [');
+    ).toMatchObject({ blocks: [{ kind: "output", text: expect.stringContaining('"values": [') }] });
   });
 
   it("uses the first tool result candidate with renderable text", () => {
@@ -287,8 +324,9 @@ describe("MessagesTimeline", () => {
       undefined,
     );
 
-    expect(body).toContain("Output\nreal stdout");
-    expect(body).not.toContain("Error output");
+    expect(body).toEqual({
+      blocks: [{ kind: "output", text: "real stdout", isError: false, truncated: false }],
+    });
   });
 
   it("treats a null state error as successful output", () => {
@@ -304,8 +342,135 @@ describe("MessagesTimeline", () => {
       undefined,
     );
 
-    expect(body).toContain("Output\nsuccessful output");
-    expect(body).not.toContain("Error output");
+    expect(body).toEqual({
+      blocks: [{ kind: "output", text: "successful output", isError: false, truncated: false }],
+    });
+  });
+
+  it("deduplicates expanded blocks already visible in the row", () => {
+    const command = 'Bash: uname -a && echo "---" && date';
+    const body = buildToolCallExpandedBody(
+      {
+        id: "work-output-deduplicated",
+        createdAt: MESSAGE_CREATED_AT,
+        label: command,
+        tone: "tool",
+        itemType: "command_execution",
+        command,
+        rawCommand: command,
+        detail: command,
+        toolData: { rawOutput: { stdout: "Linux example output" } },
+      },
+      undefined,
+    );
+
+    expect(body).toEqual({
+      blocks: [{ kind: "output", text: "Linux example output", isError: false, truncated: false }],
+      copyableCommand: command,
+    });
+    expect(
+      buildToolCallExpandedBody(
+        {
+          id: "work-output-fully-deduplicated",
+          createdAt: MESSAGE_CREATED_AT,
+          label: command,
+          tone: "tool",
+          itemType: "command_execution",
+          command,
+          detail: command,
+        },
+        undefined,
+      ),
+    ).toBeNull();
+  });
+
+  it("labels only error output and retains the truncation notice", () => {
+    const normalBody = buildToolCallExpandedBody(
+      {
+        id: "work-output-normal-label",
+        createdAt: MESSAGE_CREATED_AT,
+        label: "Tool output",
+        tone: "tool",
+        itemType: "command_execution",
+        toolData: { rawOutput: { stdout: "normal text" } },
+      },
+      undefined,
+    );
+    const errorBody = buildToolCallExpandedBody(
+      {
+        id: "work-output-error-label",
+        createdAt: MESSAGE_CREATED_AT,
+        label: "Tool output",
+        tone: "tool",
+        itemType: "command_execution",
+        toolData: {
+          result: { content: "failed text", is_error: true },
+          resultTruncated: true,
+        },
+      },
+      undefined,
+    );
+    expect(normalBody).not.toBeNull();
+    expect(errorBody).not.toBeNull();
+
+    const normalMarkup = renderToStaticMarkup(<WorkEntryExpandedBody body={normalBody!} />);
+    const errorMarkup = renderToStaticMarkup(<WorkEntryExpandedBody body={errorBody!} />);
+
+    expect(normalMarkup).toContain("normal text");
+    expect(normalMarkup).not.toContain("Output\nnormal text");
+    expect(errorMarkup).toContain("Error output\nfailed text\n\nOutput truncated");
+  });
+
+  it("passes only the raw extracted output to the copy button", () => {
+    const body = buildToolCallExpandedBody(
+      {
+        id: "work-output-copy",
+        createdAt: MESSAGE_CREATED_AT,
+        label: "Bash",
+        tone: "tool",
+        itemType: "command_execution",
+        command: "short preview",
+        rawCommand: "a much longer command",
+        detail: "auxiliary detail",
+        toolData: { rawOutput: { stdout: "raw output text" } },
+      },
+      undefined,
+    );
+    expect(body).toEqual({
+      blocks: [
+        { kind: "output", text: "raw output text", isError: false, truncated: false },
+        { kind: "text", text: "a much longer command" },
+        { kind: "text", text: "auxiliary detail" },
+      ],
+      copyableCommand: "a much longer command",
+    });
+
+    const markup = renderToStaticMarkup(<WorkEntryExpandedBody body={body!} />);
+
+    expect(markup).toContain('data-copy-text="raw output text"');
+    expect(markup).toContain("Copy output");
+    expect(markup).toContain('data-copy-text="a much longer command"');
+    expect(markup).toContain("Copy command");
+    expect(markup).not.toContain('data-copy-text="auxiliary detail"');
+  });
+
+  it("offers command copy only for command executions", () => {
+    const body = buildToolCallExpandedBody(
+      {
+        id: "work-output-search",
+        createdAt: MESSAGE_CREATED_AT,
+        label: "Web search",
+        tone: "tool",
+        itemType: "web_search",
+        command: "some query",
+        toolData: { rawOutput: { content: "search results" } },
+      },
+      undefined,
+    );
+    expect(body?.copyableCommand).toBeUndefined();
+
+    const markup = renderToStaticMarkup(<WorkEntryExpandedBody body={body!} />);
+    expect(markup).not.toContain("Copy command");
   });
 
   it("uses the larger leading inset only when the top fade is enabled", () => {

@@ -928,6 +928,37 @@ describe("deriveWorkLogEntries", () => {
     expect(entry?.command).toBe("bun run lint");
   });
 
+  it("prefers the structured input command and never the Bash-prefixed detail", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "claude-command-tool",
+        kind: "tool.completed",
+        summary: "Ran command",
+        payload: {
+          itemType: "command_execution",
+          detail: "Bash: uname -a && date",
+          data: {
+            toolName: "Bash",
+            input: { command: "uname -a && date" },
+          },
+        },
+      }),
+      makeActivity({
+        id: "detail-only-command-tool",
+        kind: "tool.completed",
+        summary: "Ran command",
+        payload: {
+          itemType: "command_execution",
+          detail: "Bash: ls -la <exited with exit code 0>",
+        },
+      }),
+    ];
+
+    const [structured, detailOnly] = deriveWorkLogEntries(activities);
+    expect(structured?.command).toBe("uname -a && date");
+    expect(detailOnly?.command).toBe("ls -la");
+  });
+
   it("extracts failed tool lifecycle status from item payloads", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

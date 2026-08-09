@@ -44,7 +44,7 @@ import {
   resolveDiffThemeName,
   resolveFileDiffPath,
 } from "../../lib/diffRendering";
-import ChatMarkdown from "../ChatMarkdown";
+import ChatMarkdown, { reportMarkdownActionFailure } from "../ChatMarkdown";
 import {
   BotIcon,
   CheckIcon,
@@ -66,6 +66,7 @@ import {
   ZapIcon,
 } from "lucide-react";
 import { Button } from "../ui/button";
+import { CopyTextButton } from "../ui/copy-text-button";
 import { buildExpandedImagePreview, ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ProposedPlanCard } from "./ProposedPlanCard";
 import { ChangedFilesCard } from "./ChangedFilesTree";
@@ -2025,6 +2026,22 @@ function workEntryPreview(
     : `${displayPath} +${workEntry.changedFiles!.length - 1} more`;
 }
 
+function workEntryDisplayText(workEntry: TimelineWorkEntry, workspaceRoot: string | undefined) {
+  const heading = toolWorkEntryHeading(workEntry);
+  const rawPreview = workEntryPreview(workEntry, workspaceRoot);
+  const preview =
+    rawPreview &&
+    normalizeCompactToolLabel(rawPreview).toLowerCase() ===
+      normalizeCompactToolLabel(heading).toLowerCase()
+      ? null
+      : rawPreview;
+  return {
+    heading,
+    preview,
+    displayText: preview ? `${heading} - ${preview}` : heading,
+  };
+}
+
 function workEntryRawCommand(
   workEntry: Pick<TimelineWorkEntry, "command" | "rawCommand">,
 ): string | null {
@@ -2141,18 +2158,6 @@ function extractToolResultOutput(toolData: unknown): {
   };
 }
 
-function toolDataHasExpandedBody(toolData: unknown): boolean {
-  const data = asToolDataRecord(toolData);
-  if (!data) {
-    return false;
-  }
-  const item = asToolDataRecord(data.item);
-  return (
-    (item !== null && "result" in item && item.result != null) ||
-    ["result", "rawOutput", "state", "content"].some((key) => key in data && data[key] != null)
-  );
-}
-
 function mcpToolCallMetadata(toolData: unknown): unknown {
   const data = asToolDataRecord(toolData);
   const source = asToolDataRecord(data?.item) ?? data;
@@ -2169,72 +2174,132 @@ function mcpToolCallMetadata(toolData: unknown): unknown {
   return metadata;
 }
 
+type ToolCallExpandedBodyBlock =
+  | {
+      readonly kind: "output";
+      readonly text: string;
+      readonly isError: boolean;
+      readonly truncated: boolean;
+    }
+  | { readonly kind: "text"; readonly text: string };
+
+export interface ToolCallExpandedBody {
+  readonly blocks: readonly ToolCallExpandedBodyBlock[];
+  readonly copyableCommand?: string;
+}
+
 export function buildToolCallExpandedBody(
   workEntry: TimelineWorkEntry,
   workspaceRoot: string | undefined,
-): string | null {
-  const blocks: string[] = [];
+): ToolCallExpandedBody | null {
+  const { heading, preview, displayText } = workEntryDisplayText(workEntry, workspaceRoot);
+  const seen = new Set(
+    [heading, preview, displayText]
+      .filter((value): value is string => value !== null)
+      .map((value) => value.trim())
+      .filter(Boolean),
+  );
+  const blocks: ToolCallExpandedBodyBlock[] = [];
+  const addTextBlock = (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed || seen.has(trimmed)) {
+      return;
+    }
+    seen.add(trimmed);
+    blocks.push({ kind: "text", text: trimmed });
+  };
   if (workEntry.itemType === "mcp_tool_call" && workEntry.toolData !== undefined) {
-    blocks.push(`MCP call\n${prettyPrintToolValue(mcpToolCallMetadata(workEntry.toolData))}`);
+    addTextBlock(`MCP call\n${prettyPrintToolValue(mcpToolCallMetadata(workEntry.toolData))}`);
   }
   const resultOutput = extractToolResultOutput(workEntry.toolData);
   if (resultOutput) {
-    blocks.push(`${resultOutput.isError ? "Error output" : "Output"}\n${resultOutput.text}`);
-    if (resultOutput.truncated) {
-      blocks.push("Output truncated");
+    const trimmed = resultOutput.text.trim();
+    if (trimmed && !seen.has(trimmed)) {
+      seen.add(trimmed);
+      if (resultOutput.truncated) {
+        seen.add("Output truncated");
+      }
+      blocks.push({ kind: "output", ...resultOutput });
     }
   }
   const raw = workEntryRawCommand(workEntry);
   if (raw?.trim()) {
-    blocks.push(raw.trim());
+    addTextBlock(raw);
   } else if (workEntry.command?.trim()) {
-    blocks.push(workEntry.command.trim());
+    addTextBlock(workEntry.command);
   }
   if (workEntry.detail?.trim()) {
-    blocks.push(workEntry.detail.trim());
+    addTextBlock(workEntry.detail);
   }
   const changedFiles = workEntry.changedFiles ?? [];
   if (changedFiles.length > 0) {
-    blocks.push(
+    addTextBlock(
       changedFiles
         .map((filePath) => formatWorkspaceRelativePath(filePath, workspaceRoot))
         .join("\n"),
     );
   }
-  return blocks.length > 0 ? blocks.join("\n\n") : null;
-}
-
-function workEntryHasExpandedBody(workEntry: TimelineWorkEntry): boolean {
-  return (
-    (workEntry.itemType === "mcp_tool_call" && workEntry.toolData !== undefined) ||
-    toolDataHasExpandedBody(workEntry.toolData) ||
-    Boolean(workEntry.command?.trim()) ||
-    Boolean(workEntry.detail?.trim()) ||
-    (workEntry.changedFiles?.length ?? 0) > 0
-  );
-}
-
-const WorkEntryExpandedBody = memo(function WorkEntryExpandedBody(props: {
-  workEntry: TimelineWorkEntry;
-  workspaceRoot: string | undefined;
-}) {
-  const { workEntry, workspaceRoot } = props;
-  const expandedBody = useMemo(
-    () => buildToolCallExpandedBody(workEntry, workspaceRoot),
-    [workEntry, workspaceRoot],
-  );
-  if (!expandedBody) {
+  if (blocks.length === 0) {
     return null;
   }
+  const copyableCommand =
+    workEntry.itemType === "command_execution"
+      ? (workEntry.rawCommand ?? workEntry.command)?.trim() || undefined
+      : undefined;
+  return copyableCommand ? { blocks, copyableCommand } : { blocks };
+}
+
+export const WorkEntryExpandedBody = memo(function WorkEntryExpandedBody(props: {
+  body: ToolCallExpandedBody;
+}) {
+  const { blocks, copyableCommand } = props.body;
   return (
     <div
-      className="mt-1 ms-7 cursor-default border-s border-border/45 ps-3 pt-0.5"
+      className="mt-1 ms-7 cursor-default space-y-2 border-s border-border/45 ps-3 pt-0.5"
       onClick={stopRowToggle}
       onPointerDown={stopRowToggle}
     >
-      <pre className="max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-secondary-label text-[11px] leading-relaxed select-text">
-        {expandedBody}
-      </pre>
+      {blocks.map((block) =>
+        block.kind === "output" ? (
+          <div key={`output:${block.text}`} className="relative">
+            <pre
+              className={`max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-secondary-label text-[11px] leading-relaxed select-text ${
+                copyableCommand ? "pe-14" : "pe-7"
+              }`}
+            >
+              {block.isError ? "Error output\n" : null}
+              {block.text}
+              {block.truncated ? "\n\nOutput truncated" : null}
+            </pre>
+            <span className="absolute end-0 top-0 flex gap-0.5">
+              {copyableCommand ? (
+                <CopyTextButton
+                  text={copyableCommand}
+                  label="Copy command"
+                  icon={<TerminalIcon className="size-3" />}
+                  onCopyError={(cause) => {
+                    reportMarkdownActionFailure({ operation: "copy-tool-command" }, cause);
+                  }}
+                />
+              ) : null}
+              <CopyTextButton
+                text={block.text}
+                label="Copy output"
+                onCopyError={(cause) => {
+                  reportMarkdownActionFailure({ operation: "copy-tool-output" }, cause);
+                }}
+              />
+            </span>
+          </div>
+        ) : (
+          <pre
+            key={`text:${block.text}`}
+            className="max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-secondary-label text-[11px] leading-relaxed select-text"
+          >
+            {block.text}
+          </pre>
+        ),
+      )}
     </div>
   );
 });
@@ -2409,16 +2474,12 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
   const iconConfig = workToneIcon(workEntry.tone);
   const showWarningIndicator = workEntry.sourceActivityKind === "runtime.warning";
   const entryIconName = showWarningIndicator ? "x" : workEntryIconName(workEntry);
-  const heading = toolWorkEntryHeading(workEntry);
-  const rawPreview = workEntryPreview(workEntry, workspaceRoot);
-  const preview =
-    rawPreview &&
-    normalizeCompactToolLabel(rawPreview).toLowerCase() ===
-      normalizeCompactToolLabel(heading).toLowerCase()
-      ? null
-      : rawPreview;
-  const displayText = preview ? `${heading} - ${preview}` : heading;
-  const canExpand = workEntryHasExpandedBody(workEntry);
+  const { heading, preview, displayText } = workEntryDisplayText(workEntry, workspaceRoot);
+  const expandedBody = useMemo(
+    () => buildToolCallExpandedBody(workEntry, workspaceRoot),
+    [workEntry, workspaceRoot],
+  );
+  const canExpand = expandedBody !== null;
   const showFailedIndicator = workEntryIndicatesToolFailure(workEntry);
   const showDestructiveRowStyle =
     showFailedIndicator &&
@@ -2542,9 +2603,7 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
           </div>
         </div>
       </div>
-      {expanded && canExpand ? (
-        <WorkEntryExpandedBody workEntry={workEntry} workspaceRoot={workspaceRoot} />
-      ) : null}
+      {expanded && expandedBody ? <WorkEntryExpandedBody body={expandedBody} /> : null}
     </div>
   );
 });
