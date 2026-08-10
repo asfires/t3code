@@ -82,6 +82,7 @@ const DEFAULT_MAX_RETAINED_INACTIVE_SESSIONS = 128;
 const DEFAULT_OPEN_COLS = 120;
 const DEFAULT_OPEN_ROWS = 30;
 const TERMINAL_ENV_BLOCKLIST = new Set(["PORT", "ELECTRON_RENDERER_PORT", "ELECTRON_RUN_AS_NODE"]);
+const PYTHON_VENV_DIRECTORY_NAMES = [".venv", "venv"] as const;
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 const MAX_TERMINAL_LABEL_LENGTH = 128;
 
@@ -1167,6 +1168,28 @@ function createTerminalSpawnEnv(
   return stripAppImageRuntimeEnv(spawnEnv);
 }
 
+function quotePosixShellArgument(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function pythonVenvActivationCommand(
+  venvPath: string,
+  shellLabel: string,
+  platform: NodeJS.Platform,
+): string {
+  if (platform !== "win32") {
+    const activationScript = quotePosixShellArgument(`${venvPath}/bin/activate`);
+    return ` . ${activationScript}; printf '\\033[2J\\033[H'\r`;
+  }
+
+  if (/powershell|pwsh/i.test(shellLabel)) {
+    const activationScript = `${venvPath}\\Scripts\\Activate.ps1`.replaceAll("'", "''");
+    return `. '${activationScript}'; Clear-Host\r`;
+  }
+
+  return `call "${venvPath}\\Scripts\\activate.bat" && cls\r`;
+}
+
 function normalizedRuntimeEnv(
   env: Record<string, string> | undefined,
 ): Record<string, string> | null {
@@ -1240,6 +1263,27 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     options.maxRetainedInactiveSessions ?? DEFAULT_MAX_RETAINED_INACTIVE_SESSIONS;
   const registerTerminalProcesses = options.registerTerminalProcesses ?? (() => Effect.void);
   const unregisterTerminal = options.unregisterTerminal ?? (() => Effect.void);
+
+  const findPythonVenv = Effect.fn("terminal.findPythonVenv")(function* (
+    session: TerminalSessionState,
+  ) {
+    const projectRoot = session.runtimeEnv?.T3CODE_PROJECT_ROOT;
+    const searchRoots = [session.cwd, projectRoot].filter(
+      (root, index, roots): root is string => Boolean(root) && roots.indexOf(root) === index,
+    );
+
+    for (const root of searchRoots) {
+      for (const directoryName of PYTHON_VENV_DIRECTORY_NAMES) {
+        const venvPath = path.join(root, directoryName);
+        const configPath = path.join(venvPath, "pyvenv.cfg");
+        const exists = yield* fileSystem.exists(configPath).pipe(Effect.orElseSucceed(() => false));
+        if (!exists) continue;
+        return venvPath;
+      }
+    }
+
+    return null;
+  });
 
   yield* fileSystem.makeDirectory(logsDir, { recursive: true }).pipe(Effect.orDie);
 
@@ -1922,6 +1966,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           Effect.gen(function* () {
             const shellCandidates = resolveShellCandidates(shellResolver, platform, baseEnv);
             const terminalEnv = createTerminalSpawnEnv(baseEnv, session.runtimeEnv);
+            const pythonVenv = yield* findPythonVenv(session);
             const spawnResult = yield* trySpawn(shellCandidates, terminalEnv, session);
             ptyProcess = spawnResult.process;
             startedShell = spawnResult.shellLabel;
@@ -1953,6 +1998,22 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
               eventStamp = advanceEventSequence(session);
               return [undefined, state] as const;
             });
+
+            if (pythonVenv) {
+              yield* Effect.try({
+                try: () =>
+                  spawnResult.process.write(
+                    pythonVenvActivationCommand(pythonVenv, spawnResult.shellLabel, platform),
+                  ),
+                catch: (cause) =>
+                  new TerminalWriteError({
+                    threadId: session.threadId,
+                    terminalId: session.terminalId,
+                    terminalPid: processPid,
+                    cause,
+                  }),
+              });
+            }
 
             yield* publishEvent({
               type: eventType,

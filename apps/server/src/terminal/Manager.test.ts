@@ -1475,6 +1475,93 @@ it.layer(
     }),
   );
 
+  it.effect("automatically activates a project-local Python virtual environment", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const platform = yield* HostProcessPlatform;
+      const { manager, ptyAdapter, baseDir } = yield* createManager(5, {
+        shellResolver: () => (platform === "win32" ? "pwsh.exe" : "/bin/zsh"),
+        env: {
+          PATH: platform === "win32" ? "C:\\Windows\\System32" : "/usr/local/bin:/usr/bin:/bin",
+          PYTHONHOME: "/inherited/python",
+        },
+      });
+      const cwd = path.join(baseDir, "python-project");
+      const venvPath = path.join(cwd, "venv");
+      yield* makeDirectory(venvPath);
+      yield* writeFileString(path.join(venvPath, "pyvenv.cfg"), "home = /usr/bin\n");
+
+      yield* manager.open(openInput({ cwd }));
+
+      const spawnInput = ptyAdapter.spawnInputs[0];
+      expect(spawnInput).toBeDefined();
+      if (!spawnInput) return;
+      expect(spawnInput.env.VIRTUAL_ENV).toBeUndefined();
+      expect(spawnInput.env.PYTHONHOME).toBe("/inherited/python");
+      expect(ptyAdapter.processes[0]?.writes).toEqual([
+        platform === "win32"
+          ? `. '${venvPath}\\Scripts\\Activate.ps1'; Clear-Host\r`
+          : ` . '${venvPath}/bin/activate'; printf '\\033[2J\\033[H'\r`,
+      ]);
+    }),
+  );
+
+  it.effect("prefers .venv and can activate the project environment for a worktree", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const platform = yield* HostProcessPlatform;
+      const { manager, ptyAdapter, baseDir } = yield* createManager(5, {
+        shellResolver: () => (platform === "win32" ? "pwsh.exe" : "/bin/zsh"),
+        env: { PATH: platform === "win32" ? "C:\\Windows\\System32" : "/usr/bin:/bin" },
+      });
+      const projectRoot = path.join(baseDir, "python-project");
+      const worktreePath = path.join(baseDir, "worktree");
+      const dotVenvPath = path.join(projectRoot, ".venv");
+      const venvPath = path.join(projectRoot, "venv");
+      yield* makeDirectory(worktreePath);
+      yield* makeDirectory(dotVenvPath);
+      yield* makeDirectory(venvPath);
+      yield* writeFileString(path.join(dotVenvPath, "pyvenv.cfg"), "home = /usr/bin\n");
+      yield* writeFileString(path.join(venvPath, "pyvenv.cfg"), "home = /usr/bin\n");
+
+      yield* manager.open(
+        openInput({
+          cwd: worktreePath,
+          worktreePath,
+          env: { T3CODE_PROJECT_ROOT: projectRoot },
+        }),
+      );
+
+      const spawnInput = ptyAdapter.spawnInputs[0];
+      expect(spawnInput).toBeDefined();
+      if (!spawnInput) return;
+      expect(ptyAdapter.processes[0]?.writes).toEqual([
+        platform === "win32"
+          ? `. '${dotVenvPath}\\Scripts\\Activate.ps1'; Clear-Host\r`
+          : ` . '${dotVenvPath}/bin/activate'; printf '\\033[2J\\033[H'\r`,
+      ]);
+    }),
+  );
+
+  it.effect("leaves non-Python project terminal environments unchanged", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const { manager, ptyAdapter, baseDir } = yield* createManager(5, {
+        env: { PATH: "/usr/bin:/bin" },
+      });
+      const cwd = path.join(baseDir, "non-python-project");
+      yield* makeDirectory(cwd);
+
+      yield* manager.open(openInput({ cwd }));
+
+      const spawnInput = ptyAdapter.spawnInputs[0];
+      expect(spawnInput).toBeDefined();
+      if (!spawnInput) return;
+      expect(spawnInput.env).toEqual({ PATH: "/usr/bin:/bin" });
+      expect(ptyAdapter.processes[0]?.writes).toEqual([]);
+    }),
+  );
+
   it.effect("starts zsh with prompt spacer disabled to avoid `%` end markers", () =>
     Effect.gen(function* () {
       if ((yield* HostProcessPlatform) === "win32") return;
