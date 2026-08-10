@@ -702,6 +702,19 @@ describe("resolveShortcutCommand", () => {
     );
   });
 
+  it("matches backquote shortcuts when Chrome reports a dead key", () => {
+    const keybindings = compile([{ shortcut: modShortcut("`"), command: "terminal.toggle" }]);
+
+    assert.strictEqual(
+      resolveShortcutCommand(
+        event({ key: "Dead", code: "Backquote", ctrlKey: true }),
+        keybindings,
+        { platform: "Linux" },
+      ),
+      "terminal.toggle",
+    );
+  });
+
   it("matches Option-modified letters using the physical key code on macOS", () => {
     assert.strictEqual(
       resolveShortcutCommand(

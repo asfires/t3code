@@ -59,6 +59,7 @@ import {
   buildWhenVariableOptions,
   commandLabel,
   DEFAULT_WHEN_VARIABLE,
+  formatKeybindingInputValue,
   isKnownWhenVariable,
   keybindingConflictLabels,
   keybindingFromKeyboardEvent,
@@ -850,7 +851,7 @@ function KeybindingTableRow({
             data-keybinding-capture=""
             autoFocus={isRecording}
             aria-label={`Keybinding for ${commandLabel(row.command)}`}
-            value={isRecording ? "" : keyDraft}
+            value={isRecording ? "" : formatKeybindingInputValue(keyDraft, navigator.platform)}
             placeholder={isRecording ? "Press shortcut" : "Unassigned"}
             className={cn(
               "h-7 w-44 rounded-md font-mono text-[12px] sm:h-7",
@@ -1015,7 +1016,7 @@ function NewKeybindingTableRow({
         <Input
           data-keybinding-capture=""
           aria-label={`Keybinding for ${commandLabelText}`}
-          value={isRecording ? "" : keyDraft}
+          value={isRecording ? "" : formatKeybindingInputValue(keyDraft, navigator.platform)}
           placeholder={isRecording ? "Press shortcut" : "Unassigned"}
           className={cn(
             "h-7 w-44 rounded-md font-mono text-[12px] sm:h-7",

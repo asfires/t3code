@@ -7,9 +7,11 @@ import {
 } from "@t3tools/contracts";
 import {
   DEFAULT_RESOLVED_KEYBINDINGS,
+  parseKeybindingShortcut,
   parseKeybindingWhenExpression,
 } from "@t3tools/shared/keybindings";
 
+import { formatShortcutLabel } from "../../keybindings";
 import { isMacPlatform } from "../../lib/utils";
 
 export type KeybindingSource = "Default" | "Custom" | "Project";
@@ -285,7 +287,11 @@ function titleCaseCommandSegment(segment: string): string {
   return words.join(" ");
 }
 
-export function normalizeShortcutKeyToken(key: string): string | null {
+const KEY_TOKEN_BY_CODE: Readonly<Record<string, string>> = {
+  Backquote: "`",
+};
+
+export function normalizeShortcutKeyToken(key: string, code?: string): string | null {
   const normalized = key.toLowerCase();
   if (
     normalized === "meta" ||
@@ -312,14 +318,24 @@ export function normalizeShortcutKeyToken(key: string): string | null {
     return normalized;
   }
   if (normalized === "pageup" || normalized === "pagedown") return normalized;
+  if (normalized === "dead" || normalized === "unidentified") {
+    return code ? (KEY_TOKEN_BY_CODE[code] ?? null) : null;
+  }
   return null;
 }
 
+export function formatKeybindingInputValue(value: string, platform: string): string {
+  const shortcut = parseKeybindingShortcut(value);
+  return shortcut ? formatShortcutLabel(shortcut, platform) : value;
+}
+
 export function keybindingFromKeyboardEvent(
-  event: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey">,
+  event: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey"> & {
+    code?: string;
+  },
   platform: string,
 ): string | null {
-  const keyToken = normalizeShortcutKeyToken(event.key);
+  const keyToken = normalizeShortcutKeyToken(event.key, event.code);
   if (!keyToken) return null;
 
   const parts: string[] = [];

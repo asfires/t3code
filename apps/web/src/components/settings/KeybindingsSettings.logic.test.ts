@@ -6,6 +6,7 @@ import {
   buildKeybindingCommandOptions,
   buildWhenVariableOptions,
   commandLabel,
+  formatKeybindingInputValue,
   keybindingConflictLabels,
   keybindingFromKeyboardEvent,
   parseWhenExpressionDraft,
@@ -62,6 +63,27 @@ describe("KeybindingsSettings.logic", () => {
         "Win32",
       ),
     ).toBe("mod+shift+k");
+  });
+
+  it("captures Ctrl+Backquote when Chrome reports a dead key on Linux", () => {
+    expect(
+      keybindingFromKeyboardEvent(
+        {
+          key: "Dead",
+          code: "Backquote",
+          metaKey: false,
+          ctrlKey: true,
+          altKey: false,
+          shiftKey: false,
+        },
+        "Linux x86_64",
+      ),
+    ).toBe("mod+`");
+  });
+
+  it("formats portable mod shortcuts using the current platform", () => {
+    expect(formatKeybindingInputValue("mod+k", "Linux x86_64")).toBe("Ctrl+K");
+    expect(formatKeybindingInputValue("mod+k", "MacIntel")).toBe("⌘K");
   });
 
   it("serializes shortcuts and when expressions for upserts", () => {
