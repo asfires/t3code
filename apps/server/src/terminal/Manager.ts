@@ -83,6 +83,14 @@ const DEFAULT_OPEN_COLS = 120;
 const DEFAULT_OPEN_ROWS = 30;
 const TERMINAL_ENV_BLOCKLIST = new Set(["PORT", "ELECTRON_RENDERER_PORT", "ELECTRON_RUN_AS_NODE"]);
 const PYTHON_VENV_DIRECTORY_NAMES = [".venv", "venv"] as const;
+const PYTHON_PROJECT_MARKER_NAMES = new Set([
+  "pyproject.toml",
+  "requirements.txt",
+  "setup.py",
+  "setup.cfg",
+  "Pipfile",
+]);
+const MAX_PYTHON_VENV_STARTUP_OUTPUT_LENGTH = 65_536;
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 const MAX_TERMINAL_LABEL_LENGTH = 128;
 
@@ -1172,22 +1180,83 @@ function quotePosixShellArgument(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
+interface PythonVenvActivationBootstrap {
+  readonly venvPath: string;
+  readonly command: string;
+  readonly successMarker: string;
+  readonly failureMarker: string;
+}
+
 function pythonVenvActivationCommand(
   venvPath: string,
   shellLabel: string,
   platform: NodeJS.Platform,
-): string {
+  processPid: number,
+): PythonVenvActivationBootstrap {
+  const markerKey = `T3_VENV_${processPid}`;
+
   if (platform !== "win32") {
     const activationScript = quotePosixShellArgument(`${venvPath}/bin/activate`);
-    return ` . ${activationScript}; printf '\\033[2J\\033[H'\r`;
+    return {
+      venvPath,
+      command: ` . ${activationScript} && printf '\\036%s:0\\037' '${markerKey}' || printf '\\036%s:1\\037' '${markerKey}'\r`,
+      successMarker: `\x1e${markerKey}:0\x1f`,
+      failureMarker: `\x1e${markerKey}:1\x1f`,
+    };
   }
 
   if (/powershell|pwsh/i.test(shellLabel)) {
     const activationScript = `${venvPath}\\Scripts\\Activate.ps1`.replaceAll("'", "''");
-    return `. '${activationScript}'; Clear-Host\r`;
+    const markerExpression = (status: 0 | 1) => `"$([char]30)${markerKey}:${status}$([char]31)"`;
+    return {
+      venvPath,
+      command: `. '${activationScript}'; if ($?) { [Console]::Write(${markerExpression(0)}) } else { [Console]::Write(${markerExpression(1)}) }\r`,
+      successMarker: `\x1e${markerKey}:0\x1f`,
+      failureMarker: `\x1e${markerKey}:1\x1f`,
+    };
   }
 
-  return `call "${venvPath}\\Scripts\\activate.bat" && cls\r`;
+  return {
+    venvPath,
+    command: `call "${venvPath}\\Scripts\\activate.bat" && echo __T3^_VENV_${processPid}_0__ || echo __T3^_VENV_${processPid}_1__\r`,
+    successMarker: `__T3_VENV_${processPid}_0__`,
+    failureMarker: `__T3_VENV_${processPid}_1__`,
+  };
+}
+
+interface PythonVenvStartupOutputGate {
+  readonly venvPath: string;
+  readonly successMarker: string;
+  readonly failureMarker: string;
+  bufferedOutput: string;
+}
+
+function filterPythonVenvStartupOutput(
+  gate: PythonVenvStartupOutputGate,
+  data: string,
+): { readonly output: string; readonly complete: boolean } {
+  gate.bufferedOutput += data;
+  const successIndex = gate.bufferedOutput.indexOf(gate.successMarker);
+  const failureIndex = gate.bufferedOutput.indexOf(gate.failureMarker);
+  const succeeded = successIndex >= 0 && (failureIndex < 0 || successIndex < failureIndex);
+  const markerIndex = succeeded ? successIndex : failureIndex;
+
+  if (markerIndex >= 0) {
+    const marker = succeeded ? gate.successMarker : gate.failureMarker;
+    const remainingOutput = gate.bufferedOutput.slice(markerIndex + marker.length);
+    return {
+      output: succeeded
+        ? remainingOutput
+        : `\r\nAutomatic Python virtual environment activation failed: ${gate.venvPath}\r\n${remainingOutput}`,
+      complete: true,
+    };
+  }
+
+  if (gate.bufferedOutput.length >= MAX_PYTHON_VENV_STARTUP_OUTPUT_LENGTH) {
+    return { output: gate.bufferedOutput, complete: true };
+  }
+
+  return { output: "", complete: false };
 }
 
 function normalizedRuntimeEnv(
@@ -1264,6 +1333,27 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const registerTerminalProcesses = options.registerTerminalProcesses ?? (() => Effect.void);
   const unregisterTerminal = options.unregisterTerminal ?? (() => Effect.void);
 
+  const isPythonVenv = Effect.fn("terminal.isPythonVenv")(function* (venvPath: string) {
+    const hasConfig = yield* fileSystem
+      .exists(path.join(venvPath, "pyvenv.cfg"))
+      .pipe(Effect.orElseSucceed(() => false));
+    if (!hasConfig) return false;
+
+    const activationScripts =
+      platform === "win32"
+        ? [
+            path.join(venvPath, "Scripts", "Activate.ps1"),
+            path.join(venvPath, "Scripts", "activate.bat"),
+          ]
+        : [path.join(venvPath, "bin", "activate")];
+    for (const activationScript of activationScripts) {
+      if (yield* fileSystem.exists(activationScript).pipe(Effect.orElseSucceed(() => false))) {
+        return true;
+      }
+    }
+    return false;
+  });
+
   const findPythonVenv = Effect.fn("terminal.findPythonVenv")(function* (
     session: TerminalSessionState,
   ) {
@@ -1275,14 +1365,28 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     for (const root of searchRoots) {
       for (const directoryName of PYTHON_VENV_DIRECTORY_NAMES) {
         const venvPath = path.join(root, directoryName);
-        const configPath = path.join(venvPath, "pyvenv.cfg");
-        const exists = yield* fileSystem.exists(configPath).pipe(Effect.orElseSucceed(() => false));
-        if (!exists) continue;
-        return venvPath;
+        if (yield* isPythonVenv(venvPath)) return venvPath;
       }
     }
 
-    return null;
+    const discovered = new Set<string>();
+    for (const root of searchRoots) {
+      const entries = yield* fileSystem
+        .readDirectory(root)
+        .pipe(Effect.orElseSucceed(() => [] as Array<string>));
+      const isPythonProject = entries.some(
+        (entry) => PYTHON_PROJECT_MARKER_NAMES.has(entry) || entry.endsWith(".py"),
+      );
+      if (!isPythonProject) continue;
+
+      for (const entry of entries) {
+        if (PYTHON_VENV_DIRECTORY_NAMES.some((directoryName) => directoryName === entry)) continue;
+        const candidate = path.join(root, entry);
+        if (yield* isPythonVenv(candidate)) discovered.add(candidate);
+      }
+    }
+
+    return discovered.size === 1 ? (discovered.values().next().value ?? null) : null;
   });
 
   yield* fileSystem.makeDirectory(logsDir, { recursive: true }).pipe(Effect.orDie);
@@ -1972,17 +2076,48 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             startedShell = spawnResult.shellLabel;
 
             const processPid = ptyProcess.pid;
+            const activationBootstrap = pythonVenv
+              ? pythonVenvActivationCommand(
+                  pythonVenv,
+                  spawnResult.shellLabel,
+                  platform,
+                  processPid,
+                )
+              : null;
+            let startupOutputGate: PythonVenvStartupOutputGate | null = activationBootstrap
+              ? {
+                  venvPath: activationBootstrap.venvPath,
+                  successMarker: activationBootstrap.successMarker,
+                  failureMarker: activationBootstrap.failureMarker,
+                  bufferedOutput: "",
+                }
+              : null;
             const unsubscribeData = ptyProcess.onData((data) => {
-              if (!enqueueProcessEvent(session, processPid, { type: "output", data })) {
+              let output = data;
+              if (startupOutputGate) {
+                const filtered = filterPythonVenvStartupOutput(startupOutputGate, data);
+                output = filtered.output;
+                if (filtered.complete) startupOutputGate = null;
+              }
+              if (output.length === 0) return;
+              if (!enqueueProcessEvent(session, processPid, { type: "output", data: output })) {
                 return;
               }
               runFork(drainProcessEvents(session, processPid));
             });
             const unsubscribeExit = ptyProcess.onExit((event) => {
-              if (!enqueueProcessEvent(session, processPid, { type: "exit", event })) {
-                return;
+              let shouldDrain = false;
+              if (startupOutputGate) {
+                const { venvPath } = startupOutputGate;
+                startupOutputGate = null;
+                shouldDrain = enqueueProcessEvent(session, processPid, {
+                  type: "output",
+                  data: `\r\nAutomatic Python virtual environment activation did not complete: ${venvPath}\r\n`,
+                });
               }
-              runFork(drainProcessEvents(session, processPid));
+              shouldDrain =
+                enqueueProcessEvent(session, processPid, { type: "exit", event }) || shouldDrain;
+              if (shouldDrain) runFork(drainProcessEvents(session, processPid));
             });
 
             let eventStamp: ReturnType<typeof advanceEventSequence> = {
@@ -1999,12 +2134,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
               return [undefined, state] as const;
             });
 
-            if (pythonVenv) {
+            if (activationBootstrap) {
               yield* Effect.try({
-                try: () =>
-                  spawnResult.process.write(
-                    pythonVenvActivationCommand(pythonVenv, spawnResult.shellLabel, platform),
-                  ),
+                try: () => spawnResult.process.write(activationBootstrap.command),
                 catch: (cause) =>
                   new TerminalWriteError({
                     threadId: session.threadId,
