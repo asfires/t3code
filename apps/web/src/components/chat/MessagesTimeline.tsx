@@ -2178,6 +2178,12 @@ function mcpToolCallMetadata(toolData: unknown): unknown {
   return metadata;
 }
 
+// Some providers substitute filler text for empty command output (e.g. the
+// Claude Code CLI emits "(Bash completed with no output)") instead of an empty
+// result; treat those like no output so the placeholder renders consistently.
+const EMPTY_COMMAND_OUTPUT_SENTINEL =
+  /^\((?:[^()\n]+ )?completed with no output\)$|^\(no (?:output|content)\)$/i;
+
 type ToolCallExpandedBodyBlock =
   | {
       readonly kind: "output";
@@ -2224,7 +2230,11 @@ export function buildToolCallExpandedBody(
   const resultOutput = extractToolResultOutput(workEntry.toolData);
   if (resultOutput) {
     const trimmed = resultOutput.text.trim();
-    if (trimmed && !seen.has(trimmed)) {
+    const isEmptyOutputSentinel =
+      workEntry.itemType === "command_execution" &&
+      !resultOutput.isError &&
+      EMPTY_COMMAND_OUTPUT_SENTINEL.test(trimmed);
+    if (trimmed && !isEmptyOutputSentinel && !seen.has(trimmed)) {
       seen.add(trimmed);
       if (resultOutput.truncated) {
         seen.add("Output truncated");
@@ -2275,7 +2285,7 @@ export const WorkEntryExpandedBody = memo(function WorkEntryExpandedBody(props: 
       {blocks.map((block) =>
         block.kind === "output" ? (
           <div key={`output:${block.text}`}>
-            <pre className="max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-secondary-label text-[11px] leading-relaxed select-text">
+            <pre className="max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] text-foreground/80 leading-relaxed select-text">
               {block.isError ? "Error output\n" : null}
               {block.text}
               {block.truncated ? "\n\nOutput truncated" : null}
@@ -2562,6 +2572,8 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
               {preview && (
                 <span
                   className={cn(
+                    // Command text sits a step below the foreground output
+                    // under it so wrapped commands don't blend into the output.
                     "min-w-0 flex-1 text-secondary-label",
                     previewIsCommand && "font-mono text-[11px]",
                     commandUnfurled
