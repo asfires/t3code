@@ -18,6 +18,175 @@ function asTrimmedString(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+export const MAX_PROJECTED_TOOL_RESULT_CHARS = 50_000;
+
+const PROJECTED_TOOL_RESULT_TRUNCATION_MARKER = "…[truncated]";
+
+type ValuePath = ReadonlyArray<string | number>;
+
+function replaceStringAtPath(value: unknown, path: ValuePath, replacement: string): unknown {
+  if (path.length === 0) {
+    return replacement;
+  }
+  const [head, ...tail] = path;
+  if (typeof head === "number" && Array.isArray(value)) {
+    return value.map((entry, index) =>
+      index === head ? replaceStringAtPath(entry, tail, replacement) : entry,
+    );
+  }
+  const record = asRecord(value);
+  if (typeof head === "string" && record) {
+    return {
+      ...record,
+      [head]: replaceStringAtPath(record[head], tail, replacement),
+    };
+  }
+  return value;
+}
+
+function findDominantTextPath(
+  value: unknown,
+  path: ValuePath = [],
+): { readonly path: ValuePath; readonly text: string } | null {
+  if (typeof value === "string") {
+    return { path, text: value };
+  }
+
+  let dominant: { readonly path: ValuePath; readonly text: string } | null = null;
+  const entries: ReadonlyArray<readonly [string | number, unknown]> = Array.isArray(value)
+    ? value.map((entry, index) => [index, entry] as const)
+    : Object.entries(asRecord(value) ?? {});
+  for (const [key, entry] of entries) {
+    const candidate = findDominantTextPath(entry, [...path, key]);
+    if (candidate && (!dominant || candidate.text.length > dominant.text.length)) {
+      dominant = candidate;
+    }
+  }
+  return dominant;
+}
+
+function truncateTextInValue(
+  value: unknown,
+  path: ValuePath,
+  text: string,
+  serializedTotal: string,
+): unknown | null {
+  let keep = Math.max(
+    0,
+    text.length -
+      (serializedTotal.length - MAX_PROJECTED_TOOL_RESULT_CHARS) -
+      PROJECTED_TOOL_RESULT_TRUNCATION_MARKER.length,
+  );
+  let candidate = replaceStringAtPath(
+    value,
+    path,
+    `${text.slice(0, keep)}${PROJECTED_TOOL_RESULT_TRUNCATION_MARKER}`,
+  );
+
+  let serializedCandidate: string | undefined;
+  try {
+    serializedCandidate = JSON.stringify(candidate);
+  } catch {
+    return null;
+  }
+  if (
+    serializedCandidate !== undefined &&
+    serializedCandidate.length <= MAX_PROJECTED_TOOL_RESULT_CHARS
+  ) {
+    return candidate;
+  }
+
+  const remainingOvershoot =
+    (serializedCandidate?.length ?? MAX_PROJECTED_TOOL_RESULT_CHARS + 1) -
+    MAX_PROJECTED_TOOL_RESULT_CHARS;
+  keep = Math.max(0, keep - remainingOvershoot);
+  candidate = replaceStringAtPath(
+    value,
+    path,
+    `${text.slice(0, keep)}${PROJECTED_TOOL_RESULT_TRUNCATION_MARKER}`,
+  );
+  try {
+    serializedCandidate = JSON.stringify(candidate);
+  } catch {
+    return null;
+  }
+  return serializedCandidate !== undefined &&
+    serializedCandidate.length <= MAX_PROJECTED_TOOL_RESULT_CHARS
+    ? candidate
+    : null;
+}
+
+function truncateSerializedValue(serialized: string): string {
+  const serializedTotal = JSON.stringify(serialized);
+  const keep = Math.max(
+    0,
+    serialized.length -
+      (serializedTotal.length - MAX_PROJECTED_TOOL_RESULT_CHARS) -
+      PROJECTED_TOOL_RESULT_TRUNCATION_MARKER.length,
+  );
+  const candidate = `${serialized.slice(0, keep)}${PROJECTED_TOOL_RESULT_TRUNCATION_MARKER}`;
+  return JSON.stringify(candidate).length <= MAX_PROJECTED_TOOL_RESULT_CHARS
+    ? candidate
+    : PROJECTED_TOOL_RESULT_TRUNCATION_MARKER;
+}
+
+function capProjectedToolValue(value: unknown): {
+  readonly value: unknown;
+  readonly truncated: boolean;
+} {
+  let serialized: string | undefined;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    return { value, truncated: false };
+  }
+  if (serialized === undefined || serialized.length <= MAX_PROJECTED_TOOL_RESULT_CHARS) {
+    return { value, truncated: false };
+  }
+
+  const dominant = findDominantTextPath(value);
+  const truncatedValue = dominant
+    ? truncateTextInValue(value, dominant.path, dominant.text, serialized)
+    : null;
+  if (truncatedValue !== null) {
+    return { value: truncatedValue, truncated: true };
+  }
+
+  return {
+    value: truncateSerializedValue(serialized),
+    truncated: true,
+  };
+}
+
+const OUTPUT_TOOL_FIELD_KEYS = new Set(["result", "rawOutput", "state", "aggregatedOutput"]);
+
+function capToolFields(
+  source: Record<string, unknown>,
+  target: Record<string, unknown>,
+  options: {
+    readonly capKeys: ReadonlyArray<string>;
+    readonly copyKeys: ReadonlyArray<string>;
+  },
+): boolean {
+  let outputTruncated = false;
+  for (const key of options.copyKeys) {
+    if (key in source) {
+      target[key] = source[key];
+    }
+  }
+  for (const key of options.capKeys) {
+    if (!(key in source)) {
+      continue;
+    }
+    const capped = capProjectedToolValue(source[key]);
+    target[key] = capped.value;
+    if (OUTPUT_TOOL_FIELD_KEYS.has(key)) {
+      outputTruncated ||= capped.truncated;
+    }
+  }
+  return outputTruncated;
+}
+
 function pushChangedFile(target: string[], seen: Set<string>, value: unknown): void {
   const normalized = asTrimmedString(value);
   if (!normalized || seen.has(normalized)) {
@@ -80,54 +249,30 @@ function collectChangedFiles(
   }
 }
 
-function projectCommandData(data: Record<string, unknown>): Record<string, unknown> | undefined {
+function projectCommandData(data: Record<string, unknown>): {
+  readonly item: Record<string, unknown> | undefined;
+  readonly resultTruncated: boolean;
+} {
   const item = asRecord(data.item);
   if (!item) {
-    return undefined;
+    return { item: undefined, resultTruncated: false };
   }
 
   const projectedItem: Record<string, unknown> = {};
-  if ("command" in item) {
-    projectedItem.command = item.command;
-  }
+  const resultTruncated = capToolFields(item, projectedItem, {
+    capKeys: ["toolName", "input", "result", "aggregatedOutput"],
+    copyKeys: ["command", "exitCode", "status"],
+  });
 
-  const input = asRecord(item.input);
-  if (input && "command" in input) {
-    projectedItem.input = { command: input.command };
-  }
-
-  const result = asRecord(item.result);
-  if (result && "command" in result) {
-    projectedItem.result = { command: result.command };
-  }
-
-  return Object.keys(projectedItem).length > 0 ? projectedItem : undefined;
-}
-
-function summarizeToolTextOutput(value: string): string | null {
-  const lines: string[] = [];
-  for (const rawLine of value.split(/\r?\n/u)) {
-    const line = rawLine.replace(/\s+/g, " ").trim();
-    if (line.length > 0) {
-      lines.push(line);
-    }
-  }
-
-  const firstLine = lines.find((line) => line !== "```");
-  if (firstLine) {
-    return firstLine.length <= 84 ? firstLine : `${firstLine.slice(0, 83).trimEnd()}…`;
-  }
-  if (lines.length > 1) {
-    return `${lines.length.toLocaleString()} lines`;
-  }
-  return null;
+  return {
+    item: Object.keys(projectedItem).length > 0 ? projectedItem : undefined,
+    resultTruncated,
+  };
 }
 
 /**
- * Fields of an MCP tool-call item both clients render in the expanded
- * work-log row. Everything else — notably `result`, which carries the full
- * tool output and dominates wire size on MCP-heavy threads — is summarized
- * or dropped. Full payloads remain in persistence.
+ * Fields of an MCP tool-call item clients use for identity and presentation.
+ * Result content is retained separately under the tool-output cap.
  */
 const MCP_ITEM_KEPT_FIELDS = [
   "type",
@@ -141,122 +286,37 @@ const MCP_ITEM_KEPT_FIELDS = [
   "durationMs",
 ] as const;
 
-/**
- * Pulls renderable text out of an MCP tool result: either a Codex-style
- * `{content: [{type: "text", text}, ...]}` record or a raw Claude
- * `tool_result` block whose `content` is a string or block array.
- */
-function extractMcpResultText(result: unknown): string | null {
-  const record = asRecord(result);
-  if (!record) {
-    return typeof result === "string" ? result : null;
-  }
-  if (typeof record.content === "string") {
-    return record.content;
-  }
-  if (Array.isArray(record.content)) {
-    const texts: string[] = [];
-    for (const entry of record.content) {
-      const text = asRecord(entry)?.text;
-      if (typeof text === "string" && text.trim().length > 0) {
-        texts.push(text);
-      }
-    }
-    if (texts.length > 0) {
-      return texts.join("\n");
-    }
-  }
-  return null;
-}
-
-function summarizeMcpResult(result: unknown): Record<string, unknown> | undefined {
-  if (result === undefined || result === null) {
-    return undefined;
-  }
-  const text = extractMcpResultText(result);
-  const summary = text ? summarizeToolTextOutput(text) : null;
-  return summary ? { content: summary } : undefined;
-}
-
-/**
- * MCP tool calls carry full tool results (`data.item.result` on Codex,
- * `data.result` on Claude/OpenCode) that used to bypass slimming entirely to
- * keep the expanded-row UI working. Keep the fields the UI actually renders
- * and summarize the result like regular tool output.
- */
 function projectMcpToolCallData(data: Record<string, unknown>): Record<string, unknown> {
   const projectedData: Record<string, unknown> = {};
+  let resultTruncated = false;
 
   const item = asRecord(data.item);
   if (item) {
     const projectedItem: Record<string, unknown> = {};
-    for (const key of MCP_ITEM_KEPT_FIELDS) {
-      if (key in item) {
-        projectedItem[key] = item[key];
-      }
-    }
-    const result = summarizeMcpResult(item.result);
-    if (result) {
-      projectedItem.result = result;
-    }
+    resultTruncated ||= capToolFields(item, projectedItem, {
+      capKeys: ["result"],
+      copyKeys: MCP_ITEM_KEPT_FIELDS,
+    });
     projectedData.item = projectedItem;
   }
 
-  if ("toolName" in data) {
-    projectedData.toolName = data.toolName;
-  }
-  if ("input" in data) {
-    projectedData.input = data.input;
-  }
-  if (!item) {
-    const result = summarizeMcpResult(data.result);
-    if (result) {
-      projectedData.result = result;
-    }
-  }
-
-  if ("toolCallId" in data) {
-    projectedData.toolCallId = data.toolCallId;
-  }
-  if ("kind" in data) {
-    projectedData.kind = data.kind;
-  }
+  resultTruncated ||= capToolFields(data, projectedData, {
+    capKeys: item
+      ? ["toolName", "input", "rawOutput", "state"]
+      : ["toolName", "input", "result", "rawOutput", "state"],
+    copyKeys: ["tool", "toolCallId", "kind"],
+  });
 
   const changedFiles: string[] = [];
   collectChangedFiles(data, changedFiles, new Set<string>(), 0);
   if (changedFiles.length > 0) {
     projectedData.files = changedFiles.map((path) => ({ path }));
   }
+  if (resultTruncated) {
+    projectedData.resultTruncated = true;
+  }
 
   return projectedData;
-}
-
-function projectRawOutput(value: unknown): Record<string, unknown> | undefined {
-  const rawOutput = asRecord(value);
-  if (!rawOutput) {
-    return undefined;
-  }
-
-  if (typeof rawOutput.totalFiles === "number" && Number.isFinite(rawOutput.totalFiles)) {
-    return {
-      totalFiles: rawOutput.totalFiles,
-      ...(rawOutput.truncated === true ? { truncated: true } : {}),
-    };
-  }
-
-  const content = asTrimmedString(rawOutput.content);
-  if (content) {
-    const summary = summarizeToolTextOutput(content);
-    return summary ? { content: summary } : undefined;
-  }
-
-  const stdout = asTrimmedString(rawOutput.stdout);
-  if (stdout) {
-    const summary = summarizeToolTextOutput(stdout);
-    return summary ? { content: summary } : undefined;
-  }
-
-  return undefined;
 }
 
 /**
@@ -283,13 +343,20 @@ export function projectActivityPayload(
   }
 
   const projectedData: Record<string, unknown> = {};
-  const item = projectCommandData(data);
+  let resultTruncated = false;
+  const projectedCommandData = projectCommandData(data);
+  const item = projectedCommandData.item;
   if (item) {
     projectedData.item = item;
   }
-  if ("command" in data) {
-    projectedData.command = data.command;
-  }
+  resultTruncated ||= projectedCommandData.resultTruncated;
+  const itemResultWasRetained = item !== undefined && "result" in item;
+  resultTruncated ||= capToolFields(data, projectedData, {
+    capKeys: itemResultWasRetained
+      ? ["toolName", "input", "rawOutput", "state"]
+      : ["toolName", "input", "result", "rawOutput", "state"],
+    copyKeys: ["command", "tool", "toolCallId", "kind"],
+  });
 
   const changedFiles: string[] = [];
   collectChangedFiles(data, changedFiles, new Set<string>(), 0);
@@ -298,16 +365,8 @@ export function projectActivityPayload(
     projectedData.files = changedFiles.map((path) => ({ path }));
   }
 
-  if ("toolCallId" in data) {
-    projectedData.toolCallId = data.toolCallId;
-  }
-  if ("kind" in data) {
-    projectedData.kind = data.kind;
-  }
-
-  const rawOutput = projectRawOutput(data.rawOutput);
-  if (rawOutput) {
-    projectedData.rawOutput = rawOutput;
+  if (resultTruncated) {
+    projectedData.resultTruncated = true;
   }
 
   return {
@@ -394,7 +453,7 @@ function toolLifecycleIdentity(activity: OrchestrationThreadActivity): string | 
   if (itemType.length === 0 && label.length === 0 && detail.length === 0) {
     return null;
   }
-  return [itemType, label, detail].join("");
+  return [itemType, label, detail].join("\u001f");
 }
 
 /**
@@ -441,7 +500,7 @@ function dropSupersededToolUpdatedActivities(
     if (!identity) {
       continue;
     }
-    const key = `${activity.turnId ?? ""} ${identity}`;
+    const key = `${activity.turnId ?? ""}\u0000${identity}`;
     const indices = completionIndicesByKey.get(key);
     if (indices) {
       indices.push(index);
@@ -461,7 +520,7 @@ function dropSupersededToolUpdatedActivities(
     if (!identity) {
       return true;
     }
-    const indices = completionIndicesByKey.get(`${activity.turnId ?? ""} ${identity}`);
+    const indices = completionIndicesByKey.get(`${activity.turnId ?? ""}\u0000${identity}`);
     return !indices?.some((completionIndex) => completionIndex > index);
   });
 }

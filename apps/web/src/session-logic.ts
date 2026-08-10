@@ -862,10 +862,10 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   if (title) {
     entry.toolTitle = title;
   }
-  if (itemType === "mcp_tool_call") {
+  if (itemType) {
     const data = asRecord(payload?.data);
-    if (data?.item !== undefined) {
-      entry.toolData = data.item;
+    if (data) {
+      entry.toolData = data;
     }
   }
   if (itemType) {
@@ -1042,7 +1042,11 @@ function mergeDerivedWorkLogEntries(
   const collapseKey = next.collapseKey ?? previous.collapseKey;
   const toolCallId = next.toolCallId ?? previous.toolCallId;
   const toolLifecycleStatus = next.toolLifecycleStatus ?? previous.toolLifecycleStatus;
-  const toolData = next.toolData ?? previous.toolData;
+  const nextToolData = asRecord(next.toolData);
+  const nextToolDataHasContent =
+    nextToolData !== null &&
+    ["item", "result", "rawOutput", "state"].some((key) => key in nextToolData);
+  const toolData = nextToolDataHasContent ? next.toolData : previous.toolData;
   return {
     ...previous,
     ...next,
@@ -1078,7 +1082,7 @@ function deriveToolLifecycleCollapseKey(entry: DerivedWorkLogEntry): string | un
     entry.taskId &&
     (entry.activityKind === "task.progress" || entry.activityKind === "task.completed")
   ) {
-    return `task${entry.taskId}`;
+    return `task\u001f${entry.taskId}`;
   }
   if (entry.activityKind !== "tool.updated" && entry.activityKind !== "tool.completed") {
     return undefined;
@@ -1283,14 +1287,18 @@ function extractToolCommand(payload: Record<string, unknown> | null): {
   const item = asRecord(data?.item);
   const itemResult = asRecord(item?.result);
   const itemInput = asRecord(item?.input);
+  const dataInput = asRecord(data?.input);
   const itemType = asTrimmedString(payload?.itemType);
   const detail = asTrimmedString(payload?.detail);
   const candidates: unknown[] = [
     item?.command,
     itemInput?.command,
+    dataInput?.command,
     itemResult?.command,
     data?.command,
-    itemType === "command_execution" && detail ? stripTrailingExitCode(detail).output : null,
+    itemType === "command_execution" && detail
+      ? stripToolNamePrefix(stripTrailingExitCode(detail).output)
+      : null,
   ];
 
   for (const candidate of candidates) {
@@ -1420,6 +1428,12 @@ function extractToolDetail(
   }
 
   return null;
+}
+
+// Claude's command_execution detail is "Bash: <command>"; the prefix must not
+// leak into the extracted command (previews, copy-command).
+function stripToolNamePrefix(value: string | null): string | null {
+  return value ? value.replace(/^bash:\s+/i, "") : value;
 }
 
 function stripTrailingExitCode(value: string): {

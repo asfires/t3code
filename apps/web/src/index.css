@@ -399,6 +399,14 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
       var(--app-scrollbar-width) 100%;
   }
 
+  /* Truncated work-log previews fade out instead of ellipsizing: CSS
+     text-overflow keeps a trailing space at arbitrary clip points, which
+     reads as a "…" detached from the text at most zoom levels. */
+  .work-entry-preview-clip {
+    -webkit-mask-image: linear-gradient(to right, black calc(100% - 1.75rem), transparent);
+    mask-image: linear-gradient(to right, black calc(100% - 1.75rem), transparent);
+  }
+
   /* The pull request list sits directly under its topbar, so the tall band the chat and
      settings pages fade under would read as empty padding here. A shorter band keeps the
      fade while letting the controls start near the chrome. */

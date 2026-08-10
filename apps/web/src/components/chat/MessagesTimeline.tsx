@@ -44,7 +44,7 @@ import {
   resolveDiffThemeName,
   resolveFileDiffPath,
 } from "../../lib/diffRendering";
-import ChatMarkdown from "../ChatMarkdown";
+import ChatMarkdown, { reportMarkdownActionFailure } from "../ChatMarkdown";
 import {
   BotIcon,
   CheckIcon,
@@ -66,6 +66,7 @@ import {
   ZapIcon,
 } from "lucide-react";
 import { Button } from "../ui/button";
+import { CopyTextButton } from "../ui/copy-text-button";
 import { buildExpandedImagePreview, ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ProposedPlanCard } from "./ProposedPlanCard";
 import { ChangedFilesCard } from "./ChangedFilesTree";
@@ -2025,6 +2026,22 @@ function workEntryPreview(
     : `${displayPath} +${workEntry.changedFiles!.length - 1} more`;
 }
 
+function workEntryDisplayText(workEntry: TimelineWorkEntry, workspaceRoot: string | undefined) {
+  const heading = toolWorkEntryHeading(workEntry);
+  const rawPreview = workEntryPreview(workEntry, workspaceRoot);
+  const preview =
+    rawPreview &&
+    normalizeCompactToolLabel(rawPreview).toLowerCase() ===
+      normalizeCompactToolLabel(heading).toLowerCase()
+      ? null
+      : rawPreview;
+  return {
+    heading,
+    preview,
+    displayText: preview ? `${heading} - ${preview}` : heading,
+  };
+}
+
 function workEntryRawCommand(
   workEntry: Pick<TimelineWorkEntry, "command" | "rawCommand">,
 ): string | null {
@@ -2035,33 +2052,263 @@ function workEntryRawCommand(
   return rawCommand === workEntry.command.trim() ? null : rawCommand;
 }
 
-function buildToolCallExpandedBody(
+function asToolDataRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function prettyPrintToolValue(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function extractKnownToolText(value: unknown): string | null {
+  if (typeof value === "string") {
+    return value.trim().length > 0 ? value : null;
+  }
+  if (Array.isArray(value)) {
+    const texts = value
+      .map((entry) => extractKnownToolText(entry))
+      .filter((entry): entry is string => entry !== null);
+    return texts.length > 0 ? texts.join("\n") : null;
+  }
+  const record = asToolDataRecord(value);
+  if (!record) {
+    return null;
+  }
+  for (const key of [
+    "content",
+    "stdout",
+    "output",
+    "aggregatedOutput",
+    "text",
+    "diff",
+    "patch",
+    "error",
+    "message",
+  ]) {
+    if (!(key in record)) {
+      continue;
+    }
+    const text = extractKnownToolText(record[key]);
+    if (text) {
+      return text;
+    }
+  }
+  return null;
+}
+
+function extractToolResultOutput(toolData: unknown): {
+  readonly text: string;
+  readonly isError: boolean;
+  readonly truncated: boolean;
+} | null {
+  const data = asToolDataRecord(toolData);
+  if (!data) {
+    return null;
+  }
+  const item = asToolDataRecord(data.item);
+  const rawOutput = data.rawOutput;
+  const state = data.state;
+  const result = data.result ?? item?.result;
+  const content = data.content;
+  const candidates = [
+    { kind: "result", value: result },
+    { kind: "rawOutput", value: rawOutput },
+    { kind: "state", value: state },
+    { kind: "content", value: content },
+    { kind: "item", value: item },
+  ] as const;
+  for (const candidate of candidates) {
+    const text = extractKnownToolText(candidate.value);
+    if (!text) {
+      continue;
+    }
+    const record = asToolDataRecord(candidate.value);
+    return {
+      text,
+      isError:
+        candidate.kind === "result"
+          ? record?.is_error === true
+          : candidate.kind === "state"
+            ? record?.status === "error" || record?.error != null
+            : candidate.kind === "item"
+              ? record?.status === "failed" ||
+                (typeof record?.exitCode === "number" && record.exitCode !== 0)
+              : false,
+      truncated: data.resultTruncated === true,
+    };
+  }
+
+  const fallback = result ?? content;
+  if (fallback === undefined || fallback === null) {
+    return null;
+  }
+  const text = prettyPrintToolValue(fallback);
+  if (text.trim().length === 0) {
+    return null;
+  }
+  return {
+    text,
+    isError: fallback === result && asToolDataRecord(result)?.is_error === true,
+    truncated: data.resultTruncated === true,
+  };
+}
+
+function mcpToolCallMetadata(toolData: unknown): unknown {
+  const data = asToolDataRecord(toolData);
+  const source = asToolDataRecord(data?.item) ?? data;
+  if (!source) {
+    return toolData;
+  }
+  const {
+    result: _result,
+    rawOutput: _rawOutput,
+    state: _state,
+    resultTruncated: _resultTruncated,
+    ...metadata
+  } = source;
+  return metadata;
+}
+
+type ToolCallExpandedBodyBlock =
+  | {
+      readonly kind: "output";
+      readonly text: string;
+      readonly isError: boolean;
+      readonly truncated: boolean;
+    }
+  | { readonly kind: "empty" }
+  | { readonly kind: "text"; readonly text: string };
+
+export interface ToolCallExpandedBody {
+  readonly blocks: readonly ToolCallExpandedBodyBlock[];
+  readonly copyableCommand?: string;
+}
+
+export function buildToolCallExpandedBody(
   workEntry: TimelineWorkEntry,
   workspaceRoot: string | undefined,
-): string | null {
-  const blocks: string[] = [];
+): ToolCallExpandedBody | null {
+  const { heading, preview, displayText } = workEntryDisplayText(workEntry, workspaceRoot);
+  const seen = new Set(
+    [heading, preview, displayText]
+      .filter((value): value is string => value !== null)
+      .map((value) => value.trim())
+      .filter(Boolean),
+  );
+  const blocks: ToolCallExpandedBodyBlock[] = [];
+  const copyableCommand =
+    workEntry.itemType === "command_execution"
+      ? (workEntry.rawCommand ?? workEntry.command)?.trim() || undefined
+      : undefined;
+  const addTextBlock = (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed || seen.has(trimmed)) {
+      return;
+    }
+    seen.add(trimmed);
+    blocks.push({ kind: "text", text: trimmed });
+  };
   if (workEntry.itemType === "mcp_tool_call" && workEntry.toolData !== undefined) {
-    blocks.push(`MCP call\n${JSON.stringify(workEntry.toolData, null, 2)}`);
+    addTextBlock(`MCP call\n${prettyPrintToolValue(mcpToolCallMetadata(workEntry.toolData))}`);
   }
-  const raw = workEntryRawCommand(workEntry);
-  if (raw?.trim()) {
-    blocks.push(raw.trim());
-  } else if (workEntry.command?.trim()) {
-    blocks.push(workEntry.command.trim());
+  let hasOutput = false;
+  const resultOutput = extractToolResultOutput(workEntry.toolData);
+  if (resultOutput) {
+    const trimmed = resultOutput.text.trim();
+    if (trimmed && !seen.has(trimmed)) {
+      seen.add(trimmed);
+      if (resultOutput.truncated) {
+        seen.add("Output truncated");
+      }
+      blocks.push({ kind: "output", ...resultOutput });
+      hasOutput = true;
+    }
   }
-  if (workEntry.detail?.trim()) {
-    blocks.push(workEntry.detail.trim());
+  if (workEntry.itemType === "command_execution") {
+    if (!hasOutput) {
+      blocks.push({ kind: "empty" });
+    }
+  } else {
+    const raw = workEntryRawCommand(workEntry);
+    if (raw?.trim()) {
+      addTextBlock(raw);
+    } else if (workEntry.command?.trim()) {
+      addTextBlock(workEntry.command);
+    }
+    if (workEntry.detail?.trim()) {
+      addTextBlock(workEntry.detail);
+    }
   }
   const changedFiles = workEntry.changedFiles ?? [];
   if (changedFiles.length > 0) {
-    blocks.push(
+    addTextBlock(
       changedFiles
         .map((filePath) => formatWorkspaceRelativePath(filePath, workspaceRoot))
         .join("\n"),
     );
   }
-  return blocks.length > 0 ? blocks.join("\n\n") : null;
+  if (blocks.length === 0) {
+    return null;
+  }
+  return copyableCommand ? { blocks, copyableCommand } : { blocks };
 }
+
+export const WorkEntryExpandedBody = memo(function WorkEntryExpandedBody(props: {
+  body: ToolCallExpandedBody;
+}) {
+  const { blocks } = props.body;
+  return (
+    <div
+      className="mt-1 ms-7 cursor-default space-y-2 border-s border-border/45 ps-3 pt-0.5"
+      onClick={stopRowToggle}
+      onPointerDown={stopRowToggle}
+    >
+      {blocks.map((block) =>
+        block.kind === "output" ? (
+          <div key={`output:${block.text}`}>
+            <pre className="max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-secondary-label text-[11px] leading-relaxed select-text">
+              {block.isError ? "Error output\n" : null}
+              {block.text}
+              {block.truncated ? "\n\nOutput truncated" : null}
+            </pre>
+            <div className="mt-1 flex items-center gap-2 opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover/work-entry:opacity-100">
+              <CopyTextButton
+                text={block.text}
+                label="Copy output"
+                onCopyError={(cause) => {
+                  reportMarkdownActionFailure({ operation: "copy-tool-output" }, cause);
+                }}
+              />
+            </div>
+          </div>
+        ) : block.kind === "empty" ? (
+          <p
+            key="empty"
+            className="font-mono text-[11px] italic leading-relaxed text-muted-foreground"
+          >
+            (No output)
+          </p>
+        ) : (
+          <pre
+            key={`text:${block.text}`}
+            className="max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-secondary-label text-[11px] leading-relaxed select-text"
+          >
+            {block.text}
+          </pre>
+        ),
+      )}
+    </div>
+  );
+});
 
 function workEntryIconName(workEntry: TimelineWorkEntry): WorkEntryIconName {
   if (
@@ -2233,17 +2480,16 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
   const iconConfig = workToneIcon(workEntry.tone);
   const showWarningIndicator = workEntry.sourceActivityKind === "runtime.warning";
   const entryIconName = showWarningIndicator ? "x" : workEntryIconName(workEntry);
-  const heading = toolWorkEntryHeading(workEntry);
-  const rawPreview = workEntryPreview(workEntry, workspaceRoot);
-  const preview =
-    rawPreview &&
-    normalizeCompactToolLabel(rawPreview).toLowerCase() ===
-      normalizeCompactToolLabel(heading).toLowerCase()
-      ? null
-      : rawPreview;
-  const displayText = preview ? `${heading} - ${preview}` : heading;
-  const expandedBody = buildToolCallExpandedBody(workEntry, workspaceRoot);
+  const { heading, preview, displayText } = workEntryDisplayText(workEntry, workspaceRoot);
+  const previewIsCommand = preview !== null && preview === workEntry.command;
+  const expandedBody = useMemo(
+    () => buildToolCallExpandedBody(workEntry, workspaceRoot),
+    [workEntry, workspaceRoot],
+  );
   const canExpand = expandedBody !== null;
+  // Expanding the row also unfurls the truncated header command: one gesture
+  // reveals full detail (command + output) without a separate toggle.
+  const commandUnfurled = previewIsCommand && expanded;
   const showFailedIndicator = workEntryIndicatesToolFailure(workEntry);
   const showDestructiveRowStyle =
     showFailedIndicator &&
@@ -2286,29 +2532,69 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
   return (
     <div
       className={cn(
-        "flex flex-col rounded-md px-0.5 py-0.5 transition-colors",
+        "group/work-entry flex flex-col rounded-md px-0.5 py-0.5 transition-colors",
         canExpand &&
           "cursor-pointer hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
       )}
       {...rowToggleProps}
     >
-      <div className="flex select-none items-center gap-1.5 transition-[opacity,translate] duration-200">
+      <div
+        className={cn(
+          "flex select-none gap-1.5 transition-[opacity,translate] duration-200",
+          commandUnfurled ? "items-start" : "items-center",
+        )}
+      >
         <span className={iconWrapperClass}>
           <WorkEntryIconSvg
             name={entryIconName}
             className="block size-3.5 shrink-0 stroke-[1.8] opacity-80"
           />
         </span>
-        <div className="flex min-w-0 flex-1 items-center gap-1.5">
+        <div
+          className={cn(
+            "flex min-w-0 flex-1 gap-1.5",
+            commandUnfurled ? "items-start" : "items-center",
+          )}
+        >
           <div className="min-w-0 flex-1 overflow-hidden">
             <p className="flex min-w-0 w-full items-baseline gap-1.5 text-[12px] leading-5">
               <span className={cn("min-w-0 shrink truncate", headingClass)}>{heading}</span>
               {preview && (
-                <span className="min-w-0 flex-1 truncate text-secondary-label">{preview}</span>
+                <span
+                  className={cn(
+                    "min-w-0 flex-1 text-secondary-label",
+                    previewIsCommand && "font-mono text-[11px]",
+                    commandUnfurled
+                      ? "whitespace-pre-wrap break-words"
+                      : "work-entry-preview-clip overflow-hidden whitespace-nowrap",
+                  )}
+                >
+                  {preview}
+                </span>
               )}
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-px text-icon-muted">
+            {expandedBody?.copyableCommand ? (
+              <span
+                className="opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover/work-entry:opacity-100"
+                onClick={stopRowToggle}
+                onPointerDown={stopRowToggle}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.stopPropagation();
+                  }
+                }}
+              >
+                <CopyTextButton
+                  text={expandedBody.copyableCommand}
+                  label="Copy command"
+                  onCopyError={(cause) => {
+                    reportMarkdownActionFailure({ operation: "copy-tool-command" }, cause);
+                  }}
+                />
+              </span>
+            ) : null}
             <span
               className="flex size-4 shrink-0 items-center justify-center"
               aria-hidden={!canExpand}
@@ -2367,17 +2653,7 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
           </div>
         </div>
       </div>
-      {expanded && canExpand && expandedBody ? (
-        <div
-          className="mt-1 ms-7 cursor-default border-s border-border/45 ps-3 pt-0.5"
-          onClick={stopRowToggle}
-          onPointerDown={stopRowToggle}
-        >
-          <pre className="max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-secondary-label text-[11px] leading-relaxed select-text">
-            {expandedBody}
-          </pre>
-        </div>
-      ) : null}
+      {expanded && expandedBody ? <WorkEntryExpandedBody body={expandedBody} /> : null}
     </div>
   );
 });
