@@ -205,6 +205,54 @@ describe("projectActivityPayload", () => {
     });
   });
 
+  it("retains Codex command output and completion metadata", () => {
+    const projected = projectActivityPayload(
+      makeActivity("codex-command", "command_execution", {
+        item: {
+          type: "commandExecution",
+          command: "pnpm test",
+          aggregatedOutput: "output text",
+          exitCode: 0,
+          status: "completed",
+        },
+      }),
+    );
+
+    expect(projected.payload).toMatchObject({
+      data: {
+        item: {
+          command: "pnpm test",
+          aggregatedOutput: "output text",
+          exitCode: 0,
+          status: "completed",
+        },
+      },
+    });
+  });
+
+  it("caps oversized Codex command output and marks it truncated", () => {
+    const projected = projectActivityPayload(
+      makeActivity("codex-command-oversized", "command_execution", {
+        item: {
+          type: "commandExecution",
+          command: "pnpm test",
+          aggregatedOutput: "x".repeat(MAX_PROJECTED_TOOL_RESULT_CHARS + 1_000),
+          exitCode: 0,
+          status: "completed",
+        },
+      }),
+    );
+    const payload = projected.payload as Record<string, unknown>;
+    const data = payload.data as Record<string, unknown>;
+    const item = data.item as Record<string, unknown>;
+
+    expect(item.aggregatedOutput).toEqual(expect.stringMatching(/…\[truncated\]$/));
+    expect(JSON.stringify(item.aggregatedOutput).length).toBeLessThanOrEqual(
+      MAX_PROJECTED_TOOL_RESULT_CHARS,
+    );
+    expect(data.resultTruncated).toBe(true);
+  });
+
   it("slims MCP tool data while retaining its full result", () => {
     expect(projectActivityPayload(fixtures[4]!).payload).toEqual({
       itemType: "mcp_tool_call",

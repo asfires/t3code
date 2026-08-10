@@ -158,7 +158,7 @@ function capProjectedToolValue(value: unknown): {
   };
 }
 
-const OUTPUT_TOOL_FIELD_KEYS = new Set(["result", "rawOutput", "state"]);
+const OUTPUT_TOOL_FIELD_KEYS = new Set(["result", "rawOutput", "state", "aggregatedOutput"]);
 
 function capToolFields(
   source: Record<string, unknown>,
@@ -260,8 +260,8 @@ function projectCommandData(data: Record<string, unknown>): {
 
   const projectedItem: Record<string, unknown> = {};
   const resultTruncated = capToolFields(item, projectedItem, {
-    capKeys: ["toolName", "input", "result"],
-    copyKeys: ["command"],
+    capKeys: ["toolName", "input", "result", "aggregatedOutput"],
+    copyKeys: ["command", "exitCode", "status"],
   });
 
   return {

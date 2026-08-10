@@ -2124,6 +2124,7 @@ function extractToolResultOutput(toolData: unknown): {
     { kind: "rawOutput", value: rawOutput },
     { kind: "state", value: state },
     { kind: "content", value: content },
+    { kind: "item", value: item },
   ] as const;
   for (const candidate of candidates) {
     const text = extractKnownToolText(candidate.value);
@@ -2138,7 +2139,10 @@ function extractToolResultOutput(toolData: unknown): {
           ? record?.is_error === true
           : candidate.kind === "state"
             ? record?.status === "error" || record?.error != null
-            : false,
+            : candidate.kind === "item"
+              ? record?.status === "failed" ||
+                (typeof record?.exitCode === "number" && record.exitCode !== 0)
+              : false,
       truncated: data.resultTruncated === true,
     };
   }

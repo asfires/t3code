@@ -329,6 +329,57 @@ describe("MessagesTimeline", () => {
     });
   });
 
+  it("extracts Codex command output and its error state", () => {
+    const makeEntry = (exitCode: number) => ({
+      id: `work-codex-output-${exitCode}`,
+      createdAt: MESSAGE_CREATED_AT,
+      label: "Tool output",
+      tone: "tool" as const,
+      itemType: "command_execution" as const,
+      toolData: {
+        item: {
+          command: "x",
+          aggregatedOutput: "hello",
+          exitCode,
+          status: "completed",
+        },
+      },
+    });
+
+    expect(buildToolCallExpandedBody(makeEntry(0), undefined)).toEqual({
+      blocks: [{ kind: "output", text: "hello", isError: false, truncated: false }],
+    });
+    expect(buildToolCallExpandedBody(makeEntry(1), undefined)).toEqual({
+      blocks: [{ kind: "output", text: "hello", isError: true, truncated: false }],
+    });
+  });
+
+  it("prefers Claude result output over Codex item output", () => {
+    const body = buildToolCallExpandedBody(
+      {
+        id: "work-provider-output-priority",
+        createdAt: MESSAGE_CREATED_AT,
+        label: "Tool output",
+        tone: "tool",
+        itemType: "command_execution",
+        toolData: {
+          result: { content: "Claude output", is_error: false },
+          item: {
+            command: "x",
+            aggregatedOutput: "Codex output",
+            exitCode: 1,
+            status: "failed",
+          },
+        },
+      },
+      undefined,
+    );
+
+    expect(body).toEqual({
+      blocks: [{ kind: "output", text: "Claude output", isError: false, truncated: false }],
+    });
+  });
+
   it("treats a null state error as successful output", () => {
     const body = buildToolCallExpandedBody(
       {
