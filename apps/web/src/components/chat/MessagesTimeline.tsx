@@ -2050,6 +2050,21 @@ function workEntryDisplayText(workEntry: TimelineWorkEntry, workspaceRoot: strin
   };
 }
 
+// Dynamic tool-call summaries arrive as "ToolName: {…json…}" (see the provider
+// adapters' summarizeToolRequest); the payload may be truncated mid-JSON, so
+// detect it by shape rather than parsing.
+export function splitPreviewJsonPayload(
+  preview: string,
+): { label: string | null; payload: string } | null {
+  const separator = preview.indexOf(": ");
+  const label = separator > 0 ? preview.slice(0, separator + 1) : null;
+  const payload = separator > 0 ? preview.slice(separator + 2) : preview;
+  if (!/^(?:\{["}]|\[["{\]])/.test(payload)) {
+    return null;
+  }
+  return { label, payload };
+}
+
 function workEntryRawCommand(
   workEntry: Pick<TimelineWorkEntry, "command" | "rawCommand">,
 ): string | null {
@@ -2503,6 +2518,7 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
   const entryIconName = showWarningIndicator ? "x" : workEntryIconName(workEntry);
   const { heading, preview, displayText } = workEntryDisplayText(workEntry, workspaceRoot);
   const previewIsCommand = preview !== null && preview === workEntry.command;
+  const previewJson = !previewIsCommand && preview ? splitPreviewJsonPayload(preview) : null;
   const expandedBody = useMemo(
     () => buildToolCallExpandedBody(workEntry, workspaceRoot),
     [workEntry, workspaceRoot],
@@ -2596,7 +2612,14 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
                       : "work-entry-preview-clip overflow-hidden whitespace-nowrap",
                   )}
                 >
-                  {preview}
+                  {previewJson ? (
+                    <>
+                      {previewJson.label ? <>{previewJson.label} </> : null}
+                      <span className="font-mono text-[11px]">{previewJson.payload}</span>
+                    </>
+                  ) : (
+                    preview
+                  )}
                 </span>
               )}
             </p>

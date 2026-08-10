@@ -144,6 +144,7 @@ function matchMedia() {
 let MessagesTimeline: typeof import("./MessagesTimeline").MessagesTimeline;
 let buildToolCallExpandedBody: typeof import("./MessagesTimeline").buildToolCallExpandedBody;
 let WorkEntryExpandedBody: typeof import("./MessagesTimeline").WorkEntryExpandedBody;
+let splitPreviewJsonPayload: typeof import("./MessagesTimeline").splitPreviewJsonPayload;
 
 beforeAll(async () => {
   const classList = {
@@ -177,7 +178,7 @@ beforeAll(async () => {
     },
   });
 
-  ({ MessagesTimeline, WorkEntryExpandedBody, buildToolCallExpandedBody } =
+  ({ MessagesTimeline, WorkEntryExpandedBody, buildToolCallExpandedBody, splitPreviewJsonPayload } =
     await import("./MessagesTimeline"));
 }, 30_000);
 
@@ -235,6 +236,33 @@ function buildUserTimelineEntry(text: string) {
     },
   };
 }
+
+describe("splitPreviewJsonPayload", () => {
+  it("splits labeled tool-call summaries into label and JSON payload", () => {
+    expect(splitPreviewJsonPayload('Skill: {"skill":"codex-first","args":"Implement"}')).toEqual({
+      label: "Skill:",
+      payload: '{"skill":"codex-first","args":"Implement"}',
+    });
+  });
+
+  it("accepts payloads truncated mid-JSON and bare payloads without a label", () => {
+    expect(splitPreviewJsonPayload('ToolSearch: {"query":"select:Re...')).toEqual({
+      label: "ToolSearch:",
+      payload: '{"query":"select:Re...',
+    });
+    expect(splitPreviewJsonPayload('{"query":"x"}')).toEqual({
+      label: null,
+      payload: '{"query":"x"}',
+    });
+    expect(splitPreviewJsonPayload('["a","b"]')).toEqual({ label: null, payload: '["a","b"]' });
+  });
+
+  it("leaves plain-text previews untouched", () => {
+    expect(splitPreviewJsonPayload("Read src/index.ts")).toBeNull();
+    expect(splitPreviewJsonPayload("Note: {braces} in prose")).toBeNull();
+    expect(splitPreviewJsonPayload("See: [link](https://example.com)")).toBeNull();
+  });
+});
 
 describe("MessagesTimeline", () => {
   it("extracts full provider tool output for expanded work rows", () => {
