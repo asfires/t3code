@@ -2285,7 +2285,7 @@ export const WorkEntryExpandedBody = memo(function WorkEntryExpandedBody(props: 
       {blocks.map((block) =>
         block.kind === "output" ? (
           <div key={`output:${block.text}`}>
-            <pre className="max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-secondary-label text-[11px] leading-relaxed select-text">
+            <pre className="max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] text-foreground/80 leading-relaxed select-text">
               {block.isError ? "Error output\n" : null}
               {block.text}
               {block.truncated ? "\n\nOutput truncated" : null}
@@ -2572,12 +2572,10 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
               {preview && (
                 <span
                   className={cn(
-                    "min-w-0 flex-1",
-                    // Command text sits a step above the secondary-label output
-                    // below it so wrapped commands don't blend into the output.
-                    previewIsCommand
-                      ? "font-mono text-[11px] text-foreground/75"
-                      : "text-secondary-label",
+                    // Command text sits a step below the foreground output
+                    // under it so wrapped commands don't blend into the output.
+                    "min-w-0 flex-1 text-secondary-label",
+                    previewIsCommand && "font-mono text-[11px]",
                     commandUnfurled
                       ? "whitespace-pre-wrap break-words"
                       : "work-entry-preview-clip overflow-hidden whitespace-nowrap",
