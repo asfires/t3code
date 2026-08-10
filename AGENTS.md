@@ -146,3 +146,24 @@ Full glossary with file links: `docs/internals/glossary.md`
 
 - Don't verify with browsers or computer use unless the user explicitly agrees or requests it.
 - Security is important, but should not be over-indexed on, especially for dev mode/maintainer-only features.
+
+## Fork-local workflow (asfires fork only — not upstream policy)
+
+This checkout is Adam's fork. `origin` is asfires/t3code; `upstream` is
+pingdotgg/t3code. When merging from upstream, resolve conflicts in this
+section by keeping the fork's version.
+
+- PRs target fork `main` only. Never open a PR against upstream (`gh` is
+  pinned to the fork as a backstop). The usual PR rules above still apply.
+- The main checkout at `~/Code/t3code` stays parked on `main`. Never switch
+  its branch or commit there. Do all work in your own worktree — T3 threads
+  created in worktree mode already are; anything else creates one first.
+- This repo IS the daily driver: `t3start` (in `~/.local/bin`) boots Adam's
+  real T3 instance from frozen dist artifacts after fast-forwarding `main`
+  to `origin/main` and rebuilding if stale. Don't run it, don't rebuild the
+  dist artifacts, and don't touch `~/.t3/userdata` from task threads.
+- Merge flow: Adam reviews, merges, and deletes PR branches on GitHub, then
+  restarts via `t3start`. Nothing else to do after your PR is approved.
+- Upstream syncs are explicit and discretionary, done as a
+  `sync-upstream-<date>` branch PR'd into fork `main` — never a bare pull of
+  upstream into `main`.
