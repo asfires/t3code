@@ -143,6 +143,7 @@ interface TimelineRowSharedState {
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   onToggleTurnFold: (turnId: TurnId) => void;
   onToggleWorkGroup: (groupId: string, anchorKey: string) => void;
+  onToggleWorkEntryDisclosure: (anchorKey: string) => void;
   agentPanelModel: AgentPanelModel;
   onOpenAgents: () => void;
 }
@@ -516,6 +517,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onOpenTurnDiff,
       onToggleTurnFold,
       onToggleWorkGroup,
+      onToggleWorkEntryDisclosure: suspendEndScrollMaintenanceForDisclosure,
       agentPanelModel,
       onOpenAgents,
     }),
@@ -532,6 +534,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onOpenTurnDiff,
       onToggleTurnFold,
       onToggleWorkGroup,
+      suspendEndScrollMaintenanceForDisclosure,
       agentPanelModel,
       onOpenAgents,
     ],
@@ -945,7 +948,9 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       data-message-id={row.kind === "message" ? row.message.id : undefined}
       data-message-role={row.kind === "message" ? row.message.role : undefined}
     >
-      {row.kind === "work" ? <WorkGroupSection groupedEntries={row.groupedEntries} /> : null}
+      {row.kind === "work" ? (
+        <WorkGroupSection rowId={row.id} groupedEntries={row.groupedEntries} />
+      ) : null}
       {row.kind === "work-toggle" ? <WorkGroupToggleTimelineRow row={row} /> : null}
       {row.kind === "turn-fold" ? <TurnFoldTimelineRow row={row} /> : null}
       {row.kind === "message" && row.message.role === "user" ? <UserTimelineRow row={row} /> : null}
@@ -1346,8 +1351,10 @@ function WorkingTimer({ createdAt }: { createdAt: string }) {
 
 /** Renders one or more already-derived work log rows. Overflow expansion is modeled as LegendList data. */
 const WorkGroupSection = memo(function WorkGroupSection({
+  rowId,
   groupedEntries,
 }: {
+  rowId: string;
   groupedEntries: Extract<MessagesTimelineRow, { kind: "work" }>["groupedEntries"];
 }) {
   const { workspaceRoot } = use(TimelineRowCtx);
@@ -1373,6 +1380,7 @@ const WorkGroupSection = memo(function WorkGroupSection({
         {nonEmptyEntries.map((workEntry) => (
           <SimpleWorkEntryRow
             key={workEntry.id}
+            rowId={rowId}
             workEntry={workEntry}
             workspaceRoot={workspaceRoot}
           />
@@ -2469,22 +2477,25 @@ const AgentSpawnCtaRow = memo(function AgentSpawnCtaRow(props: { workEntry: Time
 });
 
 const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
+  rowId: string;
   workEntry: TimelineWorkEntry;
   workspaceRoot: string | undefined;
 }) {
-  const { workEntry, workspaceRoot } = props;
+  const { rowId, workEntry, workspaceRoot } = props;
   // Before any hooks: spawn CTA rows render their own component.
   if (workEntry.agentSpawn) {
     return <AgentSpawnCtaRow workEntry={workEntry} />;
   }
-  return <PlainWorkEntryRow workEntry={workEntry} workspaceRoot={workspaceRoot} />;
+  return <PlainWorkEntryRow rowId={rowId} workEntry={workEntry} workspaceRoot={workspaceRoot} />;
 });
 
 const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
+  rowId: string;
   workEntry: TimelineWorkEntry;
   workspaceRoot: string | undefined;
 }) {
-  const { workEntry, workspaceRoot } = props;
+  const { rowId, workEntry, workspaceRoot } = props;
+  const { onToggleWorkEntryDisclosure } = use(TimelineRowCtx);
   const activity = use(TimelineRowActivityCtx);
   const [expanded, setExpanded] = useState(false);
   const iconConfig = workToneIcon(workEntry.tone);
@@ -2524,16 +2535,20 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
   const showSuccessIndicator =
     workEntryIndicatesToolSuccess(workEntry) ||
     (turnSettled && workEntryIndicatesToolNeutralStatus(workEntry));
+  const toggleExpanded = () => {
+    onToggleWorkEntryDisclosure(rowId);
+    setExpanded((value) => !value);
+  };
   const rowToggleProps = canExpand
     ? {
         role: "button" as const,
         tabIndex: 0 as const,
         "aria-label": displayText,
-        onClick: () => setExpanded((v) => !v),
+        onClick: toggleExpanded,
         onKeyDown: (e: KeyboardEvent<HTMLDivElement>) => {
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
-            setExpanded((v) => !v);
+            toggleExpanded();
           }
         },
       }
