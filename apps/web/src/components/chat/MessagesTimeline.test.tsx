@@ -519,6 +519,57 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toContain("Copy output");
   });
 
+  it("renders provider no-output sentinels as the empty state", () => {
+    for (const sentinel of [
+      "(Bash completed with no output)",
+      "(Command completed with no output)",
+      "(no output)",
+      "(No content)",
+    ]) {
+      const body = buildToolCallExpandedBody(
+        {
+          id: "work-command-sentinel-output",
+          createdAt: MESSAGE_CREATED_AT,
+          label: "Bash",
+          tone: "tool",
+          itemType: "command_execution",
+          command: "true",
+          toolData: { rawOutput: { stdout: sentinel } },
+        },
+        undefined,
+      );
+      expect(body).toEqual({
+        blocks: [{ kind: "empty" }],
+        copyableCommand: "true",
+      });
+    }
+  });
+
+  it("keeps sentinel-like text when the command failed", () => {
+    const body = buildToolCallExpandedBody(
+      {
+        id: "work-command-sentinel-error",
+        createdAt: MESSAGE_CREATED_AT,
+        label: "Bash",
+        tone: "tool",
+        itemType: "command_execution",
+        command: "true",
+        toolData: {
+          result: { content: "(Bash completed with no output)", is_error: true },
+        },
+      },
+      undefined,
+    );
+    expect(body?.blocks).toEqual([
+      {
+        kind: "output",
+        text: "(Bash completed with no output)",
+        isError: true,
+        truncated: false,
+      },
+    ]);
+  });
+
   it("labels only error output and retains the truncation notice", () => {
     const normalBody = buildToolCallExpandedBody(
       {

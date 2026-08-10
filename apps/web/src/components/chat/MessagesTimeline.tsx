@@ -2178,6 +2178,12 @@ function mcpToolCallMetadata(toolData: unknown): unknown {
   return metadata;
 }
 
+// Some providers substitute filler text for empty command output (e.g. the
+// Claude Code CLI emits "(Bash completed with no output)") instead of an empty
+// result; treat those like no output so the placeholder renders consistently.
+const EMPTY_COMMAND_OUTPUT_SENTINEL =
+  /^\((?:[^()\n]+ )?completed with no output\)$|^\(no (?:output|content)\)$/i;
+
 type ToolCallExpandedBodyBlock =
   | {
       readonly kind: "output";
@@ -2224,7 +2230,11 @@ export function buildToolCallExpandedBody(
   const resultOutput = extractToolResultOutput(workEntry.toolData);
   if (resultOutput) {
     const trimmed = resultOutput.text.trim();
-    if (trimmed && !seen.has(trimmed)) {
+    const isEmptyOutputSentinel =
+      workEntry.itemType === "command_execution" &&
+      !resultOutput.isError &&
+      EMPTY_COMMAND_OUTPUT_SENTINEL.test(trimmed);
+    if (trimmed && !isEmptyOutputSentinel && !seen.has(trimmed)) {
       seen.add(trimmed);
       if (resultOutput.truncated) {
         seen.add("Output truncated");
@@ -2562,8 +2572,12 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
               {preview && (
                 <span
                   className={cn(
-                    "min-w-0 flex-1 text-secondary-label",
-                    previewIsCommand && "font-mono text-[11px]",
+                    "min-w-0 flex-1",
+                    // Command text sits a step above the secondary-label output
+                    // below it so wrapped commands don't blend into the output.
+                    previewIsCommand
+                      ? "font-mono text-[11px] text-foreground/75"
+                      : "text-secondary-label",
                     commandUnfurled
                       ? "whitespace-pre-wrap break-words"
                       : "work-entry-preview-clip overflow-hidden whitespace-nowrap",
