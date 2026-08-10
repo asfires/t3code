@@ -381,7 +381,91 @@ describe("MessagesTimeline", () => {
         },
         undefined,
       ),
+    ).toEqual({
+      blocks: [{ kind: "empty" }],
+      copyableCommand: command,
+    });
+  });
+
+  it("keeps command and detail text out of command execution bodies", () => {
+    const body = buildToolCallExpandedBody(
+      {
+        id: "work-raw-command-visible",
+        createdAt: MESSAGE_CREATED_AT,
+        label: "Bash",
+        tone: "tool",
+        itemType: "command_execution",
+        command: "short preview",
+        rawCommand: "the complete raw command",
+        detail: "short preview",
+      },
+      undefined,
+    );
+
+    expect(body).toEqual({
+      blocks: [{ kind: "empty" }],
+      copyableCommand: "the complete raw command",
+    });
+    expect(body?.blocks).not.toContainEqual(expect.objectContaining({ kind: "text" }));
+  });
+
+  it("keeps command and detail blocks for non-command entries", () => {
+    const body = buildToolCallExpandedBody(
+      {
+        id: "work-mcp-call",
+        createdAt: MESSAGE_CREATED_AT,
+        label: "MCP call",
+        tone: "tool",
+        itemType: "mcp_tool_call",
+        command: "short preview",
+        rawCommand: "the complete raw command",
+        detail: "README.md contents",
+      },
+      undefined,
+    );
+
+    expect(body).toEqual({
+      blocks: [
+        { kind: "text", text: "the complete raw command" },
+        { kind: "text", text: "README.md contents" },
+      ],
+    });
+    expect(
+      buildToolCallExpandedBody(
+        {
+          id: "work-empty-non-command",
+          createdAt: MESSAGE_CREATED_AT,
+          label: "Web search",
+          tone: "tool",
+          itemType: "web_search",
+        },
+        undefined,
+      ),
     ).toBeNull();
+  });
+
+  it("keeps command executions without output expandable", () => {
+    const body = buildToolCallExpandedBody(
+      {
+        id: "work-command-no-output",
+        createdAt: MESSAGE_CREATED_AT,
+        label: "Bash",
+        tone: "tool",
+        itemType: "command_execution",
+        command: "pwd",
+      },
+      undefined,
+    );
+
+    expect(body).not.toBeNull();
+    expect(body).toEqual({
+      blocks: [{ kind: "empty" }],
+      copyableCommand: "pwd",
+    });
+
+    const markup = renderToStaticMarkup(<WorkEntryExpandedBody body={body!} />);
+    expect(markup).toContain("(No output)");
+    expect(markup).not.toContain("Copy output");
   });
 
   it("labels only error output and retains the truncation notice", () => {
@@ -437,11 +521,7 @@ describe("MessagesTimeline", () => {
       undefined,
     );
     expect(body).toEqual({
-      blocks: [
-        { kind: "output", text: "raw output text", isError: false, truncated: false },
-        { kind: "text", text: "a much longer command" },
-        { kind: "text", text: "auxiliary detail" },
-      ],
+      blocks: [{ kind: "output", text: "raw output text", isError: false, truncated: false }],
       copyableCommand: "a much longer command",
     });
 
@@ -449,8 +529,10 @@ describe("MessagesTimeline", () => {
 
     expect(markup).toContain('data-copy-text="raw output text"');
     expect(markup).toContain("Copy output");
-    expect(markup).toContain('data-copy-text="a much longer command"');
-    expect(markup).toContain("Copy command");
+    expect(markup).not.toContain('data-copy-text="a much longer command"');
+    expect(markup).not.toContain("Copy command");
+    expect(markup).not.toContain("a much longer command");
+    expect(markup).not.toContain("auxiliary detail");
     expect(markup).not.toContain('data-copy-text="auxiliary detail"');
   });
 
