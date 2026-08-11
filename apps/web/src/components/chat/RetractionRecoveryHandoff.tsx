@@ -275,8 +275,10 @@ export function RetractionRecoveryHandoff(props: {
     replace: true;
   }) => unknown;
 }) {
-  const recoveries = useRetractionRecoveryStore((state) => Object.values(state.byRequestId));
-  return recoveries.map((recovery) => (
+  // Select the stable map reference; deriving Object.values inside the
+  // selector returns a fresh array every snapshot and loops the store.
+  const byRequestId = useRetractionRecoveryStore((state) => state.byRequestId);
+  return Object.values(byRequestId).map((recovery) => (
     <PendingRetractionRecoveryWatcher
       key={recovery.requestId}
       recovery={recovery}
