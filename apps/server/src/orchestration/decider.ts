@@ -985,6 +985,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (targetThread.turnRetraction?.status === "requested") {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' has pending retraction '${targetThread.turnRetraction.requestId}' and cannot start a new turn.`,
+        });
+      }
       const sourceProposedPlan = command.sourceProposedPlan;
       const sourceThread = sourceProposedPlan
         ? yield* requireThread({
@@ -1501,7 +1507,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           retraction: {
             requestId: retraction.requestId,
             messageId: retraction.messageId,
-            turnId: retraction.targetTurnId,
+            turnId: command.targetTurnId ?? retraction.targetTurnId,
             firstUserMessage: retraction.firstUserMessage,
             completedAt: command.createdAt,
           },

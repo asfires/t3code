@@ -4513,6 +4513,39 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     },
   );
 
+  const rollbackThreadTo: NonNullable<ClaudeAdapterShape["rollbackThreadTo"]> = Effect.fn(
+    "rollbackThreadTo",
+  )(function* (threadId, retainedTurnCount) {
+    const context = yield* requireSession(threadId);
+    if (!Number.isInteger(retainedTurnCount) || retainedTurnCount < 0) {
+      return yield* new ProviderAdapterValidationError({
+        provider: PROVIDER,
+        operation: "rollbackThreadTo",
+        issue: "retainedTurnCount must be an integer >= 0.",
+      });
+    }
+    if (context.turns.length < retainedTurnCount) {
+      return yield* new ProviderAdapterValidationError({
+        provider: PROVIDER,
+        operation: "rollbackThreadTo",
+        issue: `Provider history has ${context.turns.length} turns, below retained boundary ${retainedTurnCount}.`,
+      });
+    }
+    const remainingDelta = context.turns.length - retainedTurnCount;
+    if (remainingDelta > 0) {
+      yield* rollbackThread(threadId, remainingDelta);
+    }
+    const snapshot = yield* snapshotThread(context);
+    if (snapshot.turns.length !== retainedTurnCount) {
+      return yield* new ProviderAdapterRequestError({
+        provider: PROVIDER,
+        method: "thread/rollback-to",
+        detail: `Expected ${retainedTurnCount} retained turns, found ${snapshot.turns.length}.`,
+      });
+    }
+    return snapshot;
+  });
+
   const respondToRequest: ClaudeAdapterShape["respondToRequest"] = Effect.fn("respondToRequest")(
     function* (threadId, requestId, decision) {
       const context = yield* requireSession(threadId);
@@ -4602,6 +4635,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     interruptTurn,
     readThread,
     rollbackThread,
+    rollbackThreadTo,
     respondToRequest,
     respondToUserInput,
     stopSession,

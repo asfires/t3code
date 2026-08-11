@@ -3530,7 +3530,7 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("rolls the resume cursor back to the retained turn watermark", () => {
+  it.effect("rolls history to an absolute retained boundary idempotently", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
@@ -3615,10 +3615,26 @@ describe("ClaudeAdapterLive", () => {
 
       const threadBeforeRollback = yield* adapter.readThread(session.threadId);
       assert.equal(threadBeforeRollback.turns.length, 2);
+      assert.isDefined(adapter.rollbackThreadTo);
+      if (!adapter.rollbackThreadTo) return;
 
-      const rolledBack = yield* adapter.rollbackThread(session.threadId, 1);
+      const alreadyAtBoundary = yield* adapter.rollbackThreadTo(session.threadId, 2);
+      assert.equal(alreadyAtBoundary.turns.length, 2);
+
+      const rolledBack = yield* adapter.rollbackThreadTo(session.threadId, 1);
       assert.equal(rolledBack.turns.length, 1);
       assert.equal(rolledBack.turns[0]?.id, firstTurn.turnId);
+
+      const repeated = yield* adapter.rollbackThreadTo(session.threadId, 1);
+      assert.equal(repeated.turns.length, 1);
+
+      const shorterThanTarget = yield* adapter
+        .rollbackThreadTo(session.threadId, 2)
+        .pipe(Effect.result);
+      assert.equal(shorterThanTarget._tag, "Failure");
+      if (shorterThanTarget._tag === "Failure") {
+        assert.equal(shorterThanTarget.failure._tag, "ProviderAdapterValidationError");
+      }
 
       const activeSessions = yield* adapter.listSessions();
       assert.deepEqual(activeSessions[0]?.resumeCursor, {

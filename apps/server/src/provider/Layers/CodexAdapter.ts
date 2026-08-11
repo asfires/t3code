@@ -1890,6 +1890,39 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     );
   };
 
+  const rollbackThreadTo: NonNullable<CodexAdapterShape["rollbackThreadTo"]> = Effect.fn(
+    "rollbackThreadTo",
+  )(function* (threadId, retainedTurnCount) {
+    if (!Number.isInteger(retainedTurnCount) || retainedTurnCount < 0) {
+      return yield* new ProviderAdapterValidationError({
+        provider: PROVIDER,
+        operation: "rollbackThreadTo",
+        issue: "retainedTurnCount must be an integer >= 0.",
+      });
+    }
+    const current = yield* readThread(threadId);
+    if (current.turns.length < retainedTurnCount) {
+      return yield* new ProviderAdapterValidationError({
+        provider: PROVIDER,
+        operation: "rollbackThreadTo",
+        issue: `Provider history has ${current.turns.length} turns, below retained boundary ${retainedTurnCount}.`,
+      });
+    }
+    const remainingDelta = current.turns.length - retainedTurnCount;
+    if (remainingDelta > 0) {
+      yield* rollbackThread(threadId, remainingDelta);
+    }
+    const verified = yield* readThread(threadId);
+    if (verified.turns.length !== retainedTurnCount) {
+      return yield* new ProviderAdapterRequestError({
+        provider: PROVIDER,
+        method: "thread/rollback-to",
+        detail: `Expected ${retainedTurnCount} retained turns, found ${verified.turns.length}.`,
+      });
+    }
+    return verified;
+  });
+
   const respondToRequest: CodexAdapterShape["respondToRequest"] = (threadId, requestId, decision) =>
     requireSession(threadId).pipe(
       Effect.flatMap((session) => session.runtime.respondToRequest(requestId, decision)),
@@ -1977,6 +2010,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     interruptTurn,
     readThread,
     rollbackThread,
+    rollbackThreadTo,
     respondToRequest,
     respondToUserInput,
     stopSession,

@@ -496,6 +496,21 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     const path = yield* Path.Path;
     const serverConfig = yield* ServerConfig;
 
+    const isCompletedRetractedTurn = Effect.fn("isCompletedRetractedTurn")(function* (
+      threadId: ThreadId,
+      turnId: string | null,
+    ) {
+      if (turnId === null) return false;
+      const retraction = yield* projectionTurnRetractionRepository.getLatestByThreadId({
+        threadId,
+      });
+      return (
+        Option.isSome(retraction) &&
+        retraction.value.status === "completed" &&
+        retraction.value.targetTurnId === turnId
+      );
+    });
+
     const applyProjectsProjection: ProjectorDefinition["apply"] = Effect.fn(
       "applyProjectsProjection",
     )(function* (event, _attachmentSideEffects) {
@@ -870,6 +885,18 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         case "thread.activity-appended":
         case "thread.approval-response-requested":
         case "thread.user-input-response-requested": {
+          const eventTurnId =
+            event.type === "thread.message-sent"
+              ? event.payload.turnId
+              : event.type === "thread.proposed-plan-upserted"
+                ? event.payload.proposedPlan.turnId
+                : null;
+          if (
+            eventTurnId !== null &&
+            (yield* isCompletedRetractedTurn(event.payload.threadId, eventTurnId))
+          ) {
+            return;
+          }
           const existingRow = yield* projectionThreadRepository.getById({
             threadId: event.payload.threadId,
           });
@@ -902,6 +929,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         }
 
         case "thread.turn-diff-completed": {
+          if (yield* isCompletedRetractedTurn(event.payload.threadId, event.payload.turnId)) {
+            return;
+          }
           const existingRow = yield* projectionThreadRepository.getById({
             threadId: event.payload.threadId,
           });
@@ -965,6 +995,12 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     )(function* (event, attachmentSideEffects) {
       switch (event.type) {
         case "thread.message-sent": {
+          if (
+            event.payload.turnId !== null &&
+            (yield* isCompletedRetractedTurn(event.payload.threadId, event.payload.turnId))
+          ) {
+            return;
+          }
           const existingMessage = yield* projectionThreadMessageRepository.getByMessageId({
             messageId: event.payload.messageId,
           });
@@ -1044,6 +1080,15 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     )(function* (event, _attachmentSideEffects) {
       switch (event.type) {
         case "thread.proposed-plan-upserted":
+          if (
+            event.payload.proposedPlan.turnId !== null &&
+            (yield* isCompletedRetractedTurn(
+              event.payload.threadId,
+              event.payload.proposedPlan.turnId,
+            ))
+          ) {
+            return;
+          }
           yield* projectionThreadProposedPlanRepository.upsert({
             planId: event.payload.proposedPlan.id,
             threadId: event.payload.threadId,
@@ -1313,6 +1358,12 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         }
 
         case "thread.message-sent": {
+          if (
+            event.payload.turnId !== null &&
+            (yield* isCompletedRetractedTurn(event.payload.threadId, event.payload.turnId))
+          ) {
+            return;
+          }
           if (event.payload.turnId === null || event.payload.role !== "assistant") {
             return;
           }
@@ -1409,6 +1460,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         }
 
         case "thread.turn-diff-completed": {
+          if (yield* isCompletedRetractedTurn(event.payload.threadId, event.payload.turnId)) {
+            return;
+          }
           // Mid-turn diff updates produce placeholder checkpoints; record the
           // checkpoint, but don't settle a turn its session is still running.
           const session = yield* projectionThreadSessionRepository.getByThreadId({

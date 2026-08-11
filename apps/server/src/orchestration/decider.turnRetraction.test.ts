@@ -153,6 +153,32 @@ function invariantDetail(error: unknown): string {
 }
 
 it.layer(NodeServices.layer)("thread.turn.retract decider", (it) => {
+  it.effect("blocks new turn starts while a retraction remains requested", () =>
+    Effect.gen(function* () {
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-start-while-retracting"),
+          threadId: THREAD_ID,
+          message: {
+            messageId: MessageId.make("message-too-soon"),
+            role: "user",
+            text: "too soon",
+            attachments: [],
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt: NOW,
+        },
+        readModel: readModel(pendingRetraction(false)),
+      }).pipe(Effect.result);
+      expect(result._tag).toBe("Failure");
+      if (result._tag === "Failure") {
+        expect(invariantDetail(result.failure)).toContain("pending retraction");
+      }
+    }),
+  );
+
   it.effect("atomically emits reverted and deleted for first-message completion", () =>
     Effect.gen(function* () {
       const decided = yield* completeRetraction(pendingRetraction(true));

@@ -12,6 +12,7 @@ import {
 } from "@t3tools/contracts";
 import {
   ApprovalRequestId,
+  CheckpointRef,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   EventId,
@@ -124,6 +125,7 @@ function createProviderServiceHarness() {
       });
     },
     rollbackConversation: () => unsupported(),
+    rollbackConversationTo: () => unsupported(),
     get streamEvents() {
       return Stream.fromPubSub(runtimeEventPubSub);
     },
@@ -362,6 +364,137 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("turn failed");
+  });
+
+  it("ignores a late turn.completed for a completed retraction tombstone", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const firstMessageId = MessageId.make("message-before-retraction");
+    const secondMessageId = MessageId.make("message-retracted-late-event");
+    const firstTurnId = asTurnId("turn-before-retraction");
+    const targetTurnId = asTurnId("turn-retracted-late-event");
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-first-turn-start"),
+      threadId,
+      message: {
+        messageId: firstMessageId,
+        role: "user",
+        text: "keep me",
+        attachments: [],
+      },
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      createdAt: "2026-01-01T00:00:01.000Z",
+    });
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-first-turn-started"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      turnId: firstTurnId,
+      createdAt: "2026-01-01T00:00:02.000Z",
+    });
+    await waitForThread(harness.readModel, (thread) => thread.session?.status === "running");
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-first-turn-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      turnId: firstTurnId,
+      createdAt: "2026-01-01T00:00:03.000Z",
+      payload: { state: "completed" },
+    });
+    await waitForThread(harness.readModel, (thread) => thread.session?.status === "ready");
+    await harness.dispatch({
+      type: "thread.turn.diff.complete",
+      commandId: CommandId.make("cmd-first-checkpoint"),
+      threadId,
+      turnId: firstTurnId,
+      checkpointTurnCount: 1,
+      checkpointRef: CheckpointRef.make("checkpoint-before-retraction"),
+      status: "ready",
+      files: [],
+      completedAt: "2026-01-01T00:00:03.000Z",
+      createdAt: "2026-01-01T00:00:03.000Z",
+    });
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-target-turn-start"),
+      threadId,
+      message: {
+        messageId: secondMessageId,
+        role: "user",
+        text: "discard me",
+        attachments: [],
+      },
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      createdAt: "2026-01-01T00:00:04.000Z",
+    });
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-target-turn-started"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      turnId: targetTurnId,
+      createdAt: "2026-01-01T00:00:05.000Z",
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.activeTurnId === targetTurnId,
+    );
+    const requestId = CommandId.make("cmd-target-retract");
+    await harness.dispatch({
+      type: "thread.turn.retract",
+      commandId: requestId,
+      threadId,
+      messageId: secondMessageId,
+      createdAt: "2026-01-01T00:00:06.000Z",
+    });
+    await harness.dispatch({
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-target-settled"),
+      threadId,
+      session: {
+        threadId,
+        status: "ready",
+        providerName: "codex",
+        runtimeMode: "approval-required",
+        activeTurnId: null,
+        lastError: null,
+        updatedAt: "2026-01-01T00:00:07.000Z",
+      },
+      createdAt: "2026-01-01T00:00:07.000Z",
+    });
+    await harness.dispatch({
+      type: "thread.turn.retract.complete",
+      commandId: CommandId.make("cmd-target-retract-complete"),
+      threadId,
+      requestId,
+      targetTurnId,
+      createdAt: "2026-01-01T00:00:08.000Z",
+    });
+
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-target-completed-late"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      turnId: targetTurnId,
+      createdAt: "2026-01-01T00:00:09.000Z",
+      payload: { state: "failed", errorMessage: "must be ignored" },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await harness.drain();
+
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(thread?.session?.status).toBe("ready");
+    expect(thread?.session?.lastError).toBeNull();
+    expect(thread?.messages.map((message) => message.id)).toEqual([firstMessageId]);
+    expect(thread?.checkpoints.map((checkpoint) => checkpoint.turnId)).toEqual([firstTurnId]);
+    expect(thread?.latestTurn?.turnId).toBe(firstTurnId);
   });
 
   it("applies provider session.state.changed transitions directly", async () => {

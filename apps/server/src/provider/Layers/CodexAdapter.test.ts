@@ -309,6 +309,37 @@ const sessionErrorLayer = it.layer(
 );
 
 sessionErrorLayer("CodexAdapterLive session errors", (it) => {
+  it.effect("computes the remaining absolute rollback delta and is idempotent", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("absolute-rollback-thread");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      NodeAssert.ok(adapter.rollbackThreadTo);
+      const snapshot = (turnIds: ReadonlyArray<string>): CodexThreadSnapshot => ({
+        threadId: "provider-thread-1",
+        turns: turnIds.map((id) => ({ id: asTurnId(id), items: [] })),
+      });
+      runtime.readThreadImpl
+        .mockResolvedValueOnce(snapshot(["turn-1", "turn-2", "turn-3"]))
+        .mockResolvedValue(snapshot(["turn-1"]));
+      runtime.rollbackThreadImpl.mockResolvedValue(snapshot(["turn-1"]));
+
+      const first = yield* adapter.rollbackThreadTo(threadId, 1);
+      NodeAssert.equal(first.turns.length, 1);
+      NodeAssert.deepStrictEqual(runtime.rollbackThreadImpl.mock.calls, [[2]]);
+
+      const repeated = yield* adapter.rollbackThreadTo(threadId, 1);
+      NodeAssert.equal(repeated.turns.length, 1);
+      NodeAssert.deepStrictEqual(runtime.rollbackThreadImpl.mock.calls, [[2]]);
+    }),
+  );
+
   it.effect("maps missing adapter sessions to ProviderAdapterSessionNotFoundError", () =>
     Effect.gen(function* () {
       const adapter = yield* CodexAdapter;

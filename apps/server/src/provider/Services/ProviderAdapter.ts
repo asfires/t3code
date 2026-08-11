@@ -115,6 +115,17 @@ export interface ProviderAdapterShape<TError> {
   ) => Effect.Effect<ProviderThreadSnapshot, TError>;
 
   /**
+   * Roll back to an absolute retained-turn boundary. Implementations must
+   * inspect and verify provider history so retries are idempotent. Adapters
+   * without a native implementation use ProviderService's read/relative/read
+   * compatibility shim.
+   */
+  readonly rollbackThreadTo?: (
+    threadId: ThreadId,
+    retainedTurnCount: number,
+  ) => Effect.Effect<ProviderThreadSnapshot, TError>;
+
+  /**
    * Stop all sessions owned by this adapter.
    */
   readonly stopAll: () => Effect.Effect<void, TError>;

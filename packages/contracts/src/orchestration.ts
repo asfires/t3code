@@ -1065,6 +1065,7 @@ const ThreadTurnRetractCompleteCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   requestId: CommandId,
+  targetTurnId: Schema.optional(TurnId),
   createdAt: IsoDateTime,
 });
 

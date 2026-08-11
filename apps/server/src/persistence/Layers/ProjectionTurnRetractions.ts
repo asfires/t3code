@@ -135,6 +135,25 @@ const make = Effect.gen(function* () {
     `,
   });
 
+  const hasProviderSendClaimRow = SqlSchema.findOneOption({
+    Request: CancelProjectionTurnProviderSend,
+    Result: Schema.Struct({ claimed: Schema.Number }),
+    execute: ({ threadId, messageId }) => sql`
+      SELECT 1 AS claimed FROM provider_turn_send_claims
+      WHERE thread_id = ${threadId} AND message_id = ${messageId}
+      LIMIT 1
+    `,
+  });
+
+  const markProviderSendClaimedRow = SqlSchema.void({
+    Request: ProjectionTurnRetractionRequest,
+    execute: ({ requestId }) => sql`
+      UPDATE projection_turn_retractions
+      SET provider_send_claimed = 1, provider_send_state = 'claimed'
+      WHERE request_id = ${requestId} AND status = 'requested'
+    `,
+  });
+
   const getByRequestIdRow = SqlSchema.findOneOption({
     Request: ProjectionTurnRetractionRequest,
     Result: ProjectionTurnRetractionDbRow,
@@ -228,6 +247,16 @@ const make = Effect.gen(function* () {
             }
             const row = mapRow(pending.value);
             if (row.providerSendState === "claimed") {
+              return false;
+            }
+            // Reconcile the restart edge where the turn-start consumer claimed
+            // send ownership before the retraction projection row existed.
+            // The immutable claim ledger wins over the row's stale unclaimed
+            // value; otherwise cancellation wins atomically against any later
+            // claim attempt.
+            const existingClaim = yield* hasProviderSendClaimRow(input);
+            if (Option.isSome(existingClaim)) {
+              yield* markProviderSendClaimedRow({ requestId: row.requestId });
               return false;
             }
             if (row.providerSendState === "unclaimed") {

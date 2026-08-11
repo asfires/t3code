@@ -1,4 +1,9 @@
-import type { OrchestrationEvent, OrchestrationReadModel, ThreadId } from "@t3tools/contracts";
+import type {
+  OrchestrationEvent,
+  OrchestrationReadModel,
+  ThreadId,
+  TurnId,
+} from "@t3tools/contracts";
 import {
   OrchestrationCheckpointSummary,
   OrchestrationMessage,
@@ -46,6 +51,14 @@ function checkpointStatusToLatestTurnState(status: "ready" | "missing" | "error"
   if (status === "error") return "error" as const;
   if (status === "missing") return "interrupted" as const;
   return "completed" as const;
+}
+
+function isCompletedRetractedTurn(thread: OrchestrationThread, turnId: TurnId | null): boolean {
+  return (
+    turnId !== null &&
+    thread.turnRetraction?.status === "completed" &&
+    thread.turnRetraction.targetTurnId === turnId
+  );
 }
 
 /**
@@ -507,6 +520,9 @@ export function projectEvent(
         if (!thread) {
           return nextBase;
         }
+        if (isCompletedRetractedTurn(thread, payload.turnId)) {
+          return nextBase;
+        }
 
         const message: OrchestrationMessage = yield* decodeForEvent(
           OrchestrationMessage,
@@ -668,6 +684,9 @@ export function projectEvent(
         if (!thread) {
           return nextBase;
         }
+        if (isCompletedRetractedTurn(thread, payload.proposedPlan.turnId)) {
+          return nextBase;
+        }
 
         const proposedPlans = [
           ...thread.proposedPlans.filter((entry) => entry.id !== payload.proposedPlan.id),
@@ -698,6 +717,9 @@ export function projectEvent(
         );
         const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
         if (!thread) {
+          return nextBase;
+        }
+        if (isCompletedRetractedTurn(thread, payload.turnId)) {
           return nextBase;
         }
 

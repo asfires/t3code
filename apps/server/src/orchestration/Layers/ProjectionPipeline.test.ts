@@ -2876,6 +2876,7 @@ it.effect("retains provider-send claim classification across repository restart"
 
     const restarted = yield* Effect.gen(function* () {
       const retractions = yield* ProjectionTurnRetractionRepository;
+      assert.equal(yield* retractions.cancelPendingProviderSend({ threadId, messageId }), false);
       return yield* retractions.getByRequestId({ requestId });
     }).pipe(
       Effect.provide(

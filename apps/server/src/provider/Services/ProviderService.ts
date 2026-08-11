@@ -106,6 +106,15 @@ export interface ProviderServiceShape {
   }) => Effect.Effect<void, ProviderServiceError>;
 
   /**
+   * Roll back provider conversation state to an absolute retained-turn
+   * boundary. Repeating the same target is harmless.
+   */
+  readonly rollbackConversationTo: (input: {
+    readonly threadId: ThreadId;
+    readonly retainedTurnCount: number;
+  }) => Effect.Effect<void, ProviderServiceError>;
+
+  /**
    * Canonical provider runtime event stream.
    *
    * Fan-out is owned by ProviderService (not by a standalone event-bus service).

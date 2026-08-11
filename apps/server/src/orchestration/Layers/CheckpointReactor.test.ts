@@ -125,6 +125,7 @@ function createProviderServiceHarness(
         },
       }),
     rollbackConversation,
+    rollbackConversationTo: () => unsupported(),
     get streamEvents() {
       return Stream.fromPubSub(runtimeEventPubSub);
     },
