@@ -159,6 +159,35 @@ describe("last user message pop window", () => {
       }),
     ).toBe(false);
   });
+
+  it("opens while a dispatched turn is still starting", () => {
+    expect(
+      isLastUserMessagePopWindowOpen({
+        phase: "connecting",
+        activeTurnId: null,
+        timelineEntries: [],
+      }),
+    ).toBe(true);
+    expect(
+      isLastUserMessagePopWindowOpen({
+        phase: "ready",
+        activeTurnId: null,
+        timelineEntries: [],
+        localTurnStartPending: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("closes while a correlated retraction is pending", () => {
+    expect(
+      isLastUserMessagePopWindowOpen({
+        phase: "running",
+        activeTurnId: codexTurnId,
+        timelineEntries: [],
+        retractionPending: true,
+      }),
+    ).toBe(false);
+  });
 });
 
 describe("last user message selection", () => {
@@ -167,10 +196,8 @@ describe("last user message selection", () => {
     expect(
       findLastUserMessagePopCandidate({
         messages: [optimistic],
-        turnCount: 0,
-        latestCheckpointCompletedAt: null,
       }),
-    ).toEqual({ message: optimistic, turnCount: 0 });
+    ).toEqual({ message: optimistic });
   });
 
   it("selects the optimistic follow-up after server messages", () => {
@@ -193,20 +220,17 @@ describe("last user message selection", () => {
     expect(
       findLastUserMessagePopCandidate({
         messages: [first, assistant, optimistic],
-        turnCount: 1,
-        latestCheckpointCompletedAt: "2026-08-10T12:00:02.000Z",
       }),
-    ).toEqual({ message: optimistic, turnCount: 1 });
+    ).toEqual({ message: optimistic });
   });
 
-  it("does not select a user message that predates the latest checkpoint", () => {
+  it("selects the newest user message without checkpoint-race heuristics", () => {
+    const completed = message({ id: "completed-user", role: "user" });
     expect(
       findLastUserMessagePopCandidate({
-        messages: [message({ id: "completed-user", role: "user" })],
-        turnCount: 1,
-        latestCheckpointCompletedAt: "2026-08-10T12:00:01.000Z",
+        messages: [completed],
       }),
-    ).toBeNull();
+    ).toEqual({ message: completed });
   });
 });
 
