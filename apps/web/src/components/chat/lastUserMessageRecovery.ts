@@ -2,6 +2,7 @@ import type {
   CommandId,
   MessageId,
   ModelSelection,
+  OrchestrationThreadActivity,
   ProviderInteractionMode,
   RuntimeMode,
   ScopedProjectRef,
@@ -9,6 +10,7 @@ import type {
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
+import { PROVIDER_SEND_TURN_MAX_ATTACHMENTS } from "@t3tools/contracts";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
@@ -20,16 +22,27 @@ import {
   useComposerDraftStore,
 } from "../../composerDraftStore";
 import { resolveStorage } from "../../lib/storage";
-import { readFileAsDataUrl } from "../ChatView.logic";
+import { cloneComposerImageForRetry, readFileAsDataUrl } from "../ChatView.logic";
+import { mergePoppedPrompt } from "./lastUserMessagePop";
 
 const RETRACTION_RECOVERY_STORAGE_KEY = "t3code:thread-retraction-recoveries:v1";
 
 export interface PendingRetractionRecovery {
   requestId: CommandId;
+  messageId: MessageId;
   sourceThreadRef: ScopedThreadRef;
   projectRef: ScopedProjectRef;
   draftId: DraftId;
   createdAt: string;
+}
+
+export function buildRetractionCommandInput(recovery: PendingRetractionRecovery) {
+  return {
+    commandId: recovery.requestId,
+    threadId: recovery.sourceThreadRef.threadId,
+    messageId: recovery.messageId,
+    createdAt: recovery.createdAt,
+  };
 }
 
 interface RetractionRecoveryStoreState {
@@ -93,6 +106,7 @@ export interface FirstMessageRetractionCompletion {
 
 export async function snapshotLastUserMessageRecovery(input: {
   requestId: CommandId;
+  messageId: MessageId;
   sourceThreadRef: ScopedThreadRef;
   projectRef: ScopedProjectRef;
   draftId: DraftId;
@@ -146,6 +160,7 @@ export async function snapshotLastUserMessageRecovery(input: {
 
   useRetractionRecoveryStore.getState().remember({
     requestId: input.requestId,
+    messageId: input.messageId,
     sourceThreadRef: input.sourceThreadRef,
     projectRef: input.projectRef,
     draftId: input.draftId,
@@ -156,6 +171,102 @@ export async function snapshotLastUserMessageRecovery(input: {
     draftId: input.draftId,
     failedImageNames: encoded.flatMap((entry) => (entry.failedName ? [entry.failedName] : [])),
   };
+}
+
+export interface AppliedRetractionRecovery {
+  prompt: string;
+  images: ComposerImageAttachment[];
+  unrestoredImageNames: string[];
+}
+
+export function findCorrelatedRetractionFailure(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+  requestId: CommandId,
+): string | null {
+  const activity = activities.findLast((entry) => {
+    if (entry.kind !== "turn.retract.failed" || typeof entry.payload !== "object") return false;
+    return (entry.payload as { requestId?: unknown } | null)?.requestId === requestId;
+  });
+  if (!activity) return null;
+  const detail = (activity.payload as { detail?: unknown } | null)?.detail;
+  return typeof detail === "string" && detail.trim().length > 0 ? detail : activity.summary;
+}
+
+export function restoreRetractionRecoveryToThread(input: {
+  requestId: CommandId;
+  sourceThreadRef: ScopedThreadRef;
+}): AppliedRetractionRecovery | null {
+  const recovery = useRetractionRecoveryStore.getState().byRequestId[input.requestId];
+  if (
+    !recovery ||
+    recovery.sourceThreadRef.environmentId !== input.sourceThreadRef.environmentId ||
+    recovery.sourceThreadRef.threadId !== input.sourceThreadRef.threadId
+  ) {
+    return null;
+  }
+
+  const store = useComposerDraftStore.getState();
+  const recoveredDraft = store.getComposerDraft(recovery.draftId);
+  if (!recoveredDraft) return null;
+
+  const currentDraft = store.getComposerDraft(input.sourceThreadRef);
+  const prompt = mergePoppedPrompt(currentDraft?.prompt ?? "", recoveredDraft.prompt);
+  const existingImages = currentDraft?.images ?? [];
+  const existingIds = new Set(existingImages.map((image) => image.id));
+  const existingKeys = new Set(
+    existingImages.map((image) => JSON.stringify([image.mimeType, image.sizeBytes, image.name])),
+  );
+  const images: ComposerImageAttachment[] = [];
+  const unrestoredImageNames: string[] = [];
+  for (const recoveredImage of recoveredDraft.images) {
+    const key = JSON.stringify([
+      recoveredImage.mimeType,
+      recoveredImage.sizeBytes,
+      recoveredImage.name,
+    ]);
+    if (existingIds.has(recoveredImage.id) || existingKeys.has(key)) continue;
+    if (existingImages.length + images.length >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
+      unrestoredImageNames.push(recoveredImage.name);
+      continue;
+    }
+    existingIds.add(recoveredImage.id);
+    existingKeys.add(key);
+    images.push(cloneComposerImageForRetry(recoveredImage));
+  }
+
+  store.setPrompt(input.sourceThreadRef, prompt);
+  store.addImages(input.sourceThreadRef, images);
+  const recoveredModelSelection = recoveredDraft.activeProvider
+    ? recoveredDraft.modelSelectionByProvider[recoveredDraft.activeProvider]
+    : undefined;
+  store.setModelSelection(input.sourceThreadRef, recoveredModelSelection, {
+    replaceOptions: true,
+  });
+  store.setRuntimeMode(input.sourceThreadRef, recoveredDraft.runtimeMode);
+  store.setInteractionMode(input.sourceThreadRef, recoveredDraft.interactionMode);
+  store.clearDraftThread(recovery.draftId);
+  useRetractionRecoveryStore.getState().forget(input.requestId);
+
+  return {
+    prompt,
+    images: [...existingImages, ...images],
+    unrestoredImageNames,
+  };
+}
+
+export function handoffCompletedMidThreadRetraction(input: {
+  environmentId: ScopedThreadRef["environmentId"];
+  completion: FirstMessageRetractionCompletion;
+}): AppliedRetractionRecovery | null {
+  const metadata = input.completion.retraction;
+  if (!metadata || metadata.firstUserMessage) return null;
+  return restoreRetractionRecoveryToThread({
+    requestId: metadata.requestId,
+    sourceThreadRef: {
+      environmentId: input.environmentId,
+      threadId: input.completion.threadId,
+    },
+  });
 }
 
 export function handoffCompletedFirstMessageRetraction(input: {

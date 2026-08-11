@@ -1,6 +1,7 @@
 import {
   CommandId,
   EnvironmentId,
+  MessageId,
   ORCHESTRATION_WS_METHODS,
   ProjectId,
   ThreadId,
@@ -24,6 +25,7 @@ import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import {
   archiveThread,
   createProject,
+  retractThreadTurn,
   settleThread,
   stopThreadSession,
   unsettleThread,
@@ -168,6 +170,31 @@ describe("environment commands", () => {
           threadId: "thread-1",
           reason: "user",
         },
+      ]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
+  it.effect("reuses caller-provided correlation metadata for turn retraction retries", () =>
+    Effect.gen(function* () {
+      const dispatched: ClientOrchestrationCommand[] = [];
+      const supervisor = yield* makeSupervisor(dispatched);
+      const input = {
+        commandId: CommandId.make("retract-command"),
+        threadId: ThreadId.make("thread-1"),
+        messageId: MessageId.make("message-1"),
+        createdAt: "2026-08-11T12:00:00.000Z",
+      };
+
+      yield* retractThreadTurn(input).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+      );
+      yield* retractThreadTurn(input).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+      );
+
+      expect(dispatched).toEqual([
+        { type: "thread.turn.retract", ...input },
+        { type: "thread.turn.retract", ...input },
       ]);
     }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
   );

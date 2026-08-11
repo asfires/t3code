@@ -8,36 +8,31 @@ import type { TimelineEntry } from "../../session-logic";
 import type { ChatMessage, SessionPhase } from "../../types";
 import type { ComposerImageAttachment } from "../../composerDraftStore";
 
-export const LAST_USER_MESSAGE_POP_SETTLE_TIMEOUT_MS = 15_000;
 export const IMAGE_ONLY_MESSAGE_PLACEHOLDER =
   "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
 
 export interface LastUserMessagePopCandidate {
   message: ChatMessage;
-  turnCount: number;
 }
 
 export function findLastUserMessagePopCandidate(input: {
   messages: ReadonlyArray<ChatMessage>;
-  turnCount: number;
-  latestCheckpointCompletedAt: string | null;
 }): LastUserMessagePopCandidate | null {
   const message = input.messages.findLast((entry) => entry.role === "user");
-  if (!message) return null;
-  if (
-    input.latestCheckpointCompletedAt !== null &&
-    message.createdAt < input.latestCheckpointCompletedAt
-  ) {
-    return null;
-  }
-  return { message, turnCount: input.turnCount };
+  return message ? { message } : null;
 }
 
 export function isLastUserMessagePopWindowOpen(input: {
   phase: SessionPhase;
   activeTurnId: TurnId | null;
   timelineEntries: ReadonlyArray<TimelineEntry>;
+  localTurnStartPending?: boolean;
+  retractionPending?: boolean;
 }): boolean {
+  if (input.retractionPending) return false;
+  if (input.localTurnStartPending || input.phase === "connecting") {
+    return true;
+  }
   if (input.phase !== "running" || input.activeTurnId === null) {
     return false;
   }

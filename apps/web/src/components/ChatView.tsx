@@ -19,7 +19,6 @@ import {
   OrchestrationThreadActivity,
   ProviderInteractionMode,
   ProviderDriverKind,
-  PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   RuntimeMode,
   TerminalOpenInput,
 } from "@t3tools/contracts";
@@ -246,23 +245,17 @@ import {
 import { environmentShell } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import {
-  captureLastUserMessageImages,
-  deriveLastUserMessageRestoredText,
   findLastUserMessagePopCandidate,
   IMAGE_ONLY_MESSAGE_PLACEHOLDER,
   isLastUserMessagePopWindowOpen,
-  LAST_USER_MESSAGE_POP_SETTLE_TIMEOUT_MS,
-  mergePoppedPrompt,
 } from "./chat/lastUserMessagePop";
 import { createPreDispatchCancellationLatch } from "./chat/preDispatchCancellationLatch";
 import { CHAT_FLOATING_LAYER_SELECTOR, shouldHandleChatEscape } from "./chat/chatEscapeTrigger";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { shouldRenderEmptyThreadHero } from "./chat/emptyThreadHero";
 import { RetractionRecoveryHandoff } from "./chat/RetractionRecoveryHandoff";
-import {
-  type FirstMessageRetractionCompletion,
-  useRetractionRecoveryStore,
-} from "./chat/lastUserMessageRecovery";
+import { useRetractionRecoveryStore } from "./chat/lastUserMessageRecovery";
+import { useLastUserMessageRetraction } from "./chat/useLastUserMessageRetraction";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
@@ -360,6 +353,10 @@ const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
 const EMPTY_PENDING_USER_INPUT_ANSWERS: Record<string, PendingUserInputDraftAnswer> = {};
+const sentMessageRecoveryContextByMessageId = new Map<
+  MessageId,
+  { envMode: DraftThreadEnvMode; baseBranch: string | null; startFromOrigin: boolean }
+>();
 function useDraftHeroLayoutTransition(isDraftHeroState: boolean) {
   const transitionGroupRef = useRef<HTMLDivElement | null>(null);
   const composerAnchorRef = useRef<HTMLDivElement | null>(null);
@@ -1348,7 +1345,6 @@ function ChatViewContent(props: ChatViewProps) {
   >({});
   const [isConnecting, _setIsConnecting] = useState(false);
   const [isRevertingCheckpoint, setIsRevertingCheckpoint] = useState(false);
-  const [isPoppingLastUserMessage, setIsPoppingLastUserMessage] = useState(false);
   const [maximizedRightPanelThreadKey, setMaximizedRightPanelThreadKey] = useState<string | null>(
     null,
   );
@@ -1989,28 +1985,8 @@ function ChatViewContent(props: ChatViewProps) {
         ) ?? null)
       : null,
   );
-  const projectedRetractionCompletion = useMemo<FirstMessageRetractionCompletion | null>(() => {
-    const retraction = activeThread?.turnRetraction;
-    if (
-      !pendingRetractionRecovery ||
-      !retraction ||
-      retraction.status !== "completed" ||
-      retraction.requestId !== pendingRetractionRecovery.requestId ||
-      retraction.completedAt === null
-    ) {
-      return null;
-    }
-    return {
-      threadId: activeThread.id,
-      retraction: {
-        requestId: retraction.requestId,
-        messageId: retraction.messageId,
-        turnId: retraction.targetTurnId,
-        firstUserMessage: retraction.firstUserMessage,
-        completedAt: retraction.completedAt,
-      },
-    };
-  }, [activeThread, pendingRetractionRecovery]);
+  const retractionPending =
+    pendingRetractionRecovery !== null || activeThread?.turnRetraction?.status === "requested";
   const versionMismatch = resolveServerConfigVersionMismatch(serverConfig);
   const versionMismatchDismissKey =
     versionMismatch && activeThread
@@ -2202,48 +2178,6 @@ function ChatViewContent(props: ChatViewProps) {
   );
   const selectedProvider: ProviderDriverKind = lockedProvider ?? unlockedSelectedProvider;
   const phase = derivePhase(activeThread?.session ?? null);
-  const runningTurnStateRef = useRef({ threadId: activeThread?.id ?? null, phase });
-  runningTurnStateRef.current = { threadId: activeThread?.id ?? null, phase };
-  const runningTurnSettlementChecksRef = useRef(new Set<(cancel?: boolean) => void>());
-  useEffect(() => {
-    for (const check of runningTurnSettlementChecksRef.current) {
-      check();
-    }
-  }, [activeThread?.id, phase]);
-  useEffect(
-    () => () => {
-      for (const check of runningTurnSettlementChecksRef.current) {
-        check(true);
-      }
-      runningTurnSettlementChecksRef.current.clear();
-    },
-    [],
-  );
-  const waitForRunningTurnToSettle = useCallback((threadId: ThreadId): Promise<boolean> => {
-    const current = runningTurnStateRef.current;
-    if (current.threadId !== threadId) return Promise.resolve(false);
-    if (current.phase !== "running") return Promise.resolve(true);
-
-    return new Promise((resolve) => {
-      let timeoutId: number | null = null;
-      const finish = (settled: boolean) => {
-        runningTurnSettlementChecksRef.current.delete(check);
-        if (timeoutId !== null) window.clearTimeout(timeoutId);
-        resolve(settled);
-      };
-      const check = (cancel = false) => {
-        const next = runningTurnStateRef.current;
-        if (cancel || next.threadId !== threadId) {
-          finish(false);
-        } else if (next.phase !== "running") {
-          finish(true);
-        }
-      };
-      runningTurnSettlementChecksRef.current.add(check);
-      timeoutId = window.setTimeout(() => finish(false), LAST_USER_MESSAGE_POP_SETTLE_TIMEOUT_MS);
-      check();
-    });
-  }, []);
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
   const workLogEntries = useMemo(() => deriveWorkLogEntries(threadActivities), [threadActivities]);
   const turnPlans = useMemo(() => deriveTurnPlans(threadActivities), [threadActivities]);
@@ -2348,7 +2282,8 @@ function ChatViewContent(props: ChatViewProps) {
     activePendingUserInput: activePendingUserInput?.requestId ?? null,
     threadError,
   });
-  const isWorking = phase === "running" || isSendBusy || isConnecting || isRevertingCheckpoint;
+  const isWorking =
+    phase === "running" || isSendBusy || isConnecting || isRevertingCheckpoint || retractionPending;
   const activeWorkStartedAt = deriveActiveWorkStartedAt(
     activeLatestTurn,
     activeThread?.session ?? null,
@@ -2662,25 +2597,18 @@ function ChatViewContent(props: ChatViewProps) {
 
     return byUserMessageId;
   }, [inferredCheckpointTurnCountByTurnId, timelineEntries, turnDiffSummaryByAssistantMessageId]);
-  const latestCheckpoint = activeThread?.checkpoints.at(-1) ?? null;
-  const checkpointTurnCount = activeThread?.checkpoints.reduce(
-    (maxTurnCount, checkpoint) => Math.max(maxTurnCount, checkpoint.checkpointTurnCount),
-    0,
-  );
   const activeRunningTurnId = activeThread?.session?.activeTurnId ?? null;
   const lastUserMessagePopWindowOpen =
-    latestCheckpoint?.turnId !== activeRunningTurnId &&
+    supportsThreadTurnRetraction &&
     isLastUserMessagePopWindowOpen({
       phase,
       activeTurnId: activeRunningTurnId,
       timelineEntries,
+      localTurnStartPending: isSendBusy,
+      retractionPending,
     });
   const lastUserMessagePopCandidate = lastUserMessagePopWindowOpen
-    ? findLastUserMessagePopCandidate({
-        messages: timelineMessages,
-        turnCount: checkpointTurnCount ?? 0,
-        latestCheckpointCompletedAt: latestCheckpoint?.completedAt ?? null,
-      })
+    ? findLastUserMessagePopCandidate({ messages: timelineMessages })
     : null;
 
   const gitCwd = activeProject
@@ -4975,6 +4903,16 @@ function ChatViewContent(props: ChatViewProps) {
         }),
       );
     };
+    if (retractionPending) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "info",
+          title: "Message retraction in progress",
+          description: "Wait for the current message to finish retracting before sending again.",
+        }),
+      );
+      return;
+    }
     if (
       !activeThread ||
       isSendBusy ||
@@ -5135,6 +5073,12 @@ function ChatViewContent(props: ChatViewProps) {
     const composerPreviewAnnotationsSnapshot = [...composerPreviewAnnotations];
     const composerReviewCommentsSnapshot: ReviewCommentContext[] = [...composerReviewComments];
     const messageIdForSend = newMessageId();
+    sentMessageRecoveryContextByMessageId.clear();
+    sentMessageRecoveryContextByMessageId.set(messageIdForSend, {
+      envMode: sendEnvMode,
+      baseBranch: activeThreadBranch,
+      startFromOrigin,
+    });
     preDispatchCancellationLatchRef.current.arm(messageIdForSend);
     sendInFlightRef.current = true;
     if (isDraftHeroState && activeThreadKey) {
@@ -5153,6 +5097,7 @@ function ChatViewContent(props: ChatViewProps) {
       await dockStarted;
     }
     if (preDispatchCancellationLatchRef.current.isCancelled(messageIdForSend)) {
+      sentMessageRecoveryContextByMessageId.delete(messageIdForSend);
       preDispatchCancellationLatchRef.current.clear(messageIdForSend);
       sendInFlightRef.current = false;
       setDockedDraftHeroThreadKey((currentThreadKey) =>
@@ -5419,6 +5364,7 @@ function ChatViewContent(props: ChatViewProps) {
     preDispatchCancellationLatchRef.current.clear(messageIdForSend);
     sendInFlightRef.current = false;
     if (!turnStartSucceeded) {
+      sentMessageRecoveryContextByMessageId.delete(messageIdForSend);
       setDockedDraftHeroThreadKey((currentThreadKey) =>
         currentThreadKey === activeThreadKey ? null : currentThreadKey,
       );
@@ -5621,6 +5567,7 @@ function ChatViewContent(props: ChatViewProps) {
       if (
         !activeThread ||
         !isServerThread ||
+        retractionPending ||
         isSendBusy ||
         isConnecting ||
         sendInFlightRef.current
@@ -5763,6 +5710,7 @@ function ChatViewContent(props: ChatViewProps) {
       isConnecting,
       isSendBusy,
       isServerThread,
+      retractionPending,
       localCheckoutBranchMismatch,
       persistThreadSettingsForNextTurn,
       resetLocalDispatch,
@@ -5781,6 +5729,7 @@ function ChatViewContent(props: ChatViewProps) {
       !activeProject ||
       !activeProposedPlan ||
       !isServerThread ||
+      retractionPending ||
       isSendBusy ||
       isConnecting ||
       activeEnvironmentUnavailable ||
@@ -5924,6 +5873,7 @@ function ChatViewContent(props: ChatViewProps) {
     isConnecting,
     isSendBusy,
     isServerThread,
+    retractionPending,
     navigate,
     resetLocalDispatch,
     runtimeMode,
@@ -6097,130 +6047,28 @@ function ChatViewContent(props: ChatViewProps) {
     }
     void onRevertToTurnCountRef.current(targetTurnCount);
   }, []);
-  // Post-dispatch seam: WO5b can replace this saga with thread.turn.retract;
-  // the pre-dispatch latch and chat-scoped Escape trigger stay unchanged.
-  const onPopLastUserMessage = useCallback(async () => {
-    if (!lastUserMessagePopCandidate || !activeThread || isPoppingLastUserMessage) return;
-
-    setIsPoppingLastUserMessage(true);
-    const poppedThreadId = activeThread.id;
-    const poppedDraftTarget = composerDraftTarget;
-    const poppedMessageId = lastUserMessagePopCandidate.message.id;
-    const restoredText = deriveLastUserMessageRestoredText(
-      lastUserMessagePopCandidate.message.text,
-    );
-    const imageCapture = captureLastUserMessageImages(lastUserMessagePopCandidate.message);
-    let failureDescription: string | null = null;
-
-    try {
-      const interrupted = await interruptActiveTurn();
-      if (!interrupted) {
-        failureDescription = "The turn could not be interrupted.";
-      } else {
-        const settled = await waitForRunningTurnToSettle(poppedThreadId);
-        if (!settled) {
-          failureDescription = "The turn did not settle within 15 seconds.";
-        } else {
-          const reverted = await onRevertToTurnCountRef.current(
-            lastUserMessagePopCandidate.turnCount,
-            { skipConfirm: true },
-          );
-          if (!reverted) {
-            failureDescription = "The sent message could not be removed from thread history.";
-          } else {
-            setOptimisticUserMessages((existing) => {
-              const removed = existing.filter((message) => message.id === poppedMessageId);
-              for (const message of removed) {
-                revokeUserMessagePreviewUrls(message);
-              }
-              return existing.filter((message) => message.id !== poppedMessageId);
-            });
-            clearAttachmentPreviewHandoff(poppedMessageId);
-          }
-        }
-      }
-    } catch (error) {
-      failureDescription = chatActionErrorMessage(error);
-    }
-
-    const { images, failedNames } = await imageCapture.catch(() => ({
-      images: [],
-      failedNames: (lastUserMessagePopCandidate.message.attachments ?? []).map(
-        (attachment) => attachment.name,
-      ),
-    }));
-    const currentDraft = useComposerDraftStore.getState().getComposerDraft(poppedDraftTarget);
-    const currentPrompt = currentDraft?.prompt ?? "";
-    const nextPrompt = mergePoppedPrompt(currentPrompt, restoredText);
-    setComposerDraftPrompt(poppedDraftTarget, nextPrompt);
-
-    const existingImages = currentDraft?.images ?? [];
-    const existingIds = new Set(existingImages.map((image) => image.id));
-    const existingKeys = new Set(
-      existingImages.map((image) => JSON.stringify([image.mimeType, image.sizeBytes, image.name])),
-    );
-    const acceptedImages: ComposerImageAttachment[] = [];
-    const overflowNames: string[] = [];
-    for (const image of images) {
-      const dedupKey = JSON.stringify([image.mimeType, image.sizeBytes, image.name]);
-      if (existingIds.has(image.id) || existingKeys.has(dedupKey)) {
-        revokeBlobPreviewUrl(image.previewUrl);
-        continue;
-      }
-      if (existingImages.length + acceptedImages.length >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
-        overflowNames.push(image.name);
-        revokeBlobPreviewUrl(image.previewUrl);
-        continue;
-      }
-      existingIds.add(image.id);
-      existingKeys.add(dedupKey);
-      acceptedImages.push(image);
-    }
-    addComposerDraftImages(poppedDraftTarget, acceptedImages);
-
-    if (runningTurnStateRef.current.threadId === poppedThreadId) {
-      promptRef.current = nextPrompt;
-      composerImagesRef.current = [...existingImages, ...acceptedImages];
-      composerRef.current?.resetCursorState({
-        cursor: collapseExpandedComposerCursor(nextPrompt, nextPrompt.length),
-        prompt: nextPrompt,
-        detectTrigger: true,
-      });
-      window.requestAnimationFrame(() => {
-        composerRef.current?.focusAtEnd();
-      });
-    }
-
-    const unrestoredImageNames = [...failedNames, ...overflowNames];
-    if (unrestoredImageNames.length > 0) {
-      toastManager.add({
-        type: "warning",
-        title: "Some images could not be restored",
-        description: `${unrestoredImageNames.join(", ")} could not be restored to the composer.`,
-      });
-    }
-    if (failureDescription !== null) {
-      toastManager.add({
-        type: "error",
-        title: "Message restored, but the turn could not be rewound",
-        description: failureDescription,
-      });
-    }
-    setIsPoppingLastUserMessage(false);
-  }, [
+  const lastUserMessageRecoveryContext = lastUserMessagePopCandidate
+    ? sentMessageRecoveryContextByMessageId.get(lastUserMessagePopCandidate.message.id)
+    : undefined;
+  const onPopLastUserMessage = useLastUserMessageRetraction({
     activeThread,
-    addComposerDraftImages,
-    clearAttachmentPreviewHandoff,
-    composerDraftTarget,
-    composerImagesRef,
+    activeProjectRef,
+    activeThreadBranch: lastUserMessageRecoveryContext
+      ? lastUserMessageRecoveryContext.baseBranch
+      : activeThreadBranch,
+    activeEnvironmentUnavailable,
+    candidate: lastUserMessagePopCandidate,
+    pendingRecovery: pendingRetractionRecovery,
+    retractionPending,
+    runtimeMode,
+    interactionMode,
+    envMode: lastUserMessageRecoveryContext?.envMode ?? envMode,
+    startFromOrigin: lastUserMessageRecoveryContext?.startFromOrigin ?? startFromOrigin,
     composerRef,
-    interruptActiveTurn,
-    isPoppingLastUserMessage,
-    lastUserMessagePopCandidate,
     promptRef,
-    setComposerDraftPrompt,
-    waitForRunningTurnToSettle,
-  ]);
+    composerImagesRef,
+    setThreadError,
+  });
 
   useEffect(() => {
     const onWindowKeyDown = (event: globalThis.KeyboardEvent) => {
@@ -6238,7 +6086,11 @@ function ChatViewContent(props: ChatViewProps) {
 
       const cancelledMessageId = preDispatchCancellationLatchRef.current.cancel();
       if (cancelledMessageId === null) {
-        if (lastUserMessagePopCandidate === null || isPoppingLastUserMessage) {
+        if (retractionPending) {
+          return;
+        }
+        if (lastUserMessagePopCandidate === null) {
+          scheduleComposerFocus();
           return;
         }
         void onPopLastUserMessage();
@@ -6250,7 +6102,7 @@ function ChatViewContent(props: ChatViewProps) {
 
     window.addEventListener("keydown", onWindowKeyDown);
     return () => window.removeEventListener("keydown", onWindowKeyDown);
-  }, [isPoppingLastUserMessage, lastUserMessagePopCandidate, onPopLastUserMessage]);
+  }, [lastUserMessagePopCandidate, onPopLastUserMessage, retractionPending, scheduleComposerFocus]);
 
   // Empty state: no active thread
   if (!activeThread) {
@@ -6395,14 +6247,6 @@ function ChatViewContent(props: ChatViewProps) {
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-background">
-      {supportsThreadTurnRetraction && pendingRetractionRecovery ? (
-        <RetractionRecoveryHandoff
-          environmentId={environmentId}
-          recovery={pendingRetractionRecovery}
-          projectedCompletion={projectedRetractionCompletion}
-          navigate={navigate}
-        />
-      ) : null}
       {rightPanelOpen && !shouldUseRightPanelSheet ? panelLayoutControls : null}
       <div
         className={cn(
@@ -6609,7 +6453,13 @@ function ChatViewContent(props: ChatViewProps) {
                             phase={phase}
                             isConnecting={isConnecting}
                             isSendBusy={isSendBusy}
-                            sendDisabledReason={threadDetailLoading ? "Messages loading" : null}
+                            sendDisabledReason={
+                              retractionPending
+                                ? "Message retraction in progress"
+                                : threadDetailLoading
+                                  ? "Messages loading"
+                                  : null
+                            }
                             isPreparingWorktree={isPreparingWorktree}
                             environmentUnavailable={activeEnvironmentUnavailableState}
                             activePendingApproval={activePendingApproval}
@@ -6875,8 +6725,46 @@ function ChatViewContent(props: ChatViewProps) {
 }
 
 export default function ChatView(props: ChatViewProps) {
+  const navigate = useNavigate();
+  const pendingRetractionRecovery = useRetractionRecoveryStore((state) =>
+    props.routeKind === "server"
+      ? (Object.values(state.byRequestId).find(
+          (recovery) =>
+            recovery.sourceThreadRef.environmentId === props.environmentId &&
+            recovery.sourceThreadRef.threadId === props.threadId,
+        ) ?? null)
+      : null,
+  );
+  const retractionThread = useThread(
+    pendingRetractionRecovery ? pendingRetractionRecovery.sourceThreadRef : null,
+  );
+  const projectedRetraction = retractionThread?.turnRetraction;
+  const projectedCompletion =
+    pendingRetractionRecovery &&
+    projectedRetraction?.status === "completed" &&
+    projectedRetraction.requestId === pendingRetractionRecovery.requestId &&
+    projectedRetraction.completedAt !== null
+      ? {
+          threadId: pendingRetractionRecovery.sourceThreadRef.threadId,
+          retraction: {
+            requestId: projectedRetraction.requestId,
+            messageId: projectedRetraction.messageId,
+            turnId: projectedRetraction.targetTurnId,
+            firstUserMessage: projectedRetraction.firstUserMessage,
+            completedAt: projectedRetraction.completedAt,
+          },
+        }
+      : null;
   return (
     <DiffWorkerPoolProvider>
+      {pendingRetractionRecovery ? (
+        <RetractionRecoveryHandoff
+          environmentId={props.environmentId}
+          recovery={pendingRetractionRecovery}
+          projectedCompletion={projectedCompletion}
+          navigate={navigate}
+        />
+      ) : null}
       <ChatViewContent {...props} />
     </DiffWorkerPoolProvider>
   );
