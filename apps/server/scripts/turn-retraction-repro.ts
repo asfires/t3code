@@ -18,36 +18,42 @@ import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
 import * as Socket from "effect/unstable/socket/Socket";
 
 type Provider = "claudeAgent" | "codex";
-type Timing = "immediate" | "mid-thinking";
+type Timing = "immediate" | "long-response" | "mid-thinking";
 
 const [baseDir, httpOrigin, pairingCredential, providerArg = "codex", timingArg = "immediate"] =
   process.argv.slice(2);
 if (!baseDir || !httpOrigin || !pairingCredential) {
   throw new Error(
-    "usage: node apps/server/scripts/turn-retraction-repro.ts <base-dir> <http-origin> <pairing-credential> [codex|claudeAgent] [immediate|mid-thinking]",
+    "usage: node apps/server/scripts/turn-retraction-repro.ts <base-dir> <http-origin> <pairing-credential> [codex|claudeAgent] [immediate|mid-thinking|long-response]",
   );
 }
 if (providerArg !== "codex" && providerArg !== "claudeAgent") {
   throw new Error(`unsupported provider '${providerArg}'`);
 }
-if (timingArg !== "immediate" && timingArg !== "mid-thinking") {
+if (timingArg !== "immediate" && timingArg !== "mid-thinking" && timingArg !== "long-response") {
   throw new Error(`unsupported timing '${timingArg}'`);
 }
 
 const provider: Provider = providerArg;
 const timing: Timing = timingArg;
-const delayMs = timing === "mid-thinking" ? 2_000 : 0;
+const delayMs = timing === "mid-thinking" ? 250 : timing === "long-response" ? 1_000 : 0;
+const maxRetractionCompletionMs = 20_000;
 const suffix = crypto.randomUUID();
 const projectId = ProjectId.make(`repro-project-${suffix}`);
 const threadId = ThreadId.make(`repro-thread-${suffix}`);
 const baselineMessageId = MessageId.make(`repro-baseline-message-${suffix}`);
+const naturalControlMessageId = MessageId.make(`repro-natural-control-message-${suffix}`);
+const setupRetractionMessageId = MessageId.make(`repro-setup-retraction-message-${suffix}`);
 const retractedMessageId = MessageId.make(`repro-retracted-message-${suffix}`);
 const interrogationMessageId = MessageId.make(`repro-interrogation-message-${suffix}`);
+const setupRetractionRequestId = CommandId.make(`repro-setup-retract-${suffix}`);
 const retractionRequestId = CommandId.make(`repro-retract-${suffix}`);
 const workspaceRoot = `${baseDir}/workspace-${suffix}`;
 const retainedMarker = `KEPT_MARKER_${suffix}`;
 const retractedMarker = `REMOVED_MARKER_${suffix}`;
+const setupRetractionMarker = `SETUP_REMOVED_MARKER_${suffix}`;
 const hostNowIso = () => new Date().toISOString();
+const hostNowMs = () => Date.now();
 const stringifyJson = (value: unknown) => JSON.stringify(value);
 const modelSelection = {
   instanceId: ProviderInstanceId.make(provider),
@@ -113,7 +119,14 @@ const readSession = () =>
      FROM projection_thread_sessions WHERE thread_id = ?`,
     threadId,
   );
-const readRetraction = () =>
+const readProviderSendClaimed = (messageId: MessageId) =>
+  queryOne<{ claimedAt: string }>(
+    `SELECT claimed_at AS claimedAt FROM provider_turn_send_claims
+     WHERE thread_id = ? AND message_id = ?`,
+    threadId,
+    messageId,
+  );
+const readRetraction = (requestId = retractionRequestId) =>
   queryOne<{
     status: string;
     providerSendState: string;
@@ -126,7 +139,7 @@ const readRetraction = () =>
             target_turn_id AS targetTurnId, baseline_turn_count AS baselineTurnCount,
             completed_at AS completedAt, failed_at AS failedAt
      FROM projection_turn_retractions WHERE request_id = ?`,
-    retractionRequestId,
+    requestId,
   );
 const readAssistantReply = (messageId: MessageId) =>
   queryOne<{ text: string }>(
@@ -212,23 +225,109 @@ const run = Effect.gen(function* () {
     ),
   );
 
+  if (timing === "immediate") {
+    yield* dispatchTurn(
+      setupRetractionMessageId,
+      `Remember this exact token: ${setupRetractionMarker}. Use the shell to run sleep 20, then reply with exactly SETUP_ACK.`,
+    );
+    yield* Effect.promise(() =>
+      waitFor(
+        "provider to start setup retraction turn",
+        () => ({ session: readSession(), turn: readTurn(setupRetractionMessageId) }),
+        (value) =>
+          value.session?.status === "running" &&
+          value.session.activeTurnId !== null &&
+          value.turn?.turnId === value.session.activeTurnId,
+      ),
+    );
+    yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+      type: "thread.turn.retract",
+      commandId: setupRetractionRequestId,
+      threadId,
+      messageId: setupRetractionMessageId,
+      createdAt: hostNowIso(),
+    });
+    const setupRetraction = yield* Effect.promise(() =>
+      waitFor(
+        "completed setup retraction",
+        () => readRetraction(setupRetractionRequestId),
+        (row) => row.status === "completed" || row.status === "failed",
+      ),
+    );
+    if (setupRetraction.status !== "completed") {
+      throw new Error(`setup retraction failed: ${stringifyJson(setupRetraction)}`);
+    }
+  }
+
+  let naturalCompletionMs: number | null = null;
+  let expectedRetractionBaselineTurnCount = 1;
+  if (timing === "long-response") {
+    const naturalStartedAtMs = hostNowMs();
+    yield* dispatchTurn(
+      naturalControlMessageId,
+      "Count from 1 to 400, one number per line, no other text.",
+    );
+    yield* Effect.promise(() =>
+      waitFor(
+        "natural long-response control and checkpoint",
+        () => readTurn(naturalControlMessageId),
+        (turn) =>
+          turn.state === "completed" &&
+          turn.checkpointTurnCount === 2 &&
+          turn.checkpointStatus === "ready",
+      ),
+    );
+    naturalCompletionMs = hostNowMs() - naturalStartedAtMs;
+    expectedRetractionBaselineTurnCount = 2;
+  }
+
   yield* dispatchTurn(
     retractedMessageId,
     timing === "mid-thinking"
       ? `Remember this exact token: ${retractedMarker}. Use the shell to run sleep 20, then reply with exactly RETRACTED_ACK.`
-      : `Remember this exact token: ${retractedMarker}. Reply with exactly RETRACTED_ACK.`,
+      : timing === "long-response"
+        ? `Remember this exact token: ${retractedMarker}. Then count from 1 to 400, one number per line, no other text.`
+        : `Remember this exact token: ${retractedMarker}. Reply with exactly RETRACTED_ACK.`,
   );
-  const retractedTurn = yield* Effect.promise(() =>
-    waitFor(
-      "provider to start the retractable turn",
-      () => ({ session: readSession(), turn: readTurn(retractedMessageId) }),
-      (value) =>
-        value.session?.status === "running" &&
-        value.session.activeTurnId !== null &&
-        value.turn?.turnId === value.session.activeTurnId,
-    ),
-  );
+  let sessionStatusAtRetraction: string;
+  if (timing === "immediate") {
+    const claimedSend = yield* Effect.promise(() =>
+      waitFor(
+        "claimed provider send before immediate retraction",
+        () => ({ claim: readProviderSendClaimed(retractedMessageId), session: readSession() }),
+        (value) =>
+          value.claim !== undefined &&
+          (value.session?.status === "starting" || value.session?.status === "running"),
+      ),
+    );
+    sessionStatusAtRetraction = claimedSend.session?.status ?? "missing";
+  } else {
+    const startedTurn = yield* Effect.promise(() =>
+      waitFor(
+        "provider to start the retractable turn",
+        () => ({ session: readSession(), turn: readTurn(retractedMessageId) }),
+        (value) =>
+          value.session?.status === "running" &&
+          value.session.activeTurnId !== null &&
+          value.turn?.turnId === value.session.activeTurnId,
+      ),
+    );
+    sessionStatusAtRetraction = startedTurn.session?.status ?? "missing";
+  }
   if (delayMs > 0) yield* Effect.sleep(`${delayMs} millis`);
+  const beforeRetraction = yield* Effect.sync(() => ({
+    session: readSession(),
+    turn: readTurn(retractedMessageId),
+  }));
+  if (
+    timing === "long-response" &&
+    (beforeRetraction.session?.status !== "running" || beforeRetraction.turn?.state !== "running")
+  ) {
+    throw new Error(
+      `long response completed before retraction was requested: ${stringifyJson(beforeRetraction)}`,
+    );
+  }
+  const retractionRequestedAtMs = hostNowMs();
   yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
     type: "thread.turn.retract",
     commandId: retractionRequestId,
@@ -243,11 +342,27 @@ const run = Effect.gen(function* () {
       (row) => row.status === "completed" || row.status === "failed",
     ),
   );
+  const retractionCompletionMs = hostNowMs() - retractionRequestedAtMs;
   if (retraction.status !== "completed") {
     throw new Error(`retraction failed: ${stringifyJson(retraction)}`);
   }
   if (retraction.providerSendState !== "claimed") {
     throw new Error(`retraction did not exercise provider rollback: ${stringifyJson(retraction)}`);
+  }
+  if (retraction.baselineTurnCount !== expectedRetractionBaselineTurnCount) {
+    throw new Error(
+      `unexpected rollback boundary: expected ${expectedRetractionBaselineTurnCount}, got ${retraction.baselineTurnCount}`,
+    );
+  }
+  if (
+    timing === "long-response" &&
+    (naturalCompletionMs === null ||
+      retractionCompletionMs >= maxRetractionCompletionMs ||
+      retractionCompletionMs >= naturalCompletionMs)
+  ) {
+    throw new Error(
+      `long-response timing gate failed: retractionCompletionMs=${retractionCompletionMs} naturalCompletionMs=${naturalCompletionMs} maxRetractionCompletionMs=${maxRetractionCompletionMs}`,
+    );
   }
 
   yield* dispatchTurn(
@@ -269,25 +384,48 @@ const run = Effect.gen(function* () {
     ),
   );
 
-  return { baselineTurn, retractedTurn, retraction, interrogationTurn, reply };
+  return {
+    baselineTurn,
+    retraction,
+    interrogationTurn,
+    reply,
+    naturalCompletionMs,
+    retractionCompletionMs,
+    sessionStatusAtRetraction,
+  };
 }).pipe(Effect.provide(protocolLayer));
 
 try {
   const result = await Effect.runPromise(Effect.scoped(run));
   const retractedMarkerStatus = result.reply.includes(retractedMarker) ? "PRESENT" : "ABSENT";
   const retainedMarkerStatus = result.reply.includes(retainedMarker) ? "PRESENT" : "ABSENT";
+  const setupRetractionMarkerStatus = result.reply.includes(setupRetractionMarker)
+    ? "PRESENT"
+    : "ABSENT";
   console.log(
-    `scenario provider=${provider} timing=${timing} session=live delayMs=${delayMs} threadId=${threadId}`,
+    `scenario provider=${provider} timing=${timing} sessionAtRetraction=${result.sessionStatusAtRetraction} delayMs=${delayMs} threadId=${threadId}`,
   );
   console.log(
     `rollback baselineTurnCount=${result.retraction.baselineTurnCount} providerSendState=${result.retraction.providerSendState} targetTurnId=${result.retraction.targetTurnId}`,
   );
+  console.log(
+    `timings retractionCompletionMs=${result.retractionCompletionMs} naturalCompletionMs=${result.naturalCompletionMs ?? "n/a"} maxRetractionCompletionMs=${maxRetractionCompletionMs}`,
+  );
   console.log(`retractedMarker=${retractedMarker} status=${retractedMarkerStatus}`);
+  if (timing === "immediate") {
+    console.log(
+      `setupRetractedMarker=${setupRetractionMarker} status=${setupRetractionMarkerStatus}`,
+    );
+  }
   console.log(`retainedMarker=${retainedMarker} status=${retainedMarkerStatus}`);
   console.log(`interrogationReplyChars=${result.reply.length}`);
-  if (retractedMarkerStatus !== "ABSENT" || retainedMarkerStatus !== "PRESENT") {
+  if (
+    retractedMarkerStatus !== "ABSENT" ||
+    retainedMarkerStatus !== "PRESENT" ||
+    (timing === "immediate" && setupRetractionMarkerStatus !== "ABSENT")
+  ) {
     throw new Error(
-      `model-context gate failed: retracted=${retractedMarkerStatus} retained=${retainedMarkerStatus}`,
+      `model-context gate failed: retracted=${retractedMarkerStatus} setupRetracted=${setupRetractionMarkerStatus} retained=${retainedMarkerStatus}`,
     );
   }
   console.log("gate=PASS");

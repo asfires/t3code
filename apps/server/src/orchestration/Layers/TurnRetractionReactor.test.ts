@@ -69,6 +69,7 @@ const BASELINE_REF = CheckpointRef.make(`refs/t3/checkpoints/${THREAD_ID}/1`);
 type MutableState = {
   row: ProjectionTurnRetraction;
   sessionStatus: OrchestrationSessionStatus | null;
+  activeTurnId: TurnId | null;
   historyTurnCount: number;
   rollbackTargetTurnId: TurnId | undefined;
   filesystemRestored: boolean;
@@ -78,6 +79,7 @@ type MutableState = {
   terminalRollbackFailure: boolean;
   interruptAcknowledgementHangs: boolean;
   readonly order: string[];
+  readonly interruptedTurnIds: Array<TurnId | undefined>;
   readonly dispatched: OrchestrationCommand[];
 };
 
@@ -106,6 +108,7 @@ function makeState(providerSendState: ProjectionTurnRetraction["providerSendStat
   return {
     row: pendingRow(providerSendState),
     sessionStatus: providerSendState === "claimed" ? "running" : null,
+    activeTurnId: providerSendState === "claimed" ? TURN_ID : null,
     historyTurnCount: 2,
     rollbackTargetTurnId: undefined,
     filesystemRestored: false,
@@ -115,6 +118,7 @@ function makeState(providerSendState: ProjectionTurnRetraction["providerSendStat
     terminalRollbackFailure: false,
     interruptAcknowledgementHangs: false,
     order: [],
+    interruptedTurnIds: [],
     dispatched: [],
   };
 }
@@ -168,7 +172,7 @@ function projectedThread(state: MutableState): OrchestrationThread {
             providerName: "Codex",
             providerInstanceId: ProviderInstanceId.make("codex"),
             runtimeMode: "full-access",
-            activeTurnId: state.sessionStatus === "running" ? TURN_ID : null,
+            activeTurnId: state.sessionStatus === "running" ? state.activeTurnId : null,
             lastError: null,
             updatedAt: NOW,
           },
@@ -295,9 +299,10 @@ async function startHarness(state: MutableState) {
   const provider = ProviderService.of({
     startSession: () => unsupported(),
     sendTurn: () => unsupported(),
-    interruptTurn: () =>
+    interruptTurn: ({ turnId }) =>
       Effect.sync(() => {
         state.order.push("interrupt");
+        state.interruptedTurnIds.push(turnId);
         if (state.interruptAcknowledgementHangs) {
           // Models Codex emitting turn/completed while its turn/interrupt RPC
           // response remains unresolved.
@@ -393,6 +398,8 @@ async function startHarness(state: MutableState) {
     scope,
     emitDomain: (event: OrchestrationEvent) =>
       runtime.runPromise(PubSub.publish(domainEvents, event)),
+    emitRuntime: (event: ProviderRuntimeEvent) =>
+      runtime.runPromise(PubSub.publish(runtimeEvents, event)),
     retryTick: () => runtime.runPromise(Queue.offer(retryTicks, undefined)),
   };
 }
@@ -454,6 +461,57 @@ it("drives claimed convergence from interrupt through a settlement event", async
   expect(state.historyTurnCount).toBe(1);
   expect(state.rollbackTargetTurnId).toBe(TURN_ID);
   expect(state.row.status).toBe("completed");
+  await stopHarness(harness);
+});
+
+it("waits through starting and interrupts the concrete turn after it starts", async () => {
+  const state = makeState("claimed");
+  state.sessionStatus = "starting";
+  state.activeTurnId = null;
+  const harness = await startHarness(state);
+
+  expect(state.order).toEqual([]);
+  await harness.retryTick();
+  await harness.runtime.runPromise(harness.reactor.drain);
+  expect(state.order).toEqual([]);
+
+  state.sessionStatus = "running";
+  state.activeTurnId = TURN_ID;
+  await harness.emitRuntime({
+    type: "turn.started",
+    eventId: EventId.make("evt-target-turn-started"),
+    provider: ProviderDriverKind.make("claudeAgent"),
+    createdAt: NOW,
+    threadId: THREAD_ID,
+    turnId: TURN_ID,
+    payload: {},
+  });
+  await harness.runtime.runPromise(Effect.yieldNow);
+  await harness.runtime.runPromise(harness.reactor.drain);
+
+  expect(state.order).toEqual(["interrupt"]);
+  expect(state.interruptedTurnIds).toEqual([TURN_ID]);
+
+  await harness.retryTick();
+  await harness.runtime.runPromise(harness.reactor.drain);
+  expect(state.order).toEqual(["interrupt"]);
+
+  state.sessionStatus = "ready";
+  state.activeTurnId = null;
+  await harness.retryTick();
+  await harness.runtime.runPromise(harness.reactor.drain);
+  expect(state.order).toEqual(["interrupt", "rollback", "restore", "complete"]);
+  await stopHarness(harness);
+});
+
+it("does not interrupt a foreign active turn", async () => {
+  const state = makeState("claimed");
+  state.activeTurnId = TurnId.make("turn-foreign");
+  const harness = await startHarness(state);
+
+  expect(state.order).toEqual([]);
+  expect(state.interruptedTurnIds).toEqual([]);
+  expect(state.row.status).toBe("requested");
   await stopHarness(harness);
 });
 

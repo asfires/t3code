@@ -100,7 +100,24 @@ export const makeTurnRetractionReactor = Effect.gen(function* () {
   const providerService = yield* ProviderService;
   const checkpointStore = yield* CheckpointStore.CheckpointStore;
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
-  const interruptedRequestIds = new Set<string>();
+  const interruptedTurnIdsByRequest = new Map<string, Set<string>>();
+
+  const clearIssuedInterrupts = (requestId: string) =>
+    interruptedTurnIdsByRequest.delete(requestId);
+  const hasIssuedInterrupt = (requestId: string, turnId: TurnId) =>
+    interruptedTurnIdsByRequest.get(requestId)?.has(turnId) === true;
+  const markInterruptIssued = (requestId: string, turnId: TurnId) => {
+    const issuedTurnIds = interruptedTurnIdsByRequest.get(requestId) ?? new Set<string>();
+    issuedTurnIds.add(turnId);
+    interruptedTurnIdsByRequest.set(requestId, issuedTurnIds);
+  };
+  const clearIssuedInterrupt = (requestId: string, turnId: TurnId) => {
+    const issuedTurnIds = interruptedTurnIdsByRequest.get(requestId);
+    issuedTurnIds?.delete(turnId);
+    if (issuedTurnIds?.size === 0) {
+      interruptedTurnIdsByRequest.delete(requestId);
+    }
+  };
 
   const commandId = (tag: string) =>
     crypto.randomUUIDv4.pipe(Effect.map((uuid) => CommandId.make(`server:${tag}:${uuid}`)));
@@ -307,7 +324,7 @@ export const makeTurnRetractionReactor = Effect.gen(function* () {
         })),
       );
     if (Option.isNone(current) || current.value.status !== "requested") {
-      interruptedRequestIds.delete(requestedRow.requestId);
+      clearIssuedInterrupts(requestedRow.requestId);
       yield* logConvergence(requestedRow, "eligibility", "skipped", {
         reason: Option.isNone(current)
           ? "retraction row no longer exists"
@@ -335,7 +352,7 @@ export const makeTurnRetractionReactor = Effect.gen(function* () {
         })),
       );
       if (Option.isNone(reconciled) || reconciled.value.status !== "requested") {
-        interruptedRequestIds.delete(row.requestId);
+        clearIssuedInterrupts(row.requestId);
         yield* logConvergence(row, "eligibility", "skipped", {
           action: "cancel-provider-send",
           reason: Option.isNone(reconciled)
@@ -358,7 +375,7 @@ export const makeTurnRetractionReactor = Effect.gen(function* () {
     if (row.providerSendState === "cancelled") {
       yield* restoreFilesystem(row, true);
       yield* dispatchCompletion(row, targetTurnId);
-      interruptedRequestIds.delete(row.requestId);
+      clearIssuedInterrupts(row.requestId);
       yield* logConvergence(row, "cleanup", "completed", {
         action: "restore-filesystem-and-complete-cancelled-send",
       });
@@ -381,18 +398,44 @@ export const makeTurnRetractionReactor = Effect.gen(function* () {
       });
     }
 
-    const sessionActive =
+    const sessionWasActive =
       thread.session?.status === "starting" || thread.session?.status === "running";
-    if (sessionActive) {
-      const interruptAlreadyRequested = interruptedRequestIds.has(row.requestId);
+    if (
+      thread.session?.status === "starting" ||
+      (thread.session?.status === "running" && thread.session.activeTurnId === null)
+    ) {
+      yield* logConvergence(row, "settlement", "pending", {
+        action: "awaiting-turn-start",
+        reason: `projected session is '${thread.session.status}' with no interruptible active turn`,
+      });
+      return;
+    }
+    if (thread.session?.status === "running") {
+      const activeTurnId = thread.session.activeTurnId;
+      if (targetTurnId === null) {
+        yield* logConvergence(row, "settlement", "pending", {
+          action: "awaiting-target-turn-resolution",
+          reason: `active turn '${activeTurnId}' cannot yet be correlated to message '${row.messageId}'`,
+        });
+        return;
+      }
+      if (activeTurnId !== targetTurnId) {
+        yield* logConvergence(row, "settlement", "pending", {
+          action: "active-turn-diverged",
+          reason: `active turn '${activeTurnId}' differs from retraction target '${targetTurnId}'; foreign turn will not be interrupted`,
+        });
+        return;
+      }
+
+      const interruptAlreadyRequested = hasIssuedInterrupt(row.requestId, targetTurnId);
       const interruptAcknowledged = interruptAlreadyRequested
         ? undefined
-        : yield* Effect.sync(() => interruptedRequestIds.add(row.requestId)).pipe(
+        : yield* Effect.sync(() => markInterruptIssued(row.requestId, targetTurnId)).pipe(
             Effect.andThen(
               providerService
                 .interruptTurn({
                   threadId: row.threadId,
-                  ...(targetTurnId !== null ? { turnId: targetTurnId } : {}),
+                  turnId: targetTurnId,
                 })
                 .pipe(
                   Effect.mapError((error) => ({
@@ -401,7 +444,7 @@ export const makeTurnRetractionReactor = Effect.gen(function* () {
                     detail: failureDetail(error),
                   })),
                   Effect.tapError(() =>
-                    Effect.sync(() => interruptedRequestIds.delete(row.requestId)),
+                    Effect.sync(() => clearIssuedInterrupt(row.requestId, targetTurnId)),
                   ),
                   Effect.timeoutOption(interruptTimeout),
                   Effect.map(Option.isSome),
@@ -426,11 +469,11 @@ export const makeTurnRetractionReactor = Effect.gen(function* () {
       ) {
         yield* logConvergence(row, "settlement", "pending", {
           action: interruptAlreadyRequested
-            ? "interrupt-already-requested"
+            ? "turn-interrupt-already-requested"
             : interruptAcknowledged
-              ? "interrupt-acknowledged"
-              : "interrupt-timed-out",
-          reason: `projected session remains '${afterInterrupt.session.status}'`,
+              ? "turn-interrupt-acknowledged"
+              : "turn-interrupt-timed-out",
+          reason: `projected session remains '${afterInterrupt.session.status}' for target turn '${targetTurnId}'`,
         });
         return;
       }
@@ -451,9 +494,9 @@ export const makeTurnRetractionReactor = Effect.gen(function* () {
       );
     yield* restoreFilesystem(row, false);
     yield* dispatchCompletion(row, targetTurnId);
-    interruptedRequestIds.delete(row.requestId);
+    clearIssuedInterrupts(row.requestId);
     yield* logConvergence(row, "cleanup", "completed", {
-      action: sessionActive
+      action: sessionWasActive
         ? "interrupt-settled-provider-rollback-restore-and-complete"
         : "provider-rollback-restore-and-complete",
     });
@@ -478,7 +521,7 @@ export const makeTurnRetractionReactor = Effect.gen(function* () {
                 })
               : appendTerminalFailure(latest.value, failure).pipe(
                   Effect.tap(() =>
-                    Effect.sync(() => interruptedRequestIds.delete(latest.value.requestId)),
+                    Effect.sync(() => clearIssuedInterrupts(latest.value.requestId)),
                   ),
                   Effect.catchCause((cause) =>
                     Effect.logWarning("failed to persist terminal turn retraction failure", {
