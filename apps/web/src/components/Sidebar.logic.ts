@@ -443,14 +443,27 @@ type SidebarThreadStatusInput = Pick<
   "hasPendingApprovals" | "hasPendingUserInput" | "session" | "backgroundLiveness"
 >;
 
-export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): SidebarThreadStatus {
+export function resolveSidebarThreadStatus(
+  thread: SidebarThreadStatusInput,
+  options?: {
+    /**
+     * The live turn was retracted from the composer and the server is still
+     * settling it. Presentation-only: the row shows what it looked like before
+     * the turn started, so the retraction never surfaces as work.
+     */
+    suppressRunningTurn?: boolean;
+  },
+): SidebarThreadStatus {
   if (thread.hasPendingApprovals) {
     return "approval";
   }
   if (thread.hasPendingUserInput) {
     return "input";
   }
-  if (thread.session?.status === "running" || thread.session?.status === "starting") {
+  if (
+    !options?.suppressRunningTurn &&
+    (thread.session?.status === "running" || thread.session?.status === "starting")
+  ) {
     return "working";
   }
   // A failed session outranks lingering background liveness: the user must

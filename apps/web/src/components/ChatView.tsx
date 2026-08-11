@@ -263,10 +263,11 @@ import {
 } from "./chat/chatEscapeTrigger";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { shouldRenderEmptyThreadHero } from "./chat/emptyThreadHero";
+import { findCorrelatedRetractionFailure } from "./chat/lastUserMessageRecovery";
 import {
-  findCorrelatedRetractionFailure,
-  useRetractionRecoveryStore,
-} from "./chat/lastUserMessageRecovery";
+  deriveEffectiveSessionPresentation,
+  usePendingRetractionForThread,
+} from "./chat/retractedTurnPresentation";
 import { useLastUserMessageRetraction } from "./chat/useLastUserMessageRetraction";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
@@ -2007,14 +2008,8 @@ function ChatViewContent(props: ChatViewProps) {
   const supportsPullRequests = serverConfig?.environment.capabilities.pullRequests === true;
   const supportsThreadTurnRetraction =
     serverConfig?.environment.capabilities.threadTurnRetraction === true;
-  const pendingRetractionRecovery = useRetractionRecoveryStore((state) =>
-    routeKind === "server"
-      ? (Object.values(state.byRequestId).find(
-          (recovery) =>
-            recovery.sourceThreadRef.environmentId === routeThreadRef.environmentId &&
-            recovery.sourceThreadRef.threadId === routeThreadRef.threadId,
-        ) ?? null)
-      : null,
+  const pendingRetractionRecovery = usePendingRetractionForThread(
+    routeKind === "server" ? routeThreadRef : null,
   );
   const retractionPending =
     pendingRetractionRecovery !== null || activeThread?.turnRetraction?.status === "requested";
@@ -2326,13 +2321,27 @@ function ChatViewContent(props: ChatViewProps) {
     activePendingUserInput: activePendingUserInput?.requestId ?? null,
     threadError,
   });
-  const isWorking =
-    phase === "running" ||
-    isSendBusy ||
-    heldSendPending ||
-    isConnecting ||
-    isRevertingCheckpoint ||
-    retractionPending;
+  // The just-popped turn is still settling server-side for a beat. Every
+  // surface reads this one derivation so the thread presents as if the turn
+  // never started. `phase` stays raw for the decisions that must respect the
+  // real session (the pop window, the revert-checkpoint guard, local dispatch
+  // bookkeeping); `presentedPhase` is what the composer and timeline read.
+  const {
+    phase: presentedPhase,
+    isWorking,
+    activeTurnInProgress,
+  } = deriveEffectiveSessionPresentation({
+    phase,
+    pendingRetraction: pendingRetractionRecovery,
+    projectedRetraction: activeThread?.turnRetraction ?? null,
+    activeTurnId: activeThread?.session?.activeTurnId ?? null,
+    retractionPending,
+    latestTurnSettled,
+    isSendBusy,
+    heldSendPending,
+    isConnecting,
+    isRevertingCheckpoint,
+  });
   const activeWorkStartedAt = deriveActiveWorkStartedAt(
     activeLatestTurn,
     activeThread?.session ?? null,
@@ -6461,7 +6470,7 @@ function ChatViewContent(props: ChatViewProps) {
                 key={activeThread.id}
                 isWorking={isWorking}
                 workingStepLabel={workingStepLabel}
-                activeTurnInProgress={isWorking || !latestTurnSettled}
+                activeTurnInProgress={activeTurnInProgress}
                 activeTurnStartedAt={activeWorkStartedAt}
                 listRef={legendListRef}
                 timelineEntries={timelineEntries}
@@ -6585,7 +6594,7 @@ function ChatViewContent(props: ChatViewProps) {
                             isLocalDraftThread={isLocalDraftThread}
                             forceExpandedOnMobile={forceExpandedMobileComposer && isDraftHeroState}
                             projectSelectionRequired={isLocalDraftThread && activeProject === null}
-                            phase={phase}
+                            phase={presentedPhase}
                             isConnecting={isConnecting}
                             isSendBusy={isSendBusy || heldSendPending}
                             sendDisabledReason={threadDetailLoading ? "Messages loading" : null}
