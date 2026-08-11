@@ -2,27 +2,25 @@ import { CheckIcon, CopyIcon } from "lucide-react";
 import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { cn } from "~/lib/utils";
 import { Button } from "./button";
+import { Menu, MenuItem, MenuPopup, MenuTrigger } from "./menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./tooltip";
 
-export const CopyTextButton = memo(function CopyTextButton(props: {
+export interface CopyTextMenuItem {
   text: string;
   label: string;
-  copiedLabel?: string;
-  className?: string;
-  icon?: ReactNode;
   onCopyError?: (cause: unknown) => void;
-}) {
-  const { text, label, copiedLabel = "Copied", className, icon, onCopyError } = props;
+}
+
+function useCopyTextFeedback() {
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const currentLabel = copied ? copiedLabel : label;
 
-  const handleCopy = useCallback(() => {
+  const copyText = useCallback((item: CopyTextMenuItem) => {
     if (typeof navigator === "undefined" || navigator.clipboard == null) {
       return;
     }
     void navigator.clipboard
-      .writeText(text)
+      .writeText(item.text)
       .then(() => {
         if (copiedTimerRef.current != null) {
           clearTimeout(copiedTimerRef.current);
@@ -34,9 +32,9 @@ export const CopyTextButton = memo(function CopyTextButton(props: {
         }, 1200);
       })
       .catch((cause) => {
-        onCopyError?.(cause);
+        item.onCopyError?.(cause);
       });
-  }, [onCopyError, text]);
+  }, []);
 
   useEffect(
     () => () => {
@@ -47,6 +45,25 @@ export const CopyTextButton = memo(function CopyTextButton(props: {
     },
     [],
   );
+
+  return { copied, copyText };
+}
+
+export const CopyTextButton = memo(function CopyTextButton(props: {
+  text: string;
+  label: string;
+  copiedLabel?: string;
+  className?: string;
+  icon?: ReactNode;
+  onCopyError?: (cause: unknown) => void;
+}) {
+  const { text, label, copiedLabel = "Copied", className, icon, onCopyError } = props;
+  const { copied, copyText } = useCopyTextFeedback();
+  const currentLabel = copied ? copiedLabel : label;
+
+  const handleCopy = useCallback(() => {
+    copyText({ text, label, ...(onCopyError ? { onCopyError } : {}) });
+  }, [copyText, label, onCopyError, text]);
 
   return (
     <Tooltip>
@@ -66,5 +83,49 @@ export const CopyTextButton = memo(function CopyTextButton(props: {
       </TooltipTrigger>
       <TooltipPopup side="top">{currentLabel}</TooltipPopup>
     </Tooltip>
+  );
+});
+
+export const CopyTextMenuButton = memo(function CopyTextMenuButton(props: {
+  items: readonly CopyTextMenuItem[];
+  label: string;
+  copiedLabel?: string;
+  className?: string;
+  icon?: ReactNode;
+}) {
+  const { items, label, copiedLabel = "Copied", className, icon } = props;
+  const { copied, copyText } = useCopyTextFeedback();
+  const currentLabel = copied ? copiedLabel : label;
+
+  return (
+    <Menu>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <MenuTrigger
+              render={
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  className={cn("text-muted-foreground hover:text-foreground", className)}
+                  aria-label={currentLabel}
+                />
+              }
+            />
+          }
+        >
+          {copied ? <CheckIcon className="size-3" /> : (icon ?? <CopyIcon className="size-3" />)}
+        </TooltipTrigger>
+        <TooltipPopup side="top">{currentLabel}</TooltipPopup>
+      </Tooltip>
+      <MenuPopup align="end">
+        {items.map((item) => (
+          <MenuItem key={item.label} onClick={() => copyText(item)}>
+            {item.label}
+          </MenuItem>
+        ))}
+      </MenuPopup>
+    </Menu>
   );
 });
