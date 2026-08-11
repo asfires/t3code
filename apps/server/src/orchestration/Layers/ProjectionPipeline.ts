@@ -1635,6 +1635,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             ),
             targetTurnId: retraction.targetTurnId,
             providerSendClaimed: false,
+            providerSendState: "unclaimed",
             firstUserMessage: retraction.firstUserMessage,
             requestedAt: event.payload.createdAt,
             status: "requested",

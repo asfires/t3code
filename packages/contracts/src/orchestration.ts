@@ -364,6 +364,9 @@ export type ThreadTitleRegeneration = typeof ThreadTitleRegeneration.Type;
 export const ThreadTurnRetractionStatus = Schema.Literals(["requested", "completed", "failed"]);
 export type ThreadTurnRetractionStatus = typeof ThreadTurnRetractionStatus.Type;
 
+export const ThreadTurnProviderSendState = Schema.Literals(["unclaimed", "claimed", "cancelled"]);
+export type ThreadTurnProviderSendState = typeof ThreadTurnProviderSendState.Type;
+
 export const OrchestrationThreadTurnRetraction = Schema.Struct({
   requestId: CommandId,
   messageId: MessageId,
@@ -371,6 +374,8 @@ export const OrchestrationThreadTurnRetraction = Schema.Struct({
   baselineCheckpointRef: CheckpointRef,
   targetTurnId: Schema.NullOr(TurnId),
   providerSendClaimed: Schema.Boolean,
+  // Optional so snapshots written before durable provider-send ownership still decode.
+  providerSendState: Schema.optional(ThreadTurnProviderSendState),
   firstUserMessage: Schema.Boolean,
   requestedAt: IsoDateTime,
   status: ThreadTurnRetractionStatus,

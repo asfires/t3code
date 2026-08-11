@@ -364,6 +364,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             baselineCheckpointRef: CheckpointRef.make("checkpoint-1"),
             targetTurnId: TurnId.make("turn-1"),
             providerSendClaimed: true,
+            providerSendState: "claimed",
             firstUserMessage: false,
             requestedAt: "2026-02-24T00:00:08.500Z",
             status: "requested",

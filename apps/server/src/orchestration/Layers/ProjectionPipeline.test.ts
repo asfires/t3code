@@ -19,6 +19,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
+import { ProjectionTurnRetractionRepositoryLive } from "../../persistence/Layers/ProjectionTurnRetractions.ts";
 import {
   makeSqlitePersistenceLive,
   SqlitePersistenceMemory,
@@ -284,9 +285,17 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-retraction-proj
           assert.equal(pending.length, 1);
           assert.equal(pending[0]?.requestId, CommandId.make("cmd-retract-1"));
           assert.equal(pending[0]?.providerSendClaimed, false);
+          assert.equal(pending[0]?.providerSendState, "unclaimed");
           assert.equal(pending[0]?.status, "requested");
           assert.equal(pending[0]?.baselineTurnCount, 2);
           assert.match(pending[0]?.baselineCheckpointRef ?? "", /\/turn\/2$/);
+
+          const sendClaim = yield* retractions.claimProviderSend({
+            threadId,
+            messageId: MessageId.make("message-4"),
+            claimedAt: "2026-01-01T00:00:01.500Z",
+          });
+          assert.equal(sendClaim, "claimed");
 
           yield* eventStore.append({
             type: "thread.activity-appended",
@@ -345,6 +354,17 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-retraction-proj
               },
             },
           });
+          yield* pipeline.bootstrap;
+
+          const claimedPending = yield* retractions.getByRequestId({
+            requestId: CommandId.make("cmd-retract-2"),
+          });
+          assert.equal(claimedPending._tag, "Some");
+          if (claimedPending._tag === "Some") {
+            assert.equal(claimedPending.value.providerSendClaimed, true);
+            assert.equal(claimedPending.value.providerSendState, "claimed");
+          }
+
           yield* eventStore.append({
             type: "thread.reverted",
             eventId: EventId.make("evt-retract-completed-2"),
@@ -2805,6 +2825,77 @@ it.effect("restores pending turn-start metadata across projection pipeline resta
       Layer.provideMerge(
         ServerConfig.layerTest(process.cwd(), {
           prefix: "t3-projection-pipeline-restart-",
+        }),
+        NodeServices.layer,
+      ),
+    ),
+  ),
+);
+
+it.effect("retains provider-send claim classification across repository restart", () =>
+  Effect.gen(function* () {
+    const { dbPath } = yield* ServerConfig;
+    const threadId = ThreadId.make("thread-retraction-claim-restart");
+    const messageId = MessageId.make("message-retraction-claim-restart");
+    const requestId = CommandId.make("request-retraction-claim-restart");
+
+    yield* Effect.gen(function* () {
+      const retractions = yield* ProjectionTurnRetractionRepository;
+      assert.equal(
+        yield* retractions.claimProviderSend({
+          threadId,
+          messageId,
+          claimedAt: "2026-01-01T00:00:00.000Z",
+        }),
+        "claimed",
+      );
+      yield* retractions.upsertPending({
+        requestId,
+        threadId,
+        messageId,
+        baselineTurnCount: 0,
+        baselineCheckpointRef: CheckpointRef.make(
+          "refs/t3/threads/thread-retraction-claim-restart/turn/0",
+        ),
+        targetTurnId: null,
+        providerSendClaimed: false,
+        providerSendState: "unclaimed",
+        firstUserMessage: true,
+        requestedAt: "2026-01-01T00:00:01.000Z",
+        status: "requested",
+        completedAt: null,
+        failedAt: null,
+      });
+    }).pipe(
+      Effect.provide(
+        ProjectionTurnRetractionRepositoryLive.pipe(
+          Layer.provide(makeSqlitePersistenceLive(dbPath)),
+        ),
+      ),
+    );
+
+    const restarted = yield* Effect.gen(function* () {
+      const retractions = yield* ProjectionTurnRetractionRepository;
+      return yield* retractions.getByRequestId({ requestId });
+    }).pipe(
+      Effect.provide(
+        ProjectionTurnRetractionRepositoryLive.pipe(
+          Layer.provide(makeSqlitePersistenceLive(dbPath)),
+        ),
+      ),
+    );
+
+    assert.equal(restarted._tag, "Some");
+    if (restarted._tag === "Some") {
+      assert.equal(restarted.value.providerSendClaimed, true);
+      assert.equal(restarted.value.providerSendState, "claimed");
+      assert.equal(restarted.value.status, "requested");
+    }
+  }).pipe(
+    Effect.provide(
+      Layer.provideMerge(
+        ServerConfig.layerTest(process.cwd(), {
+          prefix: "t3-retraction-claim-restart-",
         }),
         NodeServices.layer,
       ),

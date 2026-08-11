@@ -5,6 +5,7 @@ import {
   MessageId,
   NonNegativeInt,
   ThreadId,
+  ThreadTurnProviderSendState,
   ThreadTurnRetractionStatus,
   TurnId,
 } from "@t3tools/contracts";
@@ -23,6 +24,7 @@ export const ProjectionTurnRetraction = Schema.Struct({
   baselineCheckpointRef: CheckpointRef,
   targetTurnId: Schema.NullOr(TurnId),
   providerSendClaimed: Schema.Boolean,
+  providerSendState: ThreadTurnProviderSendState,
   firstUserMessage: Schema.Boolean,
   requestedAt: IsoDateTime,
   status: ThreadTurnRetractionStatus,
@@ -33,6 +35,15 @@ export type ProjectionTurnRetraction = typeof ProjectionTurnRetraction.Type;
 
 const ProjectionTurnRetractionRequest = Schema.Struct({ requestId: CommandId });
 const ProjectionTurnRetractionThread = Schema.Struct({ threadId: ThreadId });
+const ProjectionTurnProviderSend = Schema.Struct({
+  threadId: ThreadId,
+  messageId: MessageId,
+  claimedAt: IsoDateTime,
+});
+const CancelProjectionTurnProviderSend = Schema.Struct({
+  threadId: ThreadId,
+  messageId: MessageId,
+});
 const MarkProjectionTurnRetractionCompleted = Schema.Struct({
   requestId: CommandId,
   completedAt: IsoDateTime,
@@ -53,6 +64,16 @@ export interface ProjectionTurnRetractionRepositoryShape {
   readonly markFailed: (
     input: typeof MarkProjectionTurnRetractionFailed.Type,
   ) => Effect.Effect<void, ProjectionRepositoryError>;
+  /**
+   * Atomically claims provider send ownership unless an unclaimed retraction is pending.
+   * A cancelled result is the durable cancel-before-spawn handoff to WO3.
+   */
+  readonly claimProviderSend: (
+    input: typeof ProjectionTurnProviderSend.Type,
+  ) => Effect.Effect<"claimed" | "cancelled", ProjectionRepositoryError>;
+  readonly cancelPendingProviderSend: (
+    input: typeof CancelProjectionTurnProviderSend.Type,
+  ) => Effect.Effect<boolean, ProjectionRepositoryError>;
   readonly getByRequestId: (
     input: typeof ProjectionTurnRetractionRequest.Type,
   ) => Effect.Effect<Option.Option<ProjectionTurnRetraction>, ProjectionRepositoryError>;
@@ -73,6 +94,8 @@ export class ProjectionTurnRetractionRepository extends Context.Service<
 export {
   MarkProjectionTurnRetractionCompleted,
   MarkProjectionTurnRetractionFailed,
+  ProjectionTurnProviderSend,
+  CancelProjectionTurnProviderSend,
   ProjectionTurnRetractionRequest,
   ProjectionTurnRetractionThread,
 };

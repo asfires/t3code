@@ -449,12 +449,54 @@ describe("CheckpointReactor", () => {
 
     return {
       engine,
+      reactor,
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       provider,
       cwd,
       drain,
     };
   }
+
+  it("ensures the pre-turn baseline directly and skips an existing ref", async () => {
+    const harness = await createHarness({ seedFilesystemCheckpoints: false });
+    const checkpointRef = checkpointRefForThreadTurn(ThreadId.make("thread-1"), 0);
+
+    expect(gitRefExists(harness.cwd, checkpointRef)).toBe(false);
+    await Effect.runPromise(
+      harness.reactor.ensurePreTurnBaseline({
+        threadId: ThreadId.make("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    expect(gitRefExists(harness.cwd, checkpointRef)).toBe(true);
+
+    const firstOid = runGit(harness.cwd, ["rev-parse", checkpointRef]).trim();
+    await Effect.runPromise(
+      harness.reactor.ensurePreTurnBaseline({
+        threadId: ThreadId.make("thread-1"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+    expect(runGit(harness.cwd, ["rev-parse", checkpointRef]).trim()).toBe(firstOid);
+  });
+
+  it("allows non-Git workspaces through without a baseline ref", async () => {
+    const nonGitCwd = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-non-git-"));
+    tempDirs.push(nonGitCwd);
+    const harness = await createHarness({
+      seedFilesystemCheckpoints: false,
+      projectWorkspaceRoot: nonGitCwd,
+      threadWorktreePath: nonGitCwd,
+    });
+
+    const result = await Effect.runPromise(
+      harness.reactor.ensurePreTurnBaseline({
+        threadId: ThreadId.make("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    expect(result).toBeNull();
+  });
 
   it("captures pre-turn baseline on turn.started and post-turn checkpoint on turn.completed", async () => {
     const harness = await createHarness({ seedFilesystemCheckpoints: false });

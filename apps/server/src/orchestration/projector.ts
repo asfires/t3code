@@ -639,6 +639,7 @@ export function projectEvent(
                 ),
                 targetTurnId: payload.retraction.targetTurnId,
                 providerSendClaimed: false,
+                providerSendState: "unclaimed",
                 firstUserMessage: payload.retraction.firstUserMessage,
                 requestedAt: payload.createdAt,
                 status: "requested",
@@ -814,7 +815,8 @@ export function projectEvent(
                         payload.turnCount,
                       ),
                       targetTurnId: payload.retraction.turnId,
-                      providerSendClaimed: false,
+                      providerSendClaimed: thread.turnRetraction?.providerSendClaimed ?? false,
+                      providerSendState: thread.turnRetraction?.providerSendState ?? "unclaimed",
                       firstUserMessage: payload.retraction.firstUserMessage,
                       requestedAt:
                         thread.turnRetraction?.requestId === payload.retraction.requestId
