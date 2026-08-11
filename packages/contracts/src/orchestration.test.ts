@@ -12,6 +12,7 @@ import {
   OrchestrationGetFullThreadDiffInput,
   OrchestrationGetTurnDiffInput,
   OrchestrationLatestTurn,
+  OrchestrationReadModel,
   ProjectCreatedPayload,
   ProjectMetaUpdatedPayload,
   OrchestrationProposedPlan,
@@ -41,6 +42,7 @@ const decodeThreadTurnStartRequestedPayload = Schema.decodeUnknownEffect(
   ThreadTurnStartRequestedPayload,
 );
 const decodeOrchestrationLatestTurn = Schema.decodeUnknownEffect(OrchestrationLatestTurn);
+const decodeOrchestrationReadModel = Schema.decodeUnknownEffect(OrchestrationReadModel);
 const decodeOrchestrationProposedPlan = Schema.decodeUnknownEffect(OrchestrationProposedPlan);
 const decodeOrchestrationSession = Schema.decodeUnknownEffect(OrchestrationSession);
 const decodeOrchestrationThread = Schema.decodeUnknownEffect(OrchestrationThread);
@@ -127,6 +129,44 @@ it.effect("decodes historical interrupt and reverted payloads without retraction
       },
     });
     assert.strictEqual(storedInterrupt.type, "thread.turn-interrupt-requested");
+
+    const storedReverted = yield* decodeOrchestrationEvent({
+      sequence: 2,
+      eventId: "event-reverted-old",
+      aggregateKind: "thread",
+      aggregateId: "thread-1",
+      occurredAt: "2026-01-01T00:00:01.000Z",
+      commandId: "cmd-reverted-old",
+      causationEventId: null,
+      correlationId: "cmd-reverted-old",
+      metadata: {},
+      type: "thread.reverted",
+      payload: { threadId: "thread-1", turnCount: 0 },
+    });
+    const storedDeleted = yield* decodeOrchestrationEvent({
+      sequence: 3,
+      eventId: "event-deleted-old",
+      aggregateKind: "thread",
+      aggregateId: "thread-1",
+      occurredAt: "2026-01-01T00:00:02.000Z",
+      commandId: "cmd-deleted-old",
+      causationEventId: null,
+      correlationId: "cmd-deleted-old",
+      metadata: {},
+      type: "thread.deleted",
+      payload: {
+        threadId: "thread-1",
+        deletedAt: "2026-01-01T00:00:02.000Z",
+      },
+    });
+    if (storedReverted.type !== "thread.reverted") {
+      return assert.fail("expected historical thread.reverted event");
+    }
+    assert.strictEqual(storedReverted.payload.retraction, undefined);
+    if (storedDeleted.type !== "thread.deleted") {
+      return assert.fail("expected historical thread.deleted event");
+    }
+    assert.strictEqual(storedDeleted.payload.retraction, undefined);
   }),
 );
 
@@ -513,7 +553,7 @@ it.effect("decodes thread settle and unsettle commands", () =>
   }),
 );
 
-it.effect("defaults settled fields when decoding historical thread data", () =>
+it.effect("decodes pre-retraction snapshots without new optional state", () =>
   Effect.gen(function* () {
     const common = {
       id: "thread-1",
@@ -530,14 +570,22 @@ it.effect("defaults settled fields when decoding historical thread data", () =>
       archivedAt: null,
       session: null,
     };
-    const thread = yield* decodeOrchestrationThread({
-      ...common,
-      deletedAt: null,
-      messages: [],
-      proposedPlans: [],
-      activities: [],
-      checkpoints: [],
+    const snapshot = yield* decodeOrchestrationReadModel({
+      snapshotSequence: 10,
+      projects: [],
+      threads: [
+        {
+          ...common,
+          deletedAt: null,
+          messages: [],
+          proposedPlans: [],
+          activities: [],
+          checkpoints: [],
+        },
+      ],
+      updatedAt: "2026-01-01T00:00:00.000Z",
     });
+    const thread = snapshot.threads[0];
     const shell = yield* decodeOrchestrationThreadShell({
       ...common,
       latestUserMessageAt: null,
@@ -546,10 +594,38 @@ it.effect("defaults settled fields when decoding historical thread data", () =>
       hasActionableProposedPlan: false,
     });
 
-    assert.strictEqual(thread.settledOverride, null);
-    assert.strictEqual(thread.settledAt, null);
+    assert.strictEqual(thread?.settledOverride, null);
+    assert.strictEqual(thread?.settledAt, null);
+    assert.strictEqual(thread?.managedWorktree, undefined);
+    assert.strictEqual(thread?.turnRetraction, undefined);
     assert.strictEqual(shell.settledOverride, null);
     assert.strictEqual(shell.settledAt, null);
+
+    const snapshotBeforeProviderSendState = yield* decodeOrchestrationThread({
+      ...common,
+      turnRetraction: {
+        requestId: "cmd-retract",
+        messageId: "message-retracted",
+        baselineTurnCount: 0,
+        baselineCheckpointRef: "refs/t3/checkpoints/thread-1/0",
+        targetTurnId: null,
+        providerSendClaimed: false,
+        firstUserMessage: true,
+        requestedAt: "2026-01-01T00:00:00.000Z",
+        status: "requested",
+        completedAt: null,
+        failedAt: null,
+      },
+      deletedAt: null,
+      messages: [],
+      proposedPlans: [],
+      activities: [],
+      checkpoints: [],
+    });
+    assert.strictEqual(
+      snapshotBeforeProviderSendState.turnRetraction?.providerSendState,
+      undefined,
+    );
   }),
 );
 

@@ -46,3 +46,22 @@ export function shouldHandleChatEscape(input: {
     input.textEditingTargetOutsideComposer ?? isTextEditingTargetOutsideComposer(event.target)
   );
 }
+
+/** Runs the chat action selected after an otherwise eligible Escape keypress. */
+export function runChatEscapeAction(input: {
+  cancelPreDispatch: () => unknown | null;
+  retractionPending: boolean;
+  threadTurnRetraction: boolean | undefined;
+  hasRetractionCandidate: boolean;
+  focusComposer: () => void;
+  retractLastUserMessage: () => void;
+}): boolean {
+  if (input.cancelPreDispatch() !== null) return true;
+  if (input.retractionPending) return false;
+  if (input.threadTurnRetraction !== true || !input.hasRetractionCandidate) {
+    input.focusComposer();
+    return true;
+  }
+  input.retractLastUserMessage();
+  return true;
+}

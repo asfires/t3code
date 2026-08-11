@@ -949,6 +949,101 @@ describe("applyThreadDetailEvent", () => {
     });
   });
 
+  describe("additive retraction metadata compatibility", () => {
+    it("reduces interrupt, revert, and delete events exactly as legacy payloads", () => {
+      const runningThread: OrchestrationThread = {
+        ...baseThread,
+        latestTurn: {
+          turnId: TurnId.make("turn-retracted"),
+          state: "running",
+          requestedAt: "2026-04-01T14:00:00.000Z",
+          startedAt: "2026-04-01T14:00:01.000Z",
+          completedAt: null,
+          assistantMessageId: null,
+        },
+      };
+      const interruptBase = {
+        ...baseEventFields,
+        sequence: 16,
+        occurredAt: "2026-04-01T14:00:02.000Z",
+        aggregateKind: "thread" as const,
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.turn-interrupt-requested" as const,
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          turnId: TurnId.make("turn-retracted"),
+          createdAt: "2026-04-01T14:00:02.000Z",
+        },
+      };
+      expect(
+        applyThreadDetailEvent(runningThread, {
+          ...interruptBase,
+          payload: {
+            ...interruptBase.payload,
+            retraction: {
+              requestId: CommandId.make("cmd-retract"),
+              messageId: MessageId.make("message-retracted"),
+              targetTurnId: TurnId.make("turn-retracted"),
+              baselineTurnCount: 0,
+              firstUserMessage: true,
+            },
+          },
+        }),
+      ).toEqual(applyThreadDetailEvent(runningThread, interruptBase));
+
+      const revertedBase = {
+        ...baseEventFields,
+        sequence: 17,
+        occurredAt: "2026-04-01T14:00:03.000Z",
+        aggregateKind: "thread" as const,
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.reverted" as const,
+        payload: { threadId: ThreadId.make("thread-1"), turnCount: 0 },
+      };
+      expect(
+        applyThreadDetailEvent(baseThread, {
+          ...revertedBase,
+          payload: {
+            ...revertedBase.payload,
+            retraction: {
+              requestId: CommandId.make("cmd-retract"),
+              messageId: MessageId.make("message-retracted"),
+              turnId: TurnId.make("turn-retracted"),
+              firstUserMessage: false,
+              completedAt: "2026-04-01T14:00:03.000Z",
+            },
+          },
+        }),
+      ).toEqual(applyThreadDetailEvent(baseThread, revertedBase));
+
+      const deletedBase = {
+        ...baseEventFields,
+        sequence: 18,
+        occurredAt: "2026-04-01T14:00:04.000Z",
+        aggregateKind: "thread" as const,
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.deleted" as const,
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          deletedAt: "2026-04-01T14:00:04.000Z",
+        },
+      };
+      expect(
+        applyThreadDetailEvent(baseThread, {
+          ...deletedBase,
+          payload: {
+            ...deletedBase.payload,
+            retraction: {
+              requestId: CommandId.make("cmd-retract"),
+              messageId: MessageId.make("message-retracted"),
+              firstUserMessage: true,
+            },
+          },
+        }),
+      ).toEqual(applyThreadDetailEvent(baseThread, deletedBase));
+    });
+  });
+
   describe("no-op events", () => {
     it("returns unchanged for approval-response-requested", () => {
       const result = applyThreadDetailEvent(baseThread, {

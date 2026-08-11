@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { markChatEscapeHandled, shouldHandleChatEscape } from "./chatEscapeTrigger";
+import {
+  markChatEscapeHandled,
+  runChatEscapeAction,
+  shouldHandleChatEscape,
+} from "./chatEscapeTrigger";
 
 function shouldHandle(
   event: KeyboardEvent,
@@ -54,4 +58,28 @@ describe("chat Escape trigger", () => {
     expect(shouldHandle(keyboardEvent(), { textEditingTargetOutsideComposer: true })).toBe(false);
     expect(shouldHandle(keyboardEvent(), { textEditingTargetOutsideComposer: false })).toBe(true);
   });
+
+  it.each([undefined, false])(
+    "does not dispatch retraction when the server capability is %s",
+    (threadTurnRetraction) => {
+      const retractLastUserMessage = () => {
+        throw new Error("unsupported server command was dispatched");
+      };
+      let focusCount = 0;
+
+      expect(() =>
+        runChatEscapeAction({
+          cancelPreDispatch: () => null,
+          retractionPending: false,
+          threadTurnRetraction,
+          hasRetractionCandidate: true,
+          focusComposer: () => {
+            focusCount += 1;
+          },
+          retractLastUserMessage,
+        }),
+      ).not.toThrow();
+      expect(focusCount).toBe(1);
+    },
+  );
 });
