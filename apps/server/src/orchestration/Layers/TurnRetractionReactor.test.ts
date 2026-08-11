@@ -70,6 +70,7 @@ type MutableState = {
   row: ProjectionTurnRetraction;
   sessionStatus: OrchestrationSessionStatus | null;
   historyTurnCount: number;
+  rollbackTargetTurnId: TurnId | undefined;
   filesystemRestored: boolean;
   failRollbackAfterEffect: boolean;
   failRestoreAfterEffect: boolean;
@@ -106,6 +107,7 @@ function makeState(providerSendState: ProjectionTurnRetraction["providerSendStat
     row: pendingRow(providerSendState),
     sessionStatus: providerSendState === "claimed" ? "running" : null,
     historyTurnCount: 2,
+    rollbackTargetTurnId: undefined,
     filesystemRestored: false,
     failRollbackAfterEffect: false,
     failRestoreAfterEffect: false,
@@ -319,9 +321,10 @@ async function startHarness(state: MutableState) {
         },
       }),
     rollbackConversation: () => unsupported(),
-    rollbackConversationTo: ({ retainedTurnCount }) =>
+    rollbackConversationTo: ({ retainedTurnCount, targetTurnId }) =>
       Effect.gen(function* () {
         state.order.push("rollback");
+        state.rollbackTargetTurnId = targetTurnId;
         if (state.terminalRollbackFailure) {
           return yield* new ProviderValidationError({
             operation: "ProviderService.rollbackConversationTo",
@@ -449,6 +452,7 @@ it("drives claimed convergence from interrupt through a settlement event", async
 
   expect(state.order).toEqual(["interrupt", "rollback", "restore", "complete"]);
   expect(state.historyTurnCount).toBe(1);
+  expect(state.rollbackTargetTurnId).toBe(TURN_ID);
   expect(state.row.status).toBe("completed");
   await stopHarness(harness);
 });

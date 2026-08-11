@@ -3723,6 +3723,48 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("recycles after an absolute rollback already at its retained boundary", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      assert.isDefined(adapter.rollbackThreadTo);
+      if (!adapter.rollbackThreadTo) return;
+      const absoluteSnapshot = yield* adapter.rollbackThreadTo(session.threadId, 0);
+      assert.equal(absoluteSnapshot.turns.length, 0);
+      const absoluteSessions = yield* adapter.listSessions();
+      assert.deepEqual(absoluteSessions[0]?.resumeCursor, {
+        threadId: THREAD_ID,
+        turnCount: 0,
+      });
+      yield* adapter.rollbackThread(session.threadId, 0);
+      const relativeSessions = yield* adapter.listSessions();
+      assert.deepEqual(relativeSessions[0]?.resumeCursor, absoluteSessions[0]?.resumeCursor);
+
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "replacement",
+        attachments: [],
+      });
+
+      assert.equal(harness.queries.length, 2);
+      assert.equal(harness.query.closeCalls, 1);
+      const restartInput = harness.getCreateQueryInputs()[1];
+      assert.equal(restartInput?.options.resume, undefined);
+      assert.equal(restartInput?.options.resumeSessionAt, undefined);
+      const replacementPrompt = yield* Effect.promise(() => readFirstPromptText(restartInput));
+      assert.equal(replacementPrompt, "replacement");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("clears resume state at turn zero and recycles before the next prompt", () => {
     const harness = makeHarness({
       queryFactory: () => new FakeClaudeQuery(),

@@ -4500,18 +4500,27 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     },
   );
 
+  const applyRollback = Effect.fn("applyClaudeRollback")(function* (
+    context: ClaudeSessionContext,
+    nextLength: number,
+    sessionBaseTurnCount = context.sessionBaseTurnCount,
+  ) {
+    context.turns.splice(nextLength);
+    context.sessionBaseTurnCount = sessionBaseTurnCount;
+    const retainedTurn = context.turns.at(-1);
+    const sessionBase = readClaudeResumeState(context.restartInput.resumeCursor);
+    context.lastAssistantUuid = retainedTurn?.lastAssistantUuid ?? sessionBase?.resumeSessionAt;
+    context.resumeSessionId = retainedTurn ? context.resumeSessionId : sessionBase?.resume;
+    context.recycleBeforeNextTurn = true;
+    yield* updateResumeCursor(context);
+    return yield* snapshotThread(context);
+  });
+
   const rollbackThread: ClaudeAdapterShape["rollbackThread"] = Effect.fn("rollbackThread")(
     function* (threadId, numTurns) {
       const context = yield* requireSession(threadId);
       const nextLength = Math.max(0, context.turns.length - numTurns);
-      context.turns.splice(nextLength);
-      const retainedTurn = context.turns.at(-1);
-      const sessionBase = readClaudeResumeState(context.restartInput.resumeCursor);
-      context.lastAssistantUuid = retainedTurn?.lastAssistantUuid ?? sessionBase?.resumeSessionAt;
-      context.resumeSessionId = retainedTurn ? context.resumeSessionId : sessionBase?.resume;
-      context.recycleBeforeNextTurn = true;
-      yield* updateResumeCursor(context);
-      return yield* snapshotThread(context);
+      return yield* applyRollback(context, nextLength);
     },
   );
 
@@ -4536,18 +4545,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
     const delta = lifetimeTurnCount - retainedTurnCount;
     const sessionLocalTurnCount = context.turns.length;
-    if (delta > 0) {
-      yield* rollbackThread(threadId, Math.min(delta, sessionLocalTurnCount));
-    }
-    if (delta > sessionLocalTurnCount) {
-      // The requested boundary predates this SDK session. Claude only gives us
-      // the cursor that opened the session, not intermediate historical
-      // watermarks, so retain that oldest available resume position while
-      // moving the logical lifetime boundary to the requested count.
-      context.sessionBaseTurnCount = retainedTurnCount;
-      yield* updateResumeCursor(context);
-    }
-    const snapshot = yield* snapshotThread(context);
+    const nextLength = sessionLocalTurnCount - Math.min(delta, sessionLocalTurnCount);
+    // When the requested boundary predates this SDK session, Claude only gives
+    // us the cursor that opened the session, not intermediate historical
+    // watermarks. Retain that oldest available resume position while moving
+    // the logical lifetime boundary to the requested count.
+    const nextSessionBaseTurnCount =
+      delta > sessionLocalTurnCount ? retainedTurnCount : context.sessionBaseTurnCount;
+    // Always apply the rewind, including a zero completed-turn delta: the SDK
+    // query may still hold a just-interrupted prompt in process memory.
+    const snapshot = yield* applyRollback(context, nextLength, nextSessionBaseTurnCount);
     const resultingLifetimeTurnCount = context.sessionBaseTurnCount + snapshot.turns.length;
     if (resultingLifetimeTurnCount !== retainedTurnCount) {
       return yield* new ProviderAdapterRequestError({

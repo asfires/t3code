@@ -440,6 +440,7 @@ export const makeTurnRetractionReactor = Effect.gen(function* () {
       .rollbackConversationTo({
         threadId: row.threadId,
         retainedTurnCount: row.baselineTurnCount,
+        ...(targetTurnId !== null ? { targetTurnId } : {}),
       })
       .pipe(
         Effect.mapError((error) => ({

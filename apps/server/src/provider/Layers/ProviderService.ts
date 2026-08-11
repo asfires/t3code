@@ -13,6 +13,7 @@ import {
   ModelSelection,
   NonNegativeInt,
   ThreadId,
+  TurnId,
   ProviderInterruptTurnInput,
   ProviderRespondToRequestInput,
   ProviderRespondToUserInputInput,
@@ -79,6 +80,7 @@ const ProviderRollbackConversationInput = Schema.Struct({
 const ProviderRollbackConversationToInput = Schema.Struct({
   threadId: ThreadId,
   retainedTurnCount: NonNegativeInt,
+  targetTurnId: Schema.optional(TurnId),
 });
 
 function toValidationError(
@@ -1094,7 +1096,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       });
 
       if (routed.adapter.rollbackThreadTo !== undefined) {
-        yield* routed.adapter.rollbackThreadTo(routed.threadId, input.retainedTurnCount);
+        yield* routed.adapter.rollbackThreadTo(
+          routed.threadId,
+          input.retainedTurnCount,
+          input.targetTurnId,
+        );
       } else {
         // Compatibility conversion for providers that only expose relative
         // rollback: read the absolute length, apply only the remaining delta,

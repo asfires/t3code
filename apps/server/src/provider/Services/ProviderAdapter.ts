@@ -123,6 +123,7 @@ export interface ProviderAdapterShape<TError> {
   readonly rollbackThreadTo?: (
     threadId: ThreadId,
     retainedTurnCount: number,
+    targetTurnId?: TurnId,
   ) => Effect.Effect<ProviderThreadSnapshot, TError>;
 
   /**
