@@ -82,6 +82,13 @@ export class TurnRetractionRetryTicks extends Context.Reference<Stream.Stream<vo
   },
 ) {}
 
+export class TurnRetractionInterruptRetryTicks extends Context.Reference<Stream.Stream<void>>(
+  "t3/orchestration/Layers/TurnRetractionReactor/TurnRetractionInterruptRetryTicks",
+  {
+    defaultValue: () => Stream.tick(Duration.seconds(2)).pipe(Stream.drop(1)),
+  },
+) {}
+
 export class TurnRetractionInterruptTimeout extends Context.Reference<Duration.Input>(
   "t3/orchestration/Layers/TurnRetractionReactor/TurnRetractionInterruptTimeout",
   {
@@ -89,9 +96,18 @@ export class TurnRetractionInterruptTimeout extends Context.Reference<Duration.I
   },
 ) {}
 
+export class TurnRetractionInterruptRetryCadence extends Context.Reference<Duration.Input>(
+  "t3/orchestration/Layers/TurnRetractionReactor/TurnRetractionInterruptRetryCadence",
+  {
+    defaultValue: () => Duration.seconds(2),
+  },
+) {}
+
 export const makeTurnRetractionReactor = Effect.gen(function* () {
   const retryTicks = yield* TurnRetractionRetryTicks;
+  const interruptRetryTicks = yield* TurnRetractionInterruptRetryTicks;
   const interruptTimeout = yield* TurnRetractionInterruptTimeout;
+  const interruptRetryCadence = yield* TurnRetractionInterruptRetryCadence;
   const crypto = yield* Crypto.Crypto;
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
@@ -100,22 +116,37 @@ export const makeTurnRetractionReactor = Effect.gen(function* () {
   const providerService = yield* ProviderService;
   const checkpointStore = yield* CheckpointStore.CheckpointStore;
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
-  const interruptedTurnIdsByRequest = new Map<string, Set<string>>();
+  const interruptAttemptsByRequest = new Map<
+    string,
+    Map<string, { readonly attempt: number; readonly issuedAtMillis: number }>
+  >();
+  const interruptThreadIdsByRequest = new Map<string, ThreadId>();
 
-  const clearIssuedInterrupts = (requestId: string) =>
-    interruptedTurnIdsByRequest.delete(requestId);
-  const hasIssuedInterrupt = (requestId: string, turnId: TurnId) =>
-    interruptedTurnIdsByRequest.get(requestId)?.has(turnId) === true;
-  const markInterruptIssued = (requestId: string, turnId: TurnId) => {
-    const issuedTurnIds = interruptedTurnIdsByRequest.get(requestId) ?? new Set<string>();
-    issuedTurnIds.add(turnId);
-    interruptedTurnIdsByRequest.set(requestId, issuedTurnIds);
+  const clearIssuedInterrupts = (requestId: string) => {
+    interruptAttemptsByRequest.delete(requestId);
+    interruptThreadIdsByRequest.delete(requestId);
+  };
+  const readInterruptAttempt = (requestId: string, turnId: TurnId) =>
+    interruptAttemptsByRequest.get(requestId)?.get(turnId);
+  const markInterruptIssued = (
+    requestId: string,
+    threadId: ThreadId,
+    turnId: TurnId,
+    issuedAtMillis: number,
+  ) => {
+    const attempts = interruptAttemptsByRequest.get(requestId) ?? new Map();
+    const attempt = (attempts.get(turnId)?.attempt ?? 0) + 1;
+    attempts.set(turnId, { attempt, issuedAtMillis });
+    interruptAttemptsByRequest.set(requestId, attempts);
+    interruptThreadIdsByRequest.set(requestId, threadId);
+    return attempt;
   };
   const clearIssuedInterrupt = (requestId: string, turnId: TurnId) => {
-    const issuedTurnIds = interruptedTurnIdsByRequest.get(requestId);
-    issuedTurnIds?.delete(turnId);
-    if (issuedTurnIds?.size === 0) {
-      interruptedTurnIdsByRequest.delete(requestId);
+    const attempts = interruptAttemptsByRequest.get(requestId);
+    attempts?.delete(turnId);
+    if (attempts?.size === 0) {
+      interruptAttemptsByRequest.delete(requestId);
+      interruptThreadIdsByRequest.delete(requestId);
     }
   };
 
@@ -128,7 +159,11 @@ export const makeTurnRetractionReactor = Effect.gen(function* () {
     row: ProjectionTurnRetraction,
     stage: RetractionStage,
     outcome: "completed" | "failed" | "pending" | "skipped",
-    fields: { readonly action?: string; readonly reason?: string } = {},
+    fields: {
+      readonly action?: string;
+      readonly reason?: string;
+      readonly attempt?: number;
+    } = {},
   ) =>
     Effect.logInfo("turn retraction convergence evaluated", {
       threadId: row.threadId,
@@ -427,30 +462,33 @@ export const makeTurnRetractionReactor = Effect.gen(function* () {
         return;
       }
 
-      const interruptAlreadyRequested = hasIssuedInterrupt(row.requestId, targetTurnId);
-      const interruptAcknowledged = interruptAlreadyRequested
-        ? undefined
-        : yield* Effect.sync(() => markInterruptIssued(row.requestId, targetTurnId)).pipe(
-            Effect.andThen(
-              providerService
-                .interruptTurn({
-                  threadId: row.threadId,
-                  turnId: targetTurnId,
-                })
-                .pipe(
-                  Effect.mapError((error) => ({
-                    stage: "interrupt" as const,
-                    retryable: !isTerminalProviderError(error),
-                    detail: failureDetail(error),
-                  })),
-                  Effect.tapError(() =>
-                    Effect.sync(() => clearIssuedInterrupt(row.requestId, targetTurnId)),
-                  ),
-                  Effect.timeoutOption(interruptTimeout),
-                  Effect.map(Option.isSome),
-                ),
-            ),
-          );
+      const nowMillis = DateTime.toEpochMillis(yield* DateTime.now);
+      const priorAttempt = readInterruptAttempt(row.requestId, targetTurnId);
+      const retryCadenceMillis = Duration.toMillis(interruptRetryCadence);
+      const interruptDue =
+        priorAttempt === undefined || nowMillis - priorAttempt.issuedAtMillis >= retryCadenceMillis;
+      const attempt = interruptDue
+        ? markInterruptIssued(row.requestId, row.threadId, targetTurnId, nowMillis)
+        : priorAttempt.attempt;
+      const interruptAcknowledged = interruptDue
+        ? yield* providerService
+            .interruptTurn({
+              threadId: row.threadId,
+              turnId: targetTurnId,
+            })
+            .pipe(
+              Effect.mapError((error) => ({
+                stage: "interrupt" as const,
+                retryable: !isTerminalProviderError(error),
+                detail: failureDetail(error),
+              })),
+              Effect.tapError(() =>
+                Effect.sync(() => clearIssuedInterrupt(row.requestId, targetTurnId)),
+              ),
+              Effect.timeoutOption(interruptTimeout),
+              Effect.map(Option.isSome),
+            )
+        : undefined;
 
       // Interrupt acknowledgement is not settlement. A later provider/runtime
       // lifecycle event wakes this row after the projected session leaves
@@ -468,12 +506,15 @@ export const makeTurnRetractionReactor = Effect.gen(function* () {
         afterInterrupt?.session?.status === "running"
       ) {
         yield* logConvergence(row, "settlement", "pending", {
-          action: interruptAlreadyRequested
+          action: !interruptDue
             ? "turn-interrupt-already-requested"
-            : interruptAcknowledged
-              ? "turn-interrupt-acknowledged"
-              : "turn-interrupt-timed-out",
+            : attempt > 1
+              ? "turn-interrupt-reissued"
+              : interruptAcknowledged
+                ? "turn-interrupt-acknowledged"
+                : "turn-interrupt-timed-out",
           reason: `projected session remains '${afterInterrupt.session.status}' for target turn '${targetTurnId}'`,
+          attempt,
         });
         return;
       }
@@ -576,6 +617,11 @@ export const makeTurnRetractionReactor = Effect.gen(function* () {
     });
   });
 
+  const enqueueInterruptRetries = Effect.fn("enqueueInterruptRetractions")(function* () {
+    const threadIds = new Set(interruptThreadIdsByRequest.values());
+    yield* Effect.forEach(threadIds, worker.enqueue, { concurrency: 1, discard: true });
+  });
+
   const start: TurnRetractionReactorShape["start"] = Effect.fn("start")(function* () {
     yield* forkParked(
       Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) =>
@@ -592,6 +638,7 @@ export const makeTurnRetractionReactor = Effect.gen(function* () {
 
     yield* enqueuePending();
     yield* forkParked(Stream.runForEach(retryTicks, enqueuePending));
+    yield* forkParked(Stream.runForEach(interruptRetryTicks, enqueueInterruptRetries));
   });
 
   return {

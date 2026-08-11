@@ -19,6 +19,7 @@ import {
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it, vi } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import type * as Duration from "effect/Duration";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
@@ -54,6 +55,8 @@ import {
 import { TurnRetractionReactor } from "../Services/TurnRetractionReactor.ts";
 import {
   makeTurnRetractionReactor,
+  TurnRetractionInterruptRetryCadence,
+  TurnRetractionInterruptRetryTicks,
   TurnRetractionInterruptTimeout,
   TurnRetractionRetryTicks,
 } from "./TurnRetractionReactor.ts";
@@ -215,10 +218,14 @@ function makeRepository(state: MutableState): ProjectionTurnRetractionRepository
 const unsupported = <A>() =>
   Effect.die(new Error("unsupported test operation")) as Effect.Effect<A>;
 
-async function startHarness(state: MutableState) {
+async function startHarness(
+  state: MutableState,
+  options: { readonly interruptRetryCadence?: Duration.Input } = {},
+) {
   const domainEvents = Effect.runSync(PubSub.unbounded<OrchestrationEvent>());
   const runtimeEvents = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
   const retryTicks = Effect.runSync(Queue.unbounded<void>());
+  const interruptRetryTicks = Effect.runSync(Queue.unbounded<void>());
   const repository = makeRepository(state);
   const dispatch = vi.fn((command: OrchestrationCommand) => {
     state.dispatched.push(command);
@@ -377,7 +384,16 @@ async function startHarness(state: MutableState) {
 
   const layer = Layer.effect(TurnRetractionReactor, makeTurnRetractionReactor).pipe(
     Layer.provideMerge(Layer.succeed(TurnRetractionRetryTicks, Stream.fromQueue(retryTicks))),
+    Layer.provideMerge(
+      Layer.succeed(TurnRetractionInterruptRetryTicks, Stream.fromQueue(interruptRetryTicks)),
+    ),
     Layer.provideMerge(Layer.succeed(TurnRetractionInterruptTimeout, "1 millis")),
+    Layer.provideMerge(
+      Layer.succeed(
+        TurnRetractionInterruptRetryCadence,
+        options.interruptRetryCadence ?? "2 seconds",
+      ),
+    ),
     Layer.provideMerge(Layer.succeed(OrchestrationEngineService, engine)),
     Layer.provideMerge(Layer.succeed(ProjectionSnapshotQuery, query)),
     Layer.provideMerge(Layer.succeed(ProjectionTurnRetractionRepository, repository)),
@@ -401,6 +417,7 @@ async function startHarness(state: MutableState) {
     emitRuntime: (event: ProviderRuntimeEvent) =>
       runtime.runPromise(PubSub.publish(runtimeEvents, event)),
     retryTick: () => runtime.runPromise(Queue.offer(retryTicks, undefined)),
+    interruptRetryTick: () => runtime.runPromise(Queue.offer(interruptRetryTicks, undefined)),
   };
 }
 
@@ -424,7 +441,7 @@ it("drives claimed convergence from interrupt through a settlement event", async
   expect(state.order).toEqual(["interrupt"]);
   expect(state.row.status).toBe("requested");
 
-  await harness.retryTick();
+  await harness.interruptRetryTick();
   await harness.runtime.runPromise(harness.reactor.drain);
   expect(state.order).toEqual(["interrupt"]);
 
@@ -501,6 +518,25 @@ it("waits through starting and interrupts the concrete turn after it starts", as
   await harness.retryTick();
   await harness.runtime.runPromise(harness.reactor.drain);
   expect(state.order).toEqual(["interrupt", "rollback", "restore", "complete"]);
+  await stopHarness(harness);
+});
+
+it("reissues an interrupt for the same running turn after the retry cadence", async () => {
+  const state = makeState("claimed");
+  const harness = await startHarness(state, { interruptRetryCadence: "0 millis" });
+
+  expect(state.order).toEqual(["interrupt"]);
+  await harness.interruptRetryTick();
+  await harness.runtime.runPromise(harness.reactor.drain);
+
+  expect(state.order).toEqual(["interrupt", "interrupt"]);
+  expect(state.interruptedTurnIds).toEqual([TURN_ID, TURN_ID]);
+
+  state.sessionStatus = "ready";
+  state.activeTurnId = null;
+  await harness.retryTick();
+  await harness.runtime.runPromise(harness.reactor.drain);
+  expect(state.order).toEqual(["interrupt", "interrupt", "rollback", "restore", "complete"]);
   await stopHarness(harness);
 });
 

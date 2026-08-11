@@ -142,6 +142,10 @@ interface ClaudeTurnState {
   readonly assistantTextBlocks: Map<number, AssistantTextBlockState>;
   readonly assistantTextBlockOrder: Array<AssistantTextBlockState>;
   readonly capturedProposedPlanKeys: Set<string>;
+  /** The SDK has emitted activity attributable to this queued turn. */
+  sdkProcessingObserved?: boolean;
+  /** Replay one early interrupt after the SDK begins processing the turn. */
+  interruptReplayPending?: boolean;
   nextSyntheticAssistantBlockIndex: number;
 }
 
@@ -3497,6 +3501,34 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     yield* logNativeSdkMessage(context, message);
     yield* ensureThreadId(context, message);
 
+    const turnState = context.turnState;
+    const sdkTurnActivityObserved =
+      (message.type === "system" &&
+        message.subtype === "status" &&
+        message.status === "requesting") ||
+      message.type === "stream_event" ||
+      message.type === "assistant" ||
+      message.type === "user" ||
+      message.type === "tool_progress";
+    if (turnState && sdkTurnActivityObserved) {
+      turnState.sdkProcessingObserved = true;
+      if (turnState.interruptReplayPending) {
+        turnState.interruptReplayPending = false;
+        yield* Effect.tryPromise({
+          try: () => context.query.interrupt(),
+          catch: (cause) => toRequestError(context.session.threadId, "turn/interruptReplay", cause),
+        }).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("Failed to replay an early Claude turn interrupt.", {
+              threadId: context.session.threadId,
+              turnId: turnState.turnId,
+              cause,
+            }),
+          ),
+        );
+      }
+    }
+
     switch (message.type) {
       case "stream_event":
         yield* handleStreamEvent(context, message);
@@ -4432,8 +4464,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   });
 
   const interruptTurn: ClaudeAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(
-    function* (threadId, _turnId) {
+    function* (threadId, turnId) {
       const context = yield* requireSession(threadId);
+      const activeTurnState = context.turnState;
+      if (
+        activeTurnState &&
+        (turnId === undefined || activeTurnState.turnId === turnId) &&
+        activeTurnState.sdkProcessingObserved !== true
+      ) {
+        // `turn.started` intentionally precedes offering the prompt to the
+        // SDK queue. An interrupt in that gap is acknowledged by the SDK but
+        // can be forgotten before query processing begins. Keep one replay
+        // latched until the first per-turn processing signal arrives.
+        activeTurnState.interruptReplayPending = true;
+      }
       // Stop-everything semantics: users reach for Stop precisely when a
       // fleet ran away. interrupt() alone only ends the parent turn —
       // background subagents/shells keep running and keep burning tokens.

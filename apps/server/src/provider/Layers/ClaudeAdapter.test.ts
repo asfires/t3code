@@ -1676,6 +1676,69 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("replays an interrupt acknowledged before the SDK begins processing the turn", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "count for a long time",
+        attachments: [],
+      });
+
+      yield* adapter.interruptTurn(session.threadId, turn.turnId);
+      assert.equal(harness.query.interruptCalls.length, 1);
+
+      const requestingFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.type === "session.state.changed" && event.payload.reason === "status:requesting",
+        ),
+        Stream.take(1),
+        Stream.runDrain,
+        Effect.forkChild,
+      );
+      harness.query.emit({
+        type: "system",
+        subtype: "status",
+        status: "requesting",
+        uuid: "status-requesting-1",
+        session_id: "sdk-session",
+      } as unknown as SDKMessage);
+      yield* Fiber.join(requestingFiber);
+
+      assert.equal(harness.query.interruptCalls.length, 2);
+
+      const secondStatusFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.type === "session.state.changed" && event.payload.reason === "status:requesting",
+        ),
+        Stream.take(1),
+        Stream.runDrain,
+        Effect.forkChild,
+      );
+      harness.query.emit({
+        type: "system",
+        subtype: "status",
+        status: "requesting",
+        uuid: "status-requesting-2",
+        session_id: "sdk-session",
+      } as unknown as SDKMessage);
+      yield* Fiber.join(secondStatusFiber);
+
+      assert.equal(harness.query.interruptCalls.length, 2);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("workflow member coalescing: identical snapshots suppress, changes emit", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

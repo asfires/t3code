@@ -18,19 +18,24 @@ import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
 import * as Socket from "effect/unstable/socket/Socket";
 
 type Provider = "claudeAgent" | "codex";
-type Timing = "immediate" | "long-response" | "mid-thinking";
+type Timing = "double-pop" | "immediate" | "long-response" | "mid-thinking";
 
 const [baseDir, httpOrigin, pairingCredential, providerArg = "codex", timingArg = "immediate"] =
   process.argv.slice(2);
 if (!baseDir || !httpOrigin || !pairingCredential) {
   throw new Error(
-    "usage: node apps/server/scripts/turn-retraction-repro.ts <base-dir> <http-origin> <pairing-credential> [codex|claudeAgent] [immediate|mid-thinking|long-response]",
+    "usage: node apps/server/scripts/turn-retraction-repro.ts <base-dir> <http-origin> <pairing-credential> [codex|claudeAgent] [immediate|mid-thinking|long-response|double-pop]",
   );
 }
 if (providerArg !== "codex" && providerArg !== "claudeAgent") {
   throw new Error(`unsupported provider '${providerArg}'`);
 }
-if (timingArg !== "immediate" && timingArg !== "mid-thinking" && timingArg !== "long-response") {
+if (
+  timingArg !== "immediate" &&
+  timingArg !== "mid-thinking" &&
+  timingArg !== "long-response" &&
+  timingArg !== "double-pop"
+) {
   throw new Error(`unsupported timing '${timingArg}'`);
 }
 
@@ -38,6 +43,8 @@ const provider: Provider = providerArg;
 const timing: Timing = timingArg;
 const delayMs = timing === "mid-thinking" ? 250 : timing === "long-response" ? 1_000 : 0;
 const maxRetractionCompletionMs = 20_000;
+const maxDoublePopCompletionMs = 5_000;
+const doublePopIterations = 4;
 const suffix = crypto.randomUUID();
 const projectId = ProjectId.make(`repro-project-${suffix}`);
 const threadId = ThreadId.make(`repro-thread-${suffix}`);
@@ -225,144 +232,248 @@ const run = Effect.gen(function* () {
     ),
   );
 
-  if (timing === "immediate") {
+  type RetractionRow = NonNullable<ReturnType<typeof readRetraction>>;
+  const doublePopAttempts: Array<{
+    readonly iteration: number;
+    readonly phase: "first" | "resend";
+    readonly marker: string;
+    readonly delayMs: number;
+    readonly sessionStatusAtRetraction: string;
+    readonly requestToCompleteMs: number;
+    readonly sendToCompleteMs: number;
+  }> = [];
+  let retraction: RetractionRow | undefined;
+  let naturalCompletionMs: number | null = null;
+  let retractionCompletionMs: number | null = null;
+  let sessionStatusAtRetraction = "n/a";
+
+  if (timing === "double-pop") {
+    for (let iteration = 1; iteration <= doublePopIterations; iteration += 1) {
+      for (const phase of ["first", "resend"] as const) {
+        const phaseDelayMs = phase === "first" ? 1_000 : 300;
+        const marker = `DOUBLE_REMOVED_MARKER_${suffix}_${iteration}_${phase}`;
+        const messageId = MessageId.make(`repro-double-${suffix}-${iteration}-${phase}`);
+        const requestId = CommandId.make(`repro-double-retract-${suffix}-${iteration}-${phase}`);
+        const sentAtMs = hostNowMs();
+        yield* dispatchTurn(
+          messageId,
+          `Remember this exact token: ${marker}. Then count from 1 to 400, one number per line, no other text.`,
+        );
+        yield* Effect.promise(() =>
+          waitFor(
+            `double-pop ${iteration} ${phase} turn start`,
+            () => ({ session: readSession(), turn: readTurn(messageId) }),
+            (value) =>
+              value.session?.status === "running" &&
+              value.session.activeTurnId !== null &&
+              value.turn?.state === "running" &&
+              value.turn.turnId === value.session.activeTurnId,
+          ),
+        );
+        yield* Effect.sleep(`${phaseDelayMs} millis`);
+        const beforeRetraction = yield* Effect.sync(() => ({
+          session: readSession(),
+          turn: readTurn(messageId),
+        }));
+        if (
+          beforeRetraction.session?.status !== "running" ||
+          beforeRetraction.turn?.state !== "running"
+        ) {
+          throw new Error(
+            `double-pop ${iteration} ${phase} completed before retraction: ${stringifyJson(beforeRetraction)}`,
+          );
+        }
+        const requestedAtMs = hostNowMs();
+        yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+          type: "thread.turn.retract",
+          commandId: requestId,
+          threadId,
+          messageId,
+          createdAt: hostNowIso(),
+        });
+        const attemptRetraction = yield* Effect.promise(() =>
+          waitFor(
+            `double-pop ${iteration} ${phase} retraction`,
+            () => readRetraction(requestId),
+            (row) => row.status === "completed" || row.status === "failed",
+          ),
+        );
+        const completedAtMs = hostNowMs();
+        const requestToCompleteMs = completedAtMs - requestedAtMs;
+        const sendToCompleteMs = completedAtMs - sentAtMs;
+        if (
+          attemptRetraction.status !== "completed" ||
+          attemptRetraction.providerSendState !== "claimed" ||
+          attemptRetraction.baselineTurnCount !== 1
+        ) {
+          throw new Error(
+            `double-pop ${iteration} ${phase} rollback failed: ${stringifyJson(attemptRetraction)}`,
+          );
+        }
+        if (
+          requestToCompleteMs > maxDoublePopCompletionMs ||
+          sendToCompleteMs > maxDoublePopCompletionMs
+        ) {
+          throw new Error(
+            `double-pop ${iteration} ${phase} timing gate failed: requestToCompleteMs=${requestToCompleteMs} sendToCompleteMs=${sendToCompleteMs} maxDoublePopCompletionMs=${maxDoublePopCompletionMs}`,
+          );
+        }
+        doublePopAttempts.push({
+          iteration,
+          phase,
+          marker,
+          delayMs: phaseDelayMs,
+          sessionStatusAtRetraction: beforeRetraction.session.status,
+          requestToCompleteMs,
+          sendToCompleteMs,
+        });
+        retraction = attemptRetraction;
+      }
+    }
+  } else {
+    if (timing === "immediate") {
+      yield* dispatchTurn(
+        setupRetractionMessageId,
+        `Remember this exact token: ${setupRetractionMarker}. Use the shell to run sleep 20, then reply with exactly SETUP_ACK.`,
+      );
+      yield* Effect.promise(() =>
+        waitFor(
+          "provider to start setup retraction turn",
+          () => ({ session: readSession(), turn: readTurn(setupRetractionMessageId) }),
+          (value) =>
+            value.session?.status === "running" &&
+            value.session.activeTurnId !== null &&
+            value.turn?.turnId === value.session.activeTurnId,
+        ),
+      );
+      yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+        type: "thread.turn.retract",
+        commandId: setupRetractionRequestId,
+        threadId,
+        messageId: setupRetractionMessageId,
+        createdAt: hostNowIso(),
+      });
+      const setupRetraction = yield* Effect.promise(() =>
+        waitFor(
+          "completed setup retraction",
+          () => readRetraction(setupRetractionRequestId),
+          (row) => row.status === "completed" || row.status === "failed",
+        ),
+      );
+      if (setupRetraction.status !== "completed") {
+        throw new Error(`setup retraction failed: ${stringifyJson(setupRetraction)}`);
+      }
+    }
+
+    let expectedRetractionBaselineTurnCount = 1;
+    if (timing === "long-response") {
+      const naturalStartedAtMs = hostNowMs();
+      yield* dispatchTurn(
+        naturalControlMessageId,
+        "Count from 1 to 400, one number per line, no other text.",
+      );
+      yield* Effect.promise(() =>
+        waitFor(
+          "natural long-response control and checkpoint",
+          () => readTurn(naturalControlMessageId),
+          (turn) =>
+            turn.state === "completed" &&
+            turn.checkpointTurnCount === 2 &&
+            turn.checkpointStatus === "ready",
+        ),
+      );
+      naturalCompletionMs = hostNowMs() - naturalStartedAtMs;
+      expectedRetractionBaselineTurnCount = 2;
+    }
+
     yield* dispatchTurn(
-      setupRetractionMessageId,
-      `Remember this exact token: ${setupRetractionMarker}. Use the shell to run sleep 20, then reply with exactly SETUP_ACK.`,
+      retractedMessageId,
+      timing === "mid-thinking"
+        ? `Remember this exact token: ${retractedMarker}. Use the shell to run sleep 20, then reply with exactly RETRACTED_ACK.`
+        : timing === "long-response"
+          ? `Remember this exact token: ${retractedMarker}. Then count from 1 to 400, one number per line, no other text.`
+          : `Remember this exact token: ${retractedMarker}. Reply with exactly RETRACTED_ACK.`,
     );
-    yield* Effect.promise(() =>
-      waitFor(
-        "provider to start setup retraction turn",
-        () => ({ session: readSession(), turn: readTurn(setupRetractionMessageId) }),
-        (value) =>
-          value.session?.status === "running" &&
-          value.session.activeTurnId !== null &&
-          value.turn?.turnId === value.session.activeTurnId,
-      ),
-    );
+    if (timing === "immediate") {
+      const claimedSend = yield* Effect.promise(() =>
+        waitFor(
+          "claimed provider send before immediate retraction",
+          () => ({ claim: readProviderSendClaimed(retractedMessageId), session: readSession() }),
+          (value) =>
+            value.claim !== undefined &&
+            (value.session?.status === "starting" || value.session?.status === "running"),
+        ),
+      );
+      sessionStatusAtRetraction = claimedSend.session?.status ?? "missing";
+    } else {
+      const startedTurn = yield* Effect.promise(() =>
+        waitFor(
+          "provider to start the retractable turn",
+          () => ({ session: readSession(), turn: readTurn(retractedMessageId) }),
+          (value) =>
+            value.session?.status === "running" &&
+            value.session.activeTurnId !== null &&
+            value.turn?.turnId === value.session.activeTurnId,
+        ),
+      );
+      sessionStatusAtRetraction = startedTurn.session?.status ?? "missing";
+    }
+    if (delayMs > 0) yield* Effect.sleep(`${delayMs} millis`);
+    const beforeRetraction = yield* Effect.sync(() => ({
+      session: readSession(),
+      turn: readTurn(retractedMessageId),
+    }));
+    if (
+      timing === "long-response" &&
+      (beforeRetraction.session?.status !== "running" || beforeRetraction.turn?.state !== "running")
+    ) {
+      throw new Error(
+        `long response completed before retraction was requested: ${stringifyJson(beforeRetraction)}`,
+      );
+    }
+    const retractionRequestedAtMs = hostNowMs();
     yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
       type: "thread.turn.retract",
-      commandId: setupRetractionRequestId,
+      commandId: retractionRequestId,
       threadId,
-      messageId: setupRetractionMessageId,
+      messageId: retractedMessageId,
       createdAt: hostNowIso(),
     });
-    const setupRetraction = yield* Effect.promise(() =>
+    retraction = yield* Effect.promise(() =>
       waitFor(
-        "completed setup retraction",
-        () => readRetraction(setupRetractionRequestId),
+        "terminal retraction",
+        readRetraction,
         (row) => row.status === "completed" || row.status === "failed",
       ),
     );
-    if (setupRetraction.status !== "completed") {
-      throw new Error(`setup retraction failed: ${stringifyJson(setupRetraction)}`);
+    retractionCompletionMs = hostNowMs() - retractionRequestedAtMs;
+    if (retraction.status !== "completed") {
+      throw new Error(`retraction failed: ${stringifyJson(retraction)}`);
+    }
+    if (retraction.providerSendState !== "claimed") {
+      throw new Error(
+        `retraction did not exercise provider rollback: ${stringifyJson(retraction)}`,
+      );
+    }
+    if (retraction.baselineTurnCount !== expectedRetractionBaselineTurnCount) {
+      throw new Error(
+        `unexpected rollback boundary: expected ${expectedRetractionBaselineTurnCount}, got ${retraction.baselineTurnCount}`,
+      );
+    }
+    if (
+      timing === "long-response" &&
+      (naturalCompletionMs === null ||
+        retractionCompletionMs >= maxRetractionCompletionMs ||
+        retractionCompletionMs >= naturalCompletionMs)
+    ) {
+      throw new Error(
+        `long-response timing gate failed: retractionCompletionMs=${retractionCompletionMs} naturalCompletionMs=${naturalCompletionMs} maxRetractionCompletionMs=${maxRetractionCompletionMs}`,
+      );
     }
   }
 
-  let naturalCompletionMs: number | null = null;
-  let expectedRetractionBaselineTurnCount = 1;
-  if (timing === "long-response") {
-    const naturalStartedAtMs = hostNowMs();
-    yield* dispatchTurn(
-      naturalControlMessageId,
-      "Count from 1 to 400, one number per line, no other text.",
-    );
-    yield* Effect.promise(() =>
-      waitFor(
-        "natural long-response control and checkpoint",
-        () => readTurn(naturalControlMessageId),
-        (turn) =>
-          turn.state === "completed" &&
-          turn.checkpointTurnCount === 2 &&
-          turn.checkpointStatus === "ready",
-      ),
-    );
-    naturalCompletionMs = hostNowMs() - naturalStartedAtMs;
-    expectedRetractionBaselineTurnCount = 2;
-  }
-
-  yield* dispatchTurn(
-    retractedMessageId,
-    timing === "mid-thinking"
-      ? `Remember this exact token: ${retractedMarker}. Use the shell to run sleep 20, then reply with exactly RETRACTED_ACK.`
-      : timing === "long-response"
-        ? `Remember this exact token: ${retractedMarker}. Then count from 1 to 400, one number per line, no other text.`
-        : `Remember this exact token: ${retractedMarker}. Reply with exactly RETRACTED_ACK.`,
-  );
-  let sessionStatusAtRetraction: string;
-  if (timing === "immediate") {
-    const claimedSend = yield* Effect.promise(() =>
-      waitFor(
-        "claimed provider send before immediate retraction",
-        () => ({ claim: readProviderSendClaimed(retractedMessageId), session: readSession() }),
-        (value) =>
-          value.claim !== undefined &&
-          (value.session?.status === "starting" || value.session?.status === "running"),
-      ),
-    );
-    sessionStatusAtRetraction = claimedSend.session?.status ?? "missing";
-  } else {
-    const startedTurn = yield* Effect.promise(() =>
-      waitFor(
-        "provider to start the retractable turn",
-        () => ({ session: readSession(), turn: readTurn(retractedMessageId) }),
-        (value) =>
-          value.session?.status === "running" &&
-          value.session.activeTurnId !== null &&
-          value.turn?.turnId === value.session.activeTurnId,
-      ),
-    );
-    sessionStatusAtRetraction = startedTurn.session?.status ?? "missing";
-  }
-  if (delayMs > 0) yield* Effect.sleep(`${delayMs} millis`);
-  const beforeRetraction = yield* Effect.sync(() => ({
-    session: readSession(),
-    turn: readTurn(retractedMessageId),
-  }));
-  if (
-    timing === "long-response" &&
-    (beforeRetraction.session?.status !== "running" || beforeRetraction.turn?.state !== "running")
-  ) {
-    throw new Error(
-      `long response completed before retraction was requested: ${stringifyJson(beforeRetraction)}`,
-    );
-  }
-  const retractionRequestedAtMs = hostNowMs();
-  yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
-    type: "thread.turn.retract",
-    commandId: retractionRequestId,
-    threadId,
-    messageId: retractedMessageId,
-    createdAt: hostNowIso(),
-  });
-  const retraction = yield* Effect.promise(() =>
-    waitFor(
-      "terminal retraction",
-      readRetraction,
-      (row) => row.status === "completed" || row.status === "failed",
-    ),
-  );
-  const retractionCompletionMs = hostNowMs() - retractionRequestedAtMs;
-  if (retraction.status !== "completed") {
-    throw new Error(`retraction failed: ${stringifyJson(retraction)}`);
-  }
-  if (retraction.providerSendState !== "claimed") {
-    throw new Error(`retraction did not exercise provider rollback: ${stringifyJson(retraction)}`);
-  }
-  if (retraction.baselineTurnCount !== expectedRetractionBaselineTurnCount) {
-    throw new Error(
-      `unexpected rollback boundary: expected ${expectedRetractionBaselineTurnCount}, got ${retraction.baselineTurnCount}`,
-    );
-  }
-  if (
-    timing === "long-response" &&
-    (naturalCompletionMs === null ||
-      retractionCompletionMs >= maxRetractionCompletionMs ||
-      retractionCompletionMs >= naturalCompletionMs)
-  ) {
-    throw new Error(
-      `long-response timing gate failed: retractionCompletionMs=${retractionCompletionMs} naturalCompletionMs=${naturalCompletionMs} maxRetractionCompletionMs=${maxRetractionCompletionMs}`,
-    );
+  if (!retraction) {
+    throw new Error("scenario completed without a retraction result");
   }
 
   yield* dispatchTurn(
@@ -392,6 +503,7 @@ const run = Effect.gen(function* () {
     naturalCompletionMs,
     retractionCompletionMs,
     sessionStatusAtRetraction,
+    doublePopAttempts,
   };
 }).pipe(Effect.provide(protocolLayer));
 
@@ -411,7 +523,19 @@ try {
   console.log(
     `timings retractionCompletionMs=${result.retractionCompletionMs} naturalCompletionMs=${result.naturalCompletionMs ?? "n/a"} maxRetractionCompletionMs=${maxRetractionCompletionMs}`,
   );
-  console.log(`retractedMarker=${retractedMarker} status=${retractedMarkerStatus}`);
+  if (timing === "double-pop") {
+    for (const attempt of result.doublePopAttempts) {
+      const markerStatus = result.reply.includes(attempt.marker) ? "PRESENT" : "ABSENT";
+      console.log(
+        `doublePop iteration=${attempt.iteration} phase=${attempt.phase} sessionAtRetraction=${attempt.sessionStatusAtRetraction} delayMs=${attempt.delayMs} requestToCompleteMs=${attempt.requestToCompleteMs} sendToCompleteMs=${attempt.sendToCompleteMs} marker=${attempt.marker} status=${markerStatus}`,
+      );
+    }
+    console.log(
+      `doublePopSummary attempts=${result.doublePopAttempts.length} maxRequestToCompleteMs=${Math.max(...result.doublePopAttempts.map((attempt) => attempt.requestToCompleteMs))} maxSendToCompleteMs=${Math.max(...result.doublePopAttempts.map((attempt) => attempt.sendToCompleteMs))} maxAllowedMs=${maxDoublePopCompletionMs}`,
+    );
+  } else {
+    console.log(`retractedMarker=${retractedMarker} status=${retractedMarkerStatus}`);
+  }
   if (timing === "immediate") {
     console.log(
       `setupRetractedMarker=${setupRetractionMarker} status=${setupRetractionMarkerStatus}`,
@@ -420,7 +544,8 @@ try {
   console.log(`retainedMarker=${retainedMarker} status=${retainedMarkerStatus}`);
   console.log(`interrogationReplyChars=${result.reply.length}`);
   if (
-    retractedMarkerStatus !== "ABSENT" ||
+    (timing !== "double-pop" && retractedMarkerStatus !== "ABSENT") ||
+    result.doublePopAttempts.some((attempt) => result.reply.includes(attempt.marker)) ||
     retainedMarkerStatus !== "PRESENT" ||
     (timing === "immediate" && setupRetractionMarkerStatus !== "ABSENT")
   ) {
