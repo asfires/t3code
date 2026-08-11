@@ -153,6 +153,36 @@ describe("retraction recovery handoff", () => {
     expect(signal?.kind).toBe("completed");
   });
 
+  it("navigates an optimistic first-message recovery if completion beats acceptance", async () => {
+    const recovery = await seedRecovery();
+    useRetractionRecoveryStore.getState().setOptimisticDestination(recovery.requestId, "thread");
+    const optimisticRecovery = useRetractionRecoveryStore.getState().byRequestId[requestId];
+    if (!optimisticRecovery) throw new Error("Expected optimistic recovery fixture");
+    const navigate = vi.fn();
+
+    expect(
+      applyRetractionRecoverySignal({
+        recovery: optimisticRecovery,
+        signal: {
+          kind: "completed",
+          completion: {
+            threadId: sourceThreadRef.threadId,
+            retraction: {
+              requestId,
+              messageId,
+              turnId: null,
+              firstUserMessage: true,
+              completedAt: "2026-08-11T12:00:00.115Z",
+            },
+          },
+        },
+        navigate,
+      }),
+    ).toBe("draft-surfaced");
+    expect(navigate).toHaveBeenCalledOnce();
+    expect(useComposerDraftStore.getState().getDraftSession(draftId)?.hidden).toBe(false);
+  });
+
   it("restores into an existing source composer for a correlated failed row", async () => {
     const recovery = await seedRecovery();
     const navigate = vi.fn();

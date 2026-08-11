@@ -34,6 +34,8 @@ export interface PendingRetractionRecovery {
   projectRef: ScopedProjectRef;
   draftId: DraftId;
   createdAt: string;
+  firstUserMessage?: boolean;
+  optimisticDestination?: "thread" | "draft";
 }
 
 export function buildRetractionCommandInput(recovery: PendingRetractionRecovery) {
@@ -48,6 +50,7 @@ export function buildRetractionCommandInput(recovery: PendingRetractionRecovery)
 interface RetractionRecoveryStoreState {
   byRequestId: Record<string, PendingRetractionRecovery>;
   remember: (recovery: PendingRetractionRecovery) => void;
+  setOptimisticDestination: (requestId: CommandId, destination: "thread" | "draft") => void;
   forget: (requestId: CommandId) => void;
 }
 
@@ -66,6 +69,17 @@ export const useRetractionRecoveryStore = create<RetractionRecoveryStoreState>()
         set((state) => ({
           byRequestId: { ...state.byRequestId, [recovery.requestId]: recovery },
         })),
+      setOptimisticDestination: (requestId, optimisticDestination) =>
+        set((state) => {
+          const recovery = state.byRequestId[requestId];
+          if (!recovery || recovery.optimisticDestination === optimisticDestination) return state;
+          return {
+            byRequestId: {
+              ...state.byRequestId,
+              [requestId]: { ...recovery, optimisticDestination },
+            },
+          };
+        }),
       forget: (requestId) =>
         set((state) => {
           if (state.byRequestId[requestId] === undefined) return state;
@@ -113,6 +127,8 @@ export async function snapshotLastUserMessageRecovery(input: {
   futureThreadId: ThreadId;
   createdAt: string;
   bundle: LastUserMessageRestoreBundle;
+  firstUserMessage?: boolean;
+  optimisticDestination?: "thread" | "draft";
   encodeImage?: (file: File) => Promise<string>;
 }): Promise<{ draftId: DraftId; failedImageNames: string[] }> {
   const store = useComposerDraftStore.getState();
@@ -128,10 +144,24 @@ export async function snapshotLastUserMessageRecovery(input: {
     hidden: true,
   });
   store.setPrompt(input.draftId, input.bundle.prompt);
-  store.addImages(input.draftId, input.bundle.images);
+  store.addImages(input.draftId, input.bundle.images.map(cloneComposerImageForRetry));
   store.setModelSelection(input.draftId, input.bundle.modelSelection, { replaceOptions: true });
   store.setRuntimeMode(input.draftId, input.bundle.runtimeMode);
   store.setInteractionMode(input.draftId, input.bundle.interactionMode);
+
+  // Register the recovery before image persistence. The command may be
+  // dispatched as soon as this synchronous preparation finishes; encoding
+  // attachments must not sit on the perceived Esc path.
+  useRetractionRecoveryStore.getState().remember({
+    requestId: input.requestId,
+    messageId: input.messageId,
+    sourceThreadRef: input.sourceThreadRef,
+    projectRef: input.projectRef,
+    draftId: input.draftId,
+    createdAt: input.createdAt,
+    ...(input.firstUserMessage !== undefined ? { firstUserMessage: input.firstUserMessage } : {}),
+    ...(input.optimisticDestination ? { optimisticDestination: input.optimisticDestination } : {}),
+  });
 
   const encodeImage = input.encodeImage ?? readFileAsDataUrl;
   const encoded = await Promise.all(
@@ -158,19 +188,116 @@ export async function snapshotLastUserMessageRecovery(input: {
     encoded.flatMap((entry) => (entry.attachment ? [entry.attachment] : [])),
   );
 
-  useRetractionRecoveryStore.getState().remember({
-    requestId: input.requestId,
-    messageId: input.messageId,
-    sourceThreadRef: input.sourceThreadRef,
-    projectRef: input.projectRef,
-    draftId: input.draftId,
-    createdAt: input.createdAt,
-  });
-
   return {
     draftId: input.draftId,
     failedImageNames: encoded.flatMap((entry) => (entry.failedName ? [entry.failedName] : [])),
   };
+}
+
+export function applyOptimisticRetractionRecoveryToThread(input: {
+  sourceThreadRef: ScopedThreadRef;
+  bundle: LastUserMessageRestoreBundle;
+}): AppliedRetractionRecovery {
+  const store = useComposerDraftStore.getState();
+  const currentDraft = store.getComposerDraft(input.sourceThreadRef);
+  const prompt = mergePoppedPrompt(currentDraft?.prompt ?? "", input.bundle.prompt);
+  const existingImages = currentDraft?.images ?? [];
+  const existingIds = new Set(existingImages.map((image) => image.id));
+  const existingKeys = new Set(
+    existingImages.map((image) => JSON.stringify([image.mimeType, image.sizeBytes, image.name])),
+  );
+  const images: ComposerImageAttachment[] = [];
+  const unrestoredImageNames: string[] = [];
+  for (const recoveredImage of input.bundle.images) {
+    const key = JSON.stringify([
+      recoveredImage.mimeType,
+      recoveredImage.sizeBytes,
+      recoveredImage.name,
+    ]);
+    if (existingIds.has(recoveredImage.id) || existingKeys.has(key)) continue;
+    if (existingImages.length + images.length >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
+      unrestoredImageNames.push(recoveredImage.name);
+      continue;
+    }
+    existingIds.add(recoveredImage.id);
+    existingKeys.add(key);
+    images.push(cloneComposerImageForRetry(recoveredImage));
+  }
+
+  store.setPrompt(input.sourceThreadRef, prompt);
+  store.addImages(input.sourceThreadRef, images);
+  store.setModelSelection(input.sourceThreadRef, input.bundle.modelSelection, {
+    replaceOptions: true,
+  });
+  store.setRuntimeMode(input.sourceThreadRef, input.bundle.runtimeMode);
+  store.setInteractionMode(input.sourceThreadRef, input.bundle.interactionMode);
+
+  return {
+    prompt,
+    images: [...existingImages, ...images],
+    unrestoredImageNames,
+  };
+}
+
+export async function appendImagesToOptimisticRetractionRecovery(input: {
+  requestId: CommandId;
+  sourceThreadRef: ScopedThreadRef;
+  images: ComposerImageAttachment[];
+  bundle: Omit<LastUserMessageRestoreBundle, "prompt" | "images">;
+  encodeImage?: (file: File) => Promise<string>;
+}): Promise<{ restored: AppliedRetractionRecovery | null; failedImageNames: string[] }> {
+  const recovery = useRetractionRecoveryStore.getState().byRequestId[input.requestId];
+  if (!recovery || input.images.length === 0) {
+    return { restored: null, failedImageNames: [] };
+  }
+  const store = useComposerDraftStore.getState();
+  store.addImages(recovery.draftId, input.images);
+  const restored = applyOptimisticRetractionRecoveryToThread({
+    sourceThreadRef: input.sourceThreadRef,
+    bundle: { ...input.bundle, prompt: "", images: input.images },
+  });
+  const encodeImage = input.encodeImage ?? readFileAsDataUrl;
+  const encoded = await Promise.all(
+    input.images.map(async (image) => {
+      try {
+        return {
+          attachment: {
+            id: image.id,
+            name: image.name,
+            mimeType: image.mimeType,
+            sizeBytes: image.sizeBytes,
+            dataUrl: await encodeImage(image.file),
+          } satisfies PersistedComposerImageAttachment,
+          failedName: null,
+        };
+      } catch {
+        return { attachment: null, failedName: image.name };
+      }
+    }),
+  );
+  if (useRetractionRecoveryStore.getState().byRequestId[input.requestId]) {
+    store.syncPersistedAttachments(
+      recovery.draftId,
+      encoded.flatMap((entry) => (entry.attachment ? [entry.attachment] : [])),
+    );
+  }
+  return {
+    restored,
+    failedImageNames: encoded.flatMap((entry) => (entry.failedName ? [entry.failedName] : [])),
+  };
+}
+
+export function discardRetractionRecovery(input: {
+  requestId: CommandId;
+  preserveDraft?: boolean;
+}): boolean {
+  const recovery = useRetractionRecoveryStore.getState().byRequestId[input.requestId];
+  if (!recovery) return false;
+  if (!input.preserveDraft) {
+    useComposerDraftStore.getState().clearDraftThread(recovery.draftId);
+  }
+  useRetractionRecoveryStore.getState().forget(input.requestId);
+  return true;
 }
 
 export interface AppliedRetractionRecovery {
@@ -260,6 +387,11 @@ export function handoffCompletedMidThreadRetraction(input: {
 }): AppliedRetractionRecovery | null {
   const metadata = input.completion.retraction;
   if (!metadata || metadata.firstUserMessage) return null;
+  const recovery = useRetractionRecoveryStore.getState().byRequestId[metadata.requestId];
+  if (recovery?.optimisticDestination === "thread") {
+    discardRetractionRecovery({ requestId: metadata.requestId });
+    return null;
+  }
   return restoreRetractionRecoveryToThread({
     requestId: metadata.requestId,
     sourceThreadRef: {
@@ -300,6 +432,7 @@ export function surfaceRetractionRecoveryDraft(input: {
     params: { draftId: DraftId };
     replace: true;
   }) => unknown;
+  retainRecovery?: boolean;
 }): boolean {
   const recovery = useRetractionRecoveryStore.getState().byRequestId[input.requestId];
 
@@ -326,7 +459,9 @@ export function surfaceRetractionRecoveryDraft(input: {
     startFromOrigin: session.startFromOrigin,
     hidden: false,
   });
-  useRetractionRecoveryStore.getState().forget(input.requestId);
+  if (!input.retainRecovery) {
+    useRetractionRecoveryStore.getState().forget(input.requestId);
+  }
   if (input.navigate) {
     void input.navigate({
       to: "/draft/$draftId",

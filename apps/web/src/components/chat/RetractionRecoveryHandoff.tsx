@@ -15,6 +15,7 @@ import { environmentShell } from "../../state/shell";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import {
   type FirstMessageRetractionCompletion,
+  discardRetractionRecovery,
   findCorrelatedRetractionFailure,
   handoffCompletedFirstMessageRetraction,
   handoffCompletedMidThreadRetraction,
@@ -140,6 +141,45 @@ export function applyRetractionRecoverySignal(input: {
     replace: true;
   }) => unknown;
 }): "draft-surfaced" | "thread-restored" | null {
+  const optimisticDestination = input.recovery.optimisticDestination;
+  if (optimisticDestination && input.signal.kind !== "stale") {
+    if (
+      input.signal.kind === "completed" &&
+      input.signal.completion.retraction?.firstUserMessage &&
+      optimisticDestination === "thread"
+    ) {
+      return surfaceRetractionRecoveryDraft({
+        requestId: input.recovery.requestId,
+        sourceThreadRef: input.recovery.sourceThreadRef,
+        navigate: input.navigate,
+      })
+        ? "draft-surfaced"
+        : null;
+    }
+    if (input.signal.kind === "failed" && !input.signal.sourceThreadExists) {
+      return surfaceRetractionRecoveryDraft({
+        requestId: input.recovery.requestId,
+        sourceThreadRef: input.recovery.sourceThreadRef,
+      })
+        ? "draft-surfaced"
+        : null;
+    }
+    if (input.signal.kind === "source-thread-gone" && optimisticDestination === "thread") {
+      return surfaceRetractionRecoveryDraft({
+        requestId: input.recovery.requestId,
+        sourceThreadRef: input.recovery.sourceThreadRef,
+        navigate: input.navigate,
+      })
+        ? "draft-surfaced"
+        : null;
+    }
+    discardRetractionRecovery({
+      requestId: input.recovery.requestId,
+      preserveDraft: optimisticDestination === "draft",
+    });
+    return optimisticDestination === "draft" ? "draft-surfaced" : "thread-restored";
+  }
+
   if (input.signal.kind === "completed") {
     if (input.signal.completion.retraction?.firstUserMessage) {
       return handoffCompletedFirstMessageRetraction({

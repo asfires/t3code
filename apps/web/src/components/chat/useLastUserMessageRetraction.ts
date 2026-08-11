@@ -1,4 +1,6 @@
 import type {
+  CommandId,
+  MessageId,
   ProviderInteractionMode,
   RuntimeMode,
   ScopedProjectRef,
@@ -26,13 +28,18 @@ import {
 } from "./lastUserMessagePop";
 import {
   buildRetractionCommandInput,
+  appendImagesToOptimisticRetractionRecovery,
+  applyOptimisticRetractionRecoveryToThread,
+  discardRetractionRecovery,
   findCorrelatedRetractionFailure,
   handoffCompletedMidThreadRetraction,
   type PendingRetractionRecovery,
   restoreRetractionRecoveryToThread,
   snapshotLastUserMessageRecovery,
+  surfaceRetractionRecoveryDraft,
   useRetractionRecoveryStore,
 } from "./lastUserMessageRecovery";
+import { beginOptimisticRetraction } from "./optimisticRetraction";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "An error occurred.";
@@ -44,6 +51,11 @@ export function useLastUserMessageRetraction(input: {
   activeThreadBranch: string | null;
   activeEnvironmentUnavailable: boolean;
   candidate: LastUserMessagePopCandidate | null;
+  isFirstUserMessage: boolean;
+  optimisticBundle?: {
+    prompt: string;
+    images: ComposerImageAttachment[];
+  };
   pendingRecovery: PendingRetractionRecovery | null;
   retractionPending: boolean;
   runtimeMode: RuntimeMode;
@@ -53,6 +65,9 @@ export function useLastUserMessageRetraction(input: {
   composerRef: ComposerHandleRef;
   promptRef: RefObject<string>;
   composerImagesRef: RefObject<ComposerImageAttachment[]>;
+  onOptimisticRetractionStarted: (input: { requestId: CommandId; messageId: MessageId }) => void;
+  onOptimisticRetractionFailed: (input: { requestId: CommandId; messageId: MessageId }) => void;
+  navigateToRecoveryDraft: (draftId: PendingRetractionRecovery["draftId"]) => void;
   setThreadError: (threadId: ThreadId | null, detail: string | null) => void;
 }) {
   const {
@@ -61,6 +76,8 @@ export function useLastUserMessageRetraction(input: {
     activeThreadBranch,
     activeEnvironmentUnavailable,
     candidate,
+    isFirstUserMessage,
+    optimisticBundle,
     pendingRecovery,
     retractionPending,
     runtimeMode,
@@ -70,6 +87,9 @@ export function useLastUserMessageRetraction(input: {
     composerRef,
     promptRef,
     composerImagesRef,
+    onOptimisticRetractionStarted,
+    onOptimisticRetractionFailed,
+    navigateToRecoveryDraft,
     setThreadError,
   } = input;
   const retractThreadTurn = useAtomCommand(threadEnvironment.retractTurn, {
@@ -98,12 +118,18 @@ export function useLastUserMessageRetraction(input: {
 
   const failPendingRetraction = useCallback(
     (recovery: PendingRetractionRecovery, detail: string) => {
-      const restored = restoreRetractionRecoveryToThread({
+      const restored =
+        recovery.optimisticDestination === "thread"
+          ? (discardRetractionRecovery({ requestId: recovery.requestId }), null)
+          : restoreRetractionRecoveryToThread({
+              requestId: recovery.requestId,
+              sourceThreadRef: recovery.sourceThreadRef,
+            });
+      if (restored) applyRestoredComposer(restored);
+      onOptimisticRetractionFailed({
         requestId: recovery.requestId,
-        sourceThreadRef: recovery.sourceThreadRef,
+        messageId: recovery.messageId,
       });
-      if (!restored) return;
-      applyRestoredComposer(restored);
       setThreadError(recovery.sourceThreadRef.threadId, detail);
       toastManager.add(
         stackedThreadToast({
@@ -113,7 +139,7 @@ export function useLastUserMessageRetraction(input: {
         }),
       );
     },
-    [applyRestoredComposer, setThreadError],
+    [applyRestoredComposer, onOptimisticRetractionFailed, setThreadError],
   );
 
   const dispatchesRef = useRef(new Set<string>());
@@ -127,7 +153,21 @@ export function useLastUserMessageRetraction(input: {
         input: buildRetractionCommandInput(recovery),
       });
       dispatchesRef.current.delete(recovery.requestId);
-      if (result._tag !== "Failure" || isAtomCommandInterrupted(result)) return;
+      if (result._tag !== "Failure") {
+        if (recovery.firstUserMessage ?? isFirstUserMessage) {
+          useRetractionRecoveryStore
+            .getState()
+            .setOptimisticDestination(recovery.requestId, "draft");
+          surfaceRetractionRecoveryDraft({
+            requestId: recovery.requestId,
+            sourceThreadRef: recovery.sourceThreadRef,
+            retainRecovery: true,
+            navigate: ({ params }) => navigateToRecoveryDraft(params.draftId),
+          });
+        }
+        return;
+      }
+      if (isAtomCommandInterrupted(result)) return;
       const error = squashAtomCommandFailure(result);
       if (
         typeof error === "object" &&
@@ -139,7 +179,7 @@ export function useLastUserMessageRetraction(input: {
       }
       failPendingRetraction(recovery, errorMessage(error));
     },
-    [failPendingRetraction, retractThreadTurn],
+    [failPendingRetraction, isFirstUserMessage, navigateToRecoveryDraft, retractThreadTurn],
   );
 
   useEffect(() => {
@@ -210,42 +250,86 @@ export function useLastUserMessageRetraction(input: {
 
     const requestId = newCommandId();
     const createdAt = new Date().toISOString();
-    const { images, failedNames } = await captureLastUserMessageImages(candidate.message).catch(
-      () => ({
-        images: [],
-        failedNames: (candidate.message.attachments ?? []).map((attachment) => attachment.name),
-      }),
-    );
-    const snapshot = await snapshotLastUserMessageRecovery({
-      requestId,
-      messageId: candidate.message.id,
-      sourceThreadRef: scopeThreadRef(activeThread.environmentId, activeThread.id),
-      projectRef: activeProjectRef,
-      draftId: newDraftId(),
-      futureThreadId: newThreadId(),
-      createdAt,
-      bundle: {
-        prompt: deriveLastUserMessageRestoredText(candidate.message.text),
-        images,
-        modelSelection: activeThread.modelSelection,
-        runtimeMode,
-        interactionMode,
-        envMode,
-        baseBranch: activeThreadBranch,
-        startFromOrigin,
+    const sourceThreadRef = scopeThreadRef(activeThread.environmentId, activeThread.id);
+    const prompt =
+      optimisticBundle?.prompt ?? deriveLastUserMessageRestoredText(candidate.message.text);
+    const images = optimisticBundle?.images ?? [];
+    const bundle = {
+      prompt,
+      images,
+      modelSelection: activeThread.modelSelection,
+      runtimeMode,
+      interactionMode,
+      envMode,
+      baseBranch: activeThreadBranch,
+      startFromOrigin,
+    };
+    const draftId = newDraftId();
+    const snapshotPromise = beginOptimisticRetraction({
+      restoreComposer: () => {
+        const restored = applyOptimisticRetractionRecoveryToThread({
+          sourceThreadRef,
+          bundle,
+        });
+        applyRestoredComposer(restored);
+      },
+      hideMessage: () =>
+        onOptimisticRetractionStarted({ requestId, messageId: candidate.message.id }),
+      dispatch: () => {
+        const snapshot = snapshotLastUserMessageRecovery({
+          requestId,
+          messageId: candidate.message.id,
+          sourceThreadRef,
+          projectRef: activeProjectRef,
+          draftId,
+          futureThreadId: newThreadId(),
+          createdAt,
+          bundle,
+          firstUserMessage: isFirstUserMessage,
+          optimisticDestination: "thread",
+        });
+        const recovery = useRetractionRecoveryStore.getState().byRequestId[requestId];
+        recoveryPreparationRef.current = false;
+        if (recovery) void dispatchPendingRetraction(recovery);
+        return snapshot;
       },
     });
-    const unrestoredImageNames = [...failedNames, ...snapshot.failedImageNames];
-    if (unrestoredImageNames.length > 0) {
+
+    void snapshotPromise.then((snapshot) => {
+      if (snapshot.failedImageNames.length === 0) return;
       toastManager.add({
         type: "warning",
         title: "Some images could not be saved for recovery",
-        description: `${[...new Set(unrestoredImageNames)].join(", ")} may not survive a reconnect.`,
+        description: `${[...new Set(snapshot.failedImageNames)].join(", ")} may not survive a reconnect.`,
+      });
+    });
+
+    if (!optimisticBundle && (candidate.message.attachments?.length ?? 0) > 0) {
+      void captureLastUserMessageImages(candidate.message).then(async (captured) => {
+        const appended = await appendImagesToOptimisticRetractionRecovery({
+          requestId,
+          sourceThreadRef,
+          images: captured.images,
+          bundle: {
+            modelSelection: bundle.modelSelection,
+            runtimeMode: bundle.runtimeMode,
+            interactionMode: bundle.interactionMode,
+            envMode: bundle.envMode,
+            baseBranch: bundle.baseBranch,
+            startFromOrigin: bundle.startFromOrigin,
+          },
+        });
+        if (appended.restored) applyRestoredComposer(appended.restored);
+        const failedNames = [...captured.failedNames, ...appended.failedImageNames];
+        if (failedNames.length > 0) {
+          toastManager.add({
+            type: "warning",
+            title: "Some images could not be restored",
+            description: `${[...new Set(failedNames)].join(", ")} could not be restored to the composer.`,
+          });
+        }
       });
     }
-    const recovery = useRetractionRecoveryStore.getState().byRequestId[requestId];
-    recoveryPreparationRef.current = false;
-    if (recovery) void dispatchPendingRetraction(recovery);
   }, [
     activeProjectRef,
     activeThread,
@@ -254,8 +338,12 @@ export function useLastUserMessageRetraction(input: {
     dispatchPendingRetraction,
     envMode,
     interactionMode,
+    isFirstUserMessage,
+    onOptimisticRetractionStarted,
+    optimisticBundle,
     retractionPending,
     runtimeMode,
     startFromOrigin,
+    applyRestoredComposer,
   ]);
 }

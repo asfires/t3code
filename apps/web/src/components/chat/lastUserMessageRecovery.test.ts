@@ -11,12 +11,14 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { DraftId, useComposerDraftStore } from "../../composerDraftStore";
 import {
+  applyOptimisticRetractionRecoveryToThread,
   buildRetractionCommandInput,
   handoffCompletedFirstMessageRetraction,
   handoffCompletedMidThreadRetraction,
   findCorrelatedRetractionFailure,
   restoreRetractionRecoveryToThread,
   snapshotLastUserMessageRecovery,
+  surfaceRetractionRecoveryDraft,
   useRetractionRecoveryStore,
 } from "./lastUserMessageRecovery";
 
@@ -216,6 +218,49 @@ describe("last user message recovery draft", () => {
     expect(useRetractionRecoveryStore.getState().byRequestId[requestId]).toBeUndefined();
   });
 
+  it("surfaces a first-message recovery draft on acceptance while retaining its watcher", async () => {
+    await snapshotLastUserMessageRecovery({
+      requestId,
+      messageId,
+      sourceThreadRef,
+      projectRef,
+      draftId,
+      futureThreadId,
+      createdAt: "2026-08-11T12:00:00.000Z",
+      bundle: {
+        prompt: "restore this prompt",
+        images: [],
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("claude-work"),
+          model: "claude-opus-4-1",
+        },
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        envMode: "local",
+        baseBranch: "main",
+        startFromOrigin: false,
+      },
+      optimisticDestination: "thread",
+    });
+    useRetractionRecoveryStore.getState().setOptimisticDestination(requestId, "draft");
+    const navigate = vi.fn();
+
+    expect(
+      surfaceRetractionRecoveryDraft({
+        requestId,
+        sourceThreadRef,
+        navigate,
+        retainRecovery: true,
+      }),
+    ).toBe(true);
+
+    expect(navigate).toHaveBeenCalledOnce();
+    expect(useComposerDraftStore.getState().getDraftSession(draftId)?.hidden).toBe(false);
+    expect(useRetractionRecoveryStore.getState().byRequestId[requestId]).toMatchObject({
+      optimisticDestination: "draft",
+    });
+  });
+
   it("restores a correlated mid-thread completion into the same composer and cleans the hidden draft", async () => {
     const typedImage = new File(["typed"], "typed.png", { type: "image/png" });
     const recoveredImage = new File(["recovered"], "recovered.png", { type: "image/png" });
@@ -293,6 +338,57 @@ describe("last user message recovery draft", () => {
         expect.objectContaining({ id: "recovered-image" }),
       ],
     });
+    expect(useComposerDraftStore.getState().getDraftSession(draftId)).toBeNull();
+    expect(useRetractionRecoveryStore.getState().byRequestId[requestId]).toBeUndefined();
+  });
+
+  it("does not merge the prompt again when an optimistic restore completes", async () => {
+    const bundle = {
+      prompt: "original sent text",
+      images: [],
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("claude-work"),
+        model: "claude-opus-4-1",
+      },
+      runtimeMode: "approval-required" as const,
+      interactionMode: "default" as const,
+      envMode: "local" as const,
+      baseBranch: "main",
+      startFromOrigin: false,
+    };
+    const snapshot = snapshotLastUserMessageRecovery({
+      requestId,
+      messageId,
+      sourceThreadRef,
+      projectRef,
+      draftId,
+      futureThreadId,
+      createdAt: "2026-08-11T12:00:00.000Z",
+      bundle,
+      optimisticDestination: "thread",
+    });
+    applyOptimisticRetractionRecoveryToThread({ sourceThreadRef, bundle });
+    useComposerDraftStore.getState().setPrompt(sourceThreadRef, "original sent text, edited");
+    await snapshot;
+
+    expect(
+      handoffCompletedMidThreadRetraction({
+        environmentId,
+        completion: {
+          threadId: sourceThreadId,
+          retraction: {
+            requestId,
+            messageId,
+            turnId: null,
+            firstUserMessage: false,
+            completedAt: "2026-08-11T12:00:05.000Z",
+          },
+        },
+      }),
+    ).toBeNull();
+    expect(useComposerDraftStore.getState().getComposerDraft(sourceThreadRef)?.prompt).toBe(
+      "original sent text, edited",
+    );
     expect(useComposerDraftStore.getState().getDraftSession(draftId)).toBeNull();
     expect(useRetractionRecoveryStore.getState().byRequestId[requestId]).toBeUndefined();
   });
