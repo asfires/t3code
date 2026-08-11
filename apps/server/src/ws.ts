@@ -941,13 +941,28 @@ const makeWsRpcLayer = (
                 path: null,
               });
               targetWorktreePath = worktree.worktree.path;
-              yield* orchestrationEngine.dispatch({
-                type: "thread.meta.update",
-                commandId: yield* serverCommandId("bootstrap-thread-meta-update"),
-                threadId: command.threadId,
-                branch: worktree.worktree.refName,
-                worktreePath: targetWorktreePath,
-              });
+              const metadataCommandId = yield* serverCommandId("bootstrap-thread-meta-update");
+              yield* orchestrationEngine.dispatch(
+                createdThread
+                  ? {
+                      type: "thread.managed-worktree.record",
+                      commandId: metadataCommandId,
+                      threadId: command.threadId,
+                      branch: worktree.worktree.refName,
+                      managedWorktree: {
+                        projectCwd: bootstrap.prepareWorktree.projectCwd,
+                        path: targetWorktreePath,
+                        createdForCommandId: command.commandId,
+                      },
+                    }
+                  : {
+                      type: "thread.meta.update",
+                      commandId: metadataCommandId,
+                      threadId: command.threadId,
+                      branch: worktree.worktree.refName,
+                      worktreePath: targetWorktreePath,
+                    },
+              );
               yield* refreshGitStatus(targetWorktreePath);
             }
 

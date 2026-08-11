@@ -300,6 +300,7 @@ export function projectEvent(
             interactionMode: payload.interactionMode,
             branch: payload.branch,
             worktreePath: payload.worktreePath,
+            managedWorktree: null,
             latestTurn: null,
             createdAt: payload.createdAt,
             updatedAt: payload.updatedAt,
@@ -459,6 +460,9 @@ export function projectEvent(
               : {}),
             ...(payload.branch !== undefined ? { branch: payload.branch } : {}),
             ...(payload.worktreePath !== undefined ? { worktreePath: payload.worktreePath } : {}),
+            ...(payload.managedWorktree !== undefined
+              ? { managedWorktree: payload.managedWorktree }
+              : {}),
             updatedAt: payload.updatedAt,
           }),
         })),

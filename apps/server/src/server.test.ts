@@ -7436,7 +7436,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           dispatchedCommands.map((command) => command.type),
           [
             "thread.create",
-            "thread.meta.update",
+            "thread.managed-worktree.record",
             "thread.activity.append",
             "thread.activity.append",
             "thread.turn.start",
@@ -7471,6 +7471,16 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           worktreePath: "/tmp/bootstrap-worktree",
         });
         assert.deepEqual(refreshStatus.mock.calls[0]?.[0], "/tmp/bootstrap-worktree");
+
+        const provenanceCommand = dispatchedCommands[1];
+        assertTrue(provenanceCommand?.type === "thread.managed-worktree.record");
+        if (provenanceCommand?.type === "thread.managed-worktree.record") {
+          assert.deepEqual(provenanceCommand.managedWorktree, {
+            projectCwd: "/tmp/project",
+            path: "/tmp/bootstrap-worktree",
+            createdForCommandId: CommandId.make("cmd-bootstrap-turn-start"),
+          });
+        }
 
         const setupActivities = dispatchedCommands.filter(
           (command): command is Extract<OrchestrationCommand, { type: "thread.activity.append" }> =>
@@ -7592,6 +7602,66 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("does not record provenance for a draft pointed at a pre-existing worktree", () =>
+    Effect.gen(function* () {
+      const dispatchedCommands: Array<OrchestrationCommand> = [];
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatchedCommands.push(command);
+                return { sequence: dispatchedCommands.length };
+              }),
+            readEvents: () => Stream.empty,
+          },
+        },
+      });
+
+      const createdAt = "2026-01-01T00:00:00.000Z";
+      const wsUrl = yield* getWsServerUrl("/ws");
+      yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+            type: "thread.turn.start",
+            commandId: CommandId.make("cmd-bootstrap-pre-existing-worktree"),
+            threadId: ThreadId.make("thread-bootstrap-pre-existing-worktree"),
+            message: {
+              messageId: MessageId.make("msg-bootstrap-pre-existing-worktree"),
+              role: "user",
+              text: "hello",
+              attachments: [],
+            },
+            modelSelection: defaultModelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            bootstrap: {
+              createThread: {
+                projectId: defaultProjectId,
+                title: "Existing Worktree Thread",
+                modelSelection: defaultModelSelection,
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                branch: "feature/existing",
+                worktreePath: "/tmp/pre-existing-worktree",
+                createdAt,
+              },
+            },
+            createdAt,
+          }),
+        ),
+      );
+
+      assert.deepEqual(
+        dispatchedCommands.map((command) => command.type),
+        ["thread.create", "thread.turn.start"],
+      );
+      assertTrue(
+        dispatchedCommands.every((command) => command.type !== "thread.managed-worktree.record"),
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("records setup-script failures without aborting bootstrap turn start", () =>
     Effect.gen(function* () {
       const dispatchedCommands: Array<OrchestrationCommand> = [];
@@ -7682,7 +7752,12 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(response.sequence, 4);
       assert.deepEqual(
         dispatchedCommands.map((command) => command.type),
-        ["thread.create", "thread.meta.update", "thread.activity.append", "thread.turn.start"],
+        [
+          "thread.create",
+          "thread.managed-worktree.record",
+          "thread.activity.append",
+          "thread.turn.start",
+        ],
       );
       const setupFailureActivity = dispatchedCommands.find(
         (command): command is Extract<OrchestrationCommand, { type: "thread.activity.append" }> =>
@@ -7803,7 +7878,12 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(response.sequence, 4);
       assert.deepEqual(
         dispatchedCommands.map((command) => command.type),
-        ["thread.create", "thread.meta.update", "thread.activity.append", "thread.turn.start"],
+        [
+          "thread.create",
+          "thread.managed-worktree.record",
+          "thread.activity.append",
+          "thread.turn.start",
+        ],
       );
       const setupActivities = dispatchedCommands.filter(
         (command): command is Extract<OrchestrationCommand, { type: "thread.activity.append" }> =>
