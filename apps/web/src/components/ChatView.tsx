@@ -253,7 +253,6 @@ import { createPreDispatchCancellationLatch } from "./chat/preDispatchCancellati
 import { CHAT_FLOATING_LAYER_SELECTOR, shouldHandleChatEscape } from "./chat/chatEscapeTrigger";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { shouldRenderEmptyThreadHero } from "./chat/emptyThreadHero";
-import { RetractionRecoveryHandoff } from "./chat/RetractionRecoveryHandoff";
 import { useRetractionRecoveryStore } from "./chat/lastUserMessageRecovery";
 import { useLastUserMessageRetraction } from "./chat/useLastUserMessageRetraction";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
@@ -6725,46 +6724,8 @@ function ChatViewContent(props: ChatViewProps) {
 }
 
 export default function ChatView(props: ChatViewProps) {
-  const navigate = useNavigate();
-  const pendingRetractionRecovery = useRetractionRecoveryStore((state) =>
-    props.routeKind === "server"
-      ? (Object.values(state.byRequestId).find(
-          (recovery) =>
-            recovery.sourceThreadRef.environmentId === props.environmentId &&
-            recovery.sourceThreadRef.threadId === props.threadId,
-        ) ?? null)
-      : null,
-  );
-  const retractionThread = useThread(
-    pendingRetractionRecovery ? pendingRetractionRecovery.sourceThreadRef : null,
-  );
-  const projectedRetraction = retractionThread?.turnRetraction;
-  const projectedCompletion =
-    pendingRetractionRecovery &&
-    projectedRetraction?.status === "completed" &&
-    projectedRetraction.requestId === pendingRetractionRecovery.requestId &&
-    projectedRetraction.completedAt !== null
-      ? {
-          threadId: pendingRetractionRecovery.sourceThreadRef.threadId,
-          retraction: {
-            requestId: projectedRetraction.requestId,
-            messageId: projectedRetraction.messageId,
-            turnId: projectedRetraction.targetTurnId,
-            firstUserMessage: projectedRetraction.firstUserMessage,
-            completedAt: projectedRetraction.completedAt,
-          },
-        }
-      : null;
   return (
     <DiffWorkerPoolProvider>
-      {pendingRetractionRecovery ? (
-        <RetractionRecoveryHandoff
-          environmentId={props.environmentId}
-          recovery={pendingRetractionRecovery}
-          projectedCompletion={projectedCompletion}
-          navigate={navigate}
-        />
-      ) : null}
       <ChatViewContent {...props} />
     </DiffWorkerPoolProvider>
   );

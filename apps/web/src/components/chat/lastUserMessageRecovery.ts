@@ -282,11 +282,31 @@ export function handoffCompletedFirstMessageRetraction(input: {
   const metadata = input.completion.retraction;
   if (!input.capabilityEnabled || !metadata?.firstUserMessage) return false;
 
-  const recovery = useRetractionRecoveryStore.getState().byRequestId[metadata.requestId];
+  return surfaceRetractionRecoveryDraft({
+    requestId: metadata.requestId,
+    sourceThreadRef: {
+      environmentId: input.environmentId,
+      threadId: input.completion.threadId,
+    },
+    navigate: input.navigate,
+  });
+}
+
+export function surfaceRetractionRecoveryDraft(input: {
+  requestId: CommandId;
+  sourceThreadRef: ScopedThreadRef;
+  navigate: (input: {
+    to: "/draft/$draftId";
+    params: { draftId: DraftId };
+    replace: true;
+  }) => unknown;
+}): boolean {
+  const recovery = useRetractionRecoveryStore.getState().byRequestId[input.requestId];
+
   if (
     !recovery ||
-    recovery.sourceThreadRef.environmentId !== input.environmentId ||
-    recovery.sourceThreadRef.threadId !== input.completion.threadId
+    recovery.sourceThreadRef.environmentId !== input.sourceThreadRef.environmentId ||
+    recovery.sourceThreadRef.threadId !== input.sourceThreadRef.threadId
   ) {
     return false;
   }
@@ -306,7 +326,7 @@ export function handoffCompletedFirstMessageRetraction(input: {
     startFromOrigin: session.startFromOrigin,
     hidden: false,
   });
-  useRetractionRecoveryStore.getState().forget(metadata.requestId);
+  useRetractionRecoveryStore.getState().forget(input.requestId);
   void input.navigate({
     to: "/draft/$draftId",
     params: { draftId: recovery.draftId },

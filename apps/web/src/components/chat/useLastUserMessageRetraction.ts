@@ -102,7 +102,8 @@ export function useLastUserMessageRetraction(input: {
         requestId: recovery.requestId,
         sourceThreadRef: recovery.sourceThreadRef,
       });
-      if (restored) applyRestoredComposer(restored);
+      if (!restored) return;
+      applyRestoredComposer(restored);
       setThreadError(recovery.sourceThreadRef.threadId, detail);
       toastManager.add(
         stackedThreadToast({
