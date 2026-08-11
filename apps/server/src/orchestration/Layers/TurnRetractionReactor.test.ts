@@ -24,6 +24,7 @@ import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
+import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
@@ -51,7 +52,7 @@ import {
   type ProjectionSnapshotQueryShape,
 } from "../Services/ProjectionSnapshotQuery.ts";
 import { TurnRetractionReactor } from "../Services/TurnRetractionReactor.ts";
-import { makeTurnRetractionReactor } from "./TurnRetractionReactor.ts";
+import { makeTurnRetractionReactor, TurnRetractionRetryTicks } from "./TurnRetractionReactor.ts";
 
 const NOW = "2026-08-11T12:00:00.000Z";
 const THREAD_ID = ThreadId.make("thread-retraction-reactor");
@@ -205,6 +206,7 @@ const unsupported = <A>() =>
 async function startHarness(state: MutableState) {
   const domainEvents = Effect.runSync(PubSub.unbounded<OrchestrationEvent>());
   const runtimeEvents = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
+  const retryTicks = Effect.runSync(Queue.unbounded<void>());
   const repository = makeRepository(state);
   const dispatch = vi.fn((command: OrchestrationCommand) => {
     state.dispatched.push(command);
@@ -355,6 +357,7 @@ async function startHarness(state: MutableState) {
   });
 
   const layer = Layer.effect(TurnRetractionReactor, makeTurnRetractionReactor).pipe(
+    Layer.provideMerge(Layer.succeed(TurnRetractionRetryTicks, Stream.fromQueue(retryTicks))),
     Layer.provideMerge(Layer.succeed(OrchestrationEngineService, engine)),
     Layer.provideMerge(Layer.succeed(ProjectionSnapshotQuery, query)),
     Layer.provideMerge(Layer.succeed(ProjectionTurnRetractionRepository, repository)),
@@ -375,6 +378,7 @@ async function startHarness(state: MutableState) {
     scope,
     emitDomain: (event: OrchestrationEvent) =>
       runtime.runPromise(PubSub.publish(domainEvents, event)),
+    retryTick: () => runtime.runPromise(Queue.offer(retryTicks, undefined)),
   };
 }
 
@@ -430,6 +434,45 @@ it("drives claimed convergence from interrupt through a settlement event", async
   expect(state.order).toEqual(["interrupt", "rollback", "restore", "complete"]);
   expect(state.historyTurnCount).toBe(1);
   expect(state.row.status).toBe("completed");
+  await stopHarness(harness);
+});
+
+it("retries a pending row on the next periodic tick without a lifecycle event", async () => {
+  const state = makeState("claimed");
+  state.sessionStatus = "ready";
+  state.failRollbackAfterEffect = true;
+  const harness = await startHarness(state);
+
+  expect(state.row.status).toBe("requested");
+  expect(state.historyTurnCount).toBe(1);
+  expect(state.order).toEqual(["rollback"]);
+
+  await harness.retryTick();
+  await harness.runtime.runPromise(harness.reactor.drain);
+
+  expect(state.row.status).toBe("completed");
+  expect(state.historyTurnCount).toBe(1);
+  expect(state.order).toEqual(["rollback", "rollback", "restore", "complete"]);
+  await stopHarness(harness);
+});
+
+it("repeats absolute provider rollback harmlessly after a post-rollback crash", async () => {
+  const state = makeState("claimed");
+  state.sessionStatus = "ready";
+  state.failRollbackAfterEffect = true;
+  const harness = await startHarness(state);
+
+  expect(state.row.status).toBe("requested");
+  expect(state.historyTurnCount).toBe(1);
+  expect(state.order.filter((entry) => entry === "rollback")).toHaveLength(1);
+
+  await harness.retryTick();
+  await harness.runtime.runPromise(harness.reactor.drain);
+
+  expect(state.row.status).toBe("completed");
+  expect(state.historyTurnCount).toBe(1);
+  expect(state.order.filter((entry) => entry === "rollback")).toHaveLength(2);
+  expect(state.order.slice(-3)).toEqual(["rollback", "restore", "complete"]);
   await stopHarness(harness);
 });
 

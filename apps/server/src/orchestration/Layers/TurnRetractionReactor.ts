@@ -8,8 +8,10 @@ import {
 } from "@t3tools/contracts";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import * as Cause from "effect/Cause";
+import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -73,7 +75,15 @@ const isTerminalProviderError = (error: unknown): boolean =>
 const failureDetail = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
+export class TurnRetractionRetryTicks extends Context.Reference<Stream.Stream<void>>(
+  "t3/orchestration/Layers/TurnRetractionReactor/TurnRetractionRetryTicks",
+  {
+    defaultValue: () => Stream.tick(Duration.seconds(30)).pipe(Stream.drop(1)),
+  },
+) {}
+
 export const makeTurnRetractionReactor = Effect.gen(function* () {
+  const retryTicks = yield* TurnRetractionRetryTicks;
   const crypto = yield* Crypto.Crypto;
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
@@ -428,6 +438,20 @@ export const makeTurnRetractionReactor = Effect.gen(function* () {
     event.type === "session.state.changed" ||
     event.type === "session.exited";
 
+  const enqueuePending = Effect.fn("enqueuePendingTurnRetractions")(function* () {
+    const pending = yield* turnRetractions.listPending().pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("turn retraction pending scan failed", {
+          cause: Cause.pretty(cause),
+        }).pipe(Effect.as([] as ReadonlyArray<ProjectionTurnRetraction>)),
+      ),
+    );
+    yield* Effect.forEach(pending, (row) => worker.enqueue(row.threadId), {
+      concurrency: 1,
+      discard: true,
+    });
+  });
+
   const start: TurnRetractionReactorShape["start"] = Effect.fn("start")(function* () {
     yield* forkParked(
       Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) =>
@@ -442,17 +466,8 @@ export const makeTurnRetractionReactor = Effect.gen(function* () {
       ),
     );
 
-    const pending = yield* turnRetractions.listPending().pipe(
-      Effect.catchCause((cause) =>
-        Effect.logWarning("turn retraction startup scan failed", {
-          cause: Cause.pretty(cause),
-        }).pipe(Effect.as([] as ReadonlyArray<ProjectionTurnRetraction>)),
-      ),
-    );
-    yield* Effect.forEach(pending, (row) => worker.enqueue(row.threadId), {
-      concurrency: 1,
-      discard: true,
-    });
+    yield* enqueuePending();
+    yield* forkParked(Stream.runForEach(retryTicks, enqueuePending));
   });
 
   return {

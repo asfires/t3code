@@ -250,7 +250,11 @@ import {
   isLastUserMessagePopWindowOpen,
 } from "./chat/lastUserMessagePop";
 import { createPreDispatchCancellationLatch } from "./chat/preDispatchCancellationLatch";
-import { CHAT_FLOATING_LAYER_SELECTOR, shouldHandleChatEscape } from "./chat/chatEscapeTrigger";
+import {
+  CHAT_FLOATING_LAYER_SELECTOR,
+  runChatEscapeAction,
+  shouldHandleChatEscape,
+} from "./chat/chatEscapeTrigger";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { shouldRenderEmptyThreadHero } from "./chat/emptyThreadHero";
 import { RetractionRecoveryHandoff } from "./chat/RetractionRecoveryHandoff";
@@ -6084,17 +6088,15 @@ function ChatViewContent(props: ChatViewProps) {
         return;
       }
 
-      const cancelledMessageId = preDispatchCancellationLatchRef.current.cancel();
-      if (cancelledMessageId === null) {
-        if (retractionPending) {
-          return;
-        }
-        if (lastUserMessagePopCandidate === null) {
-          scheduleComposerFocus();
-          return;
-        }
-        void onPopLastUserMessage();
-      }
+      const handled = runChatEscapeAction({
+        cancelPreDispatch: () => preDispatchCancellationLatchRef.current.cancel(),
+        retractionPending,
+        threadTurnRetraction: supportsThreadTurnRetraction,
+        hasRetractionCandidate: lastUserMessagePopCandidate !== null,
+        focusComposer: scheduleComposerFocus,
+        retractLastUserMessage: () => void onPopLastUserMessage(),
+      });
+      if (!handled) return;
 
       event.preventDefault();
       event.stopPropagation();
@@ -6102,7 +6104,13 @@ function ChatViewContent(props: ChatViewProps) {
 
     window.addEventListener("keydown", onWindowKeyDown);
     return () => window.removeEventListener("keydown", onWindowKeyDown);
-  }, [lastUserMessagePopCandidate, onPopLastUserMessage, retractionPending, scheduleComposerFocus]);
+  }, [
+    lastUserMessagePopCandidate,
+    onPopLastUserMessage,
+    retractionPending,
+    scheduleComposerFocus,
+    supportsThreadTurnRetraction,
+  ]);
 
   // Empty state: no active thread
   if (!activeThread) {

@@ -230,6 +230,25 @@ it.layer(NodeServices.layer)("thread.turn.retract decider", (it) => {
     }),
   );
 
+  it.effect("rejects a duplicate completion after the first commit completed the row", () =>
+    Effect.gen(function* () {
+      const pending = pendingRetraction(false);
+      const completed = makeThread({
+        ...pending,
+        turnRetraction: pending.turnRetraction
+          ? {
+              ...pending.turnRetraction,
+              status: "completed",
+              completedAt: NOW,
+            }
+          : null,
+      });
+
+      const error = yield* Effect.flip(completeRetraction(completed));
+      expect(invariantDetail(error)).toContain("no matching pending retraction");
+    }),
+  );
+
   it.effect("accepts queued, starting, and matching running lifecycle states", () =>
     Effect.gen(function* () {
       const queued = makeThread();

@@ -22,11 +22,13 @@ import { describe, expect, it } from "vite-plus/test";
 import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
+import { ProjectionTurnRetractionRepositoryLive } from "../../persistence/Layers/ProjectionTurnRetractions.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import {
   OrchestrationEventStore,
   type OrchestrationEventStoreShape,
 } from "../../persistence/Services/OrchestrationEventStore.ts";
+import { ProjectionTurnRetractionRepository } from "../../persistence/Services/ProjectionTurnRetractions.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
@@ -56,6 +58,7 @@ async function createOrchestrationSystem() {
       Layer.provide(OrchestrationProjectionPipelineLive),
     ),
     OrchestrationProjectionSnapshotQueryLive,
+    ProjectionTurnRetractionRepositoryLive,
   ).pipe(
     Layer.provide(ThreadBackgroundLiveness.layer),
     Layer.provide(ThreadPlanProgress.layer),
@@ -69,8 +72,12 @@ async function createOrchestrationSystem() {
   const runtime = ManagedRuntime.make(orchestrationLayer);
   const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
   const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
+  const turnRetractions = await runtime.runPromise(
+    Effect.service(ProjectionTurnRetractionRepository),
+  );
   return {
     engine,
+    turnRetractions,
     readModel: () => runtime.runPromise(snapshotQuery.getSnapshot()),
     run: <A, E>(effect: Effect.Effect<A, E>) => runtime.runPromise(effect),
     dispose: () => runtime.dispose(),
@@ -450,6 +457,119 @@ describe("OrchestrationEngine", () => {
       "thread.created",
       "thread.deleted",
     ]);
+    await system.dispose();
+  });
+
+  it("deduplicates a replayed retract command and rejects a second completion commit", async () => {
+    const system = await createOrchestrationSystem();
+    const { engine, turnRetractions } = system;
+    const createdAt = now();
+    const projectId = asProjectId("project-retract-dedup");
+    const threadId = ThreadId.make("thread-retract-dedup");
+    const messageId = MessageId.make("message-retract-dedup");
+    const requestId = CommandId.make("cmd-retract-dedup");
+
+    await system.run(
+      engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-project-retract-dedup-create"),
+        projectId,
+        title: "Retract dedup project",
+        workspaceRoot: "/tmp/project-retract-dedup",
+        defaultModelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        createdAt,
+      }),
+    );
+    await system.run(
+      engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-thread-retract-dedup-create"),
+        threadId,
+        projectId,
+        title: "Retract dedup thread",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        branch: null,
+        worktreePath: null,
+        createdAt,
+      }),
+    );
+    await system.run(
+      engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-retract-dedup-start"),
+        threadId,
+        message: {
+          messageId,
+          role: "user",
+          text: "retract me",
+          attachments: [],
+        },
+        runtimeMode: "full-access",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        createdAt,
+      }),
+    );
+
+    const retractCommand = {
+      type: "thread.turn.retract" as const,
+      commandId: requestId,
+      threadId,
+      messageId,
+      createdAt,
+    };
+    const original = await system.run(engine.dispatch(retractCommand));
+    // A client reconnect can replay the same command id; the durable receipt
+    // must return the original result without deciding or projecting again.
+    const replay = await system.run(engine.dispatch(retractCommand));
+    expect(replay).toEqual(original);
+    const pending = await system.run(turnRetractions.listPending());
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.requestId).toBe(requestId);
+
+    await system.run(
+      engine.dispatch({
+        type: "thread.turn.retract.complete",
+        commandId: CommandId.make("cmd-retract-dedup-complete"),
+        threadId,
+        requestId,
+        createdAt,
+      }),
+    );
+    const duplicateCompletion = await system.run(
+      Effect.exit(
+        engine.dispatch({
+          type: "thread.turn.retract.complete",
+          commandId: CommandId.make("cmd-retract-dedup-complete-again"),
+          threadId,
+          requestId,
+          createdAt,
+        }),
+      ),
+    );
+    expect(duplicateCompletion._tag).toBe("Failure");
+
+    const events = await system.run(
+      Stream.runCollect(engine.readEvents(0)).pipe(
+        Effect.map((chunk): OrchestrationEvent[] => Array.from(chunk)),
+      ),
+    );
+    expect(
+      events.filter(
+        (event) =>
+          event.type === "thread.turn-interrupt-requested" &&
+          event.payload.retraction?.requestId === requestId,
+      ),
+    ).toHaveLength(1);
+    expect(events.filter((event) => event.type === "thread.reverted")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "thread.deleted")).toHaveLength(1);
     await system.dispose();
   });
 
