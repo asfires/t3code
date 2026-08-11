@@ -232,6 +232,16 @@ export function applyThreadDetailEvent(
         },
       };
 
+    case "thread.project-set":
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          projectId: event.payload.projectId,
+          updatedAt: event.payload.updatedAt,
+        },
+      };
+
     case "thread.interaction-mode-set":
       return {
         kind: "updated",

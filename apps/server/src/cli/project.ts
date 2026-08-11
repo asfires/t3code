@@ -47,8 +47,18 @@ type ProjectMutationTarget = {
 type ProjectCommandExecutionMode = "live" | "offline";
 type ProjectCliDispatchCommand = Extract<
   ClientOrchestrationCommand,
-  { type: "project.create" | "project.meta.update" | "project.delete" }
+  {
+    type: "project.create" | "project.meta.update" | "project.delete" | "project.merge";
+  }
 >;
+
+export type ProjectMutationHandlerInput = {
+  readonly snapshot: OrchestrationReadModel;
+  readonly dispatch: (
+    command: ProjectCliDispatchCommand,
+  ) => Effect.Effect<void, Error, FileSystem.FileSystem | HttpClient.HttpClient | Path.Path>;
+  readonly mode: ProjectCommandExecutionMode;
+};
 
 const isEnvironmentHttpCommonError = Schema.is(EnvironmentHttpCommonError);
 
@@ -155,6 +165,18 @@ export class ProjectAlreadyExistsError extends Schema.TaggedErrorClass<ProjectAl
   }
 }
 
+export class ProjectMergeSameProjectError extends Schema.TaggedErrorClass<ProjectMergeSameProjectError>()(
+  "ProjectMergeSameProjectError",
+  {
+    operation: Schema.Literal("mergeProject"),
+    projectId: ProjectId,
+  },
+) {
+  override get message(): string {
+    return `Cannot merge project '${this.projectId}' into itself.`;
+  }
+}
+
 export const ProjectCommandError = Schema.Union([
   ProjectCommandIdGenerationError,
   ProjectLiveServerDeclaredResponseError,
@@ -164,6 +186,7 @@ export const ProjectCommandError = Schema.Union([
   ProjectIdentifierEmptyError,
   ProjectNotFoundError,
   ProjectAlreadyExistsError,
+  ProjectMergeSameProjectError,
 ]);
 export type ProjectCommandError = typeof ProjectCommandError.Type;
 
@@ -337,8 +360,8 @@ const dispatchLiveOrchestrationCommand = (
 
 const getOfflineSnapshot = Effect.fn("getOfflineSnapshot")(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
-  // Project commands only read the project list, so use the lightweight
-  // command read model instead of hydrating every thread body in the database.
+  // The command read model includes lightweight thread rows without hydrating
+  // message, activity, or checkpoint bodies, which is sufficient for merge.
   return yield* projectionSnapshotQuery.getCommandReadModel();
 });
 
@@ -376,13 +399,9 @@ const tryResolveLiveProjectExecutionMode = Effect.fn("tryResolveLiveProjectExecu
 
 const runProjectMutation = Effect.fn("runProjectMutation")(function* (
   flags: CliAuthLocationFlags,
-  run: (input: {
-    readonly snapshot: OrchestrationReadModel;
-    readonly dispatch: (
-      command: ProjectCliDispatchCommand,
-    ) => Effect.Effect<void, Error, FileSystem.FileSystem | HttpClient.HttpClient | Path.Path>;
-    readonly mode: ProjectCommandExecutionMode;
-  }) => Effect.Effect<
+  run: (
+    input: ProjectMutationHandlerInput,
+  ) => Effect.Effect<
     string,
     Error,
     | Crypto.Crypto
@@ -455,12 +474,7 @@ const projectAddCommand = Command.make("add", {
       Effect.fn("projectAddMutation")(function* ({
         snapshot,
         dispatch,
-      }: {
-        readonly snapshot: OrchestrationReadModel;
-        readonly dispatch: (
-          command: ProjectCliDispatchCommand,
-        ) => Effect.Effect<void, Error, FileSystem.FileSystem | HttpClient.HttpClient | Path.Path>;
-      }) {
+      }: ProjectMutationHandlerInput) {
         const workspaceRoot = yield* normalizeWorkspaceRootForProjectCommand(flags.workspaceRoot);
         const existingProject = snapshot.projects.find(
           (project) => project.deletedAt === null && project.workspaceRoot === workspaceRoot,
@@ -507,12 +521,7 @@ const projectRemoveCommand = Command.make("remove", {
       Effect.fn("projectRemoveMutation")(function* ({
         snapshot,
         dispatch,
-      }: {
-        readonly snapshot: OrchestrationReadModel;
-        readonly dispatch: (
-          command: ProjectCliDispatchCommand,
-        ) => Effect.Effect<void, Error, FileSystem.FileSystem | HttpClient.HttpClient | Path.Path>;
-      }) {
+      }: ProjectMutationHandlerInput) {
         const project = yield* findActiveProjectTarget({
           snapshot,
           identifier: flags.project,
@@ -543,12 +552,7 @@ const projectRenameCommand = Command.make("rename", {
       Effect.fn("projectRenameMutation")(function* ({
         snapshot,
         dispatch,
-      }: {
-        readonly snapshot: OrchestrationReadModel;
-        readonly dispatch: (
-          command: ProjectCliDispatchCommand,
-        ) => Effect.Effect<void, Error, FileSystem.FileSystem | HttpClient.HttpClient | Path.Path>;
-      }) {
+      }: ProjectMutationHandlerInput) {
         const project = yield* findActiveProjectTarget({
           snapshot,
           identifier: flags.project,
@@ -570,7 +574,74 @@ const projectRenameCommand = Command.make("rename", {
   ),
 );
 
+const projectMergeCommand = Command.make("merge", {
+  ...projectLocationFlags,
+  source: Argument.string("source").pipe(
+    Argument.withDescription("Source project id or workspace root."),
+  ),
+  target: Argument.string("target").pipe(
+    Argument.withDescription("Target project id or workspace root."),
+  ),
+  allowUnrelatedRoots: Flag.boolean("allow-unrelated-roots").pipe(
+    Flag.withDescription("Allow moving threads between unrelated workspace roots."),
+    Flag.withDefault(false),
+  ),
+}).pipe(
+  Command.withDescription("Move a project's threads into another project and delete the source."),
+  Command.withHandler((flags) =>
+    runProjectMutation(
+      flags,
+      Effect.fn("projectMergeMutation")(function* ({
+        snapshot,
+        dispatch,
+      }: ProjectMutationHandlerInput) {
+        const source = yield* findActiveProjectTarget({
+          snapshot,
+          identifier: flags.source,
+        });
+        const target = yield* findActiveProjectTarget({
+          snapshot,
+          identifier: flags.target,
+        });
+        if (source.id === target.id) {
+          return yield* new ProjectMergeSameProjectError({
+            operation: "mergeProject",
+            projectId: source.id,
+          });
+        }
+
+        const activeSourceThreads = snapshot.threads.filter(
+          (thread) => thread.projectId === source.id && thread.deletedAt === null,
+        );
+        yield* Console.log(`Threads to move (advisory snapshot: ${activeSourceThreads.length}):`);
+        if (activeSourceThreads.length === 0) {
+          yield* Console.log("- (none)");
+        } else {
+          yield* Effect.forEach(activeSourceThreads, (thread) => Console.log(`- ${thread.title}`), {
+            discard: true,
+          });
+        }
+        yield* dispatch({
+          type: "project.merge",
+          commandId: CommandId.make(yield* projectCommandUuid),
+          sourceProjectId: source.id,
+          targetProjectId: target.id,
+          allowUnrelatedRoots: flags.allowUnrelatedRoots,
+          createdAt: DateTime.formatIso(yield* DateTime.now),
+        });
+
+        return `Merged project ${source.id} (${source.title}) into ${target.id} (${target.title}): moved ${activeSourceThreads.length} threads.`;
+      }),
+    ),
+  ),
+);
+
 export const projectCommand = Command.make("project").pipe(
   Command.withDescription("Manage projects."),
-  Command.withSubcommands([projectAddCommand, projectRemoveCommand, projectRenameCommand]),
+  Command.withSubcommands([
+    projectAddCommand,
+    projectRemoveCommand,
+    projectRenameCommand,
+    projectMergeCommand,
+  ]),
 );

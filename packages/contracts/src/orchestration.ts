@@ -650,6 +650,15 @@ const ProjectDeleteCommand = Schema.Struct({
   force: Schema.optional(Schema.Boolean),
 });
 
+const ProjectMergeCommand = Schema.Struct({
+  type: Schema.Literal("project.merge"),
+  commandId: CommandId,
+  sourceProjectId: ProjectId,
+  targetProjectId: ProjectId,
+  allowUnrelatedRoots: Schema.optional(Schema.Boolean),
+  createdAt: IsoDateTime,
+});
+
 const ThreadCreateCommand = Schema.Struct({
   type: Schema.Literal("thread.create"),
   commandId: CommandId,
@@ -771,6 +780,15 @@ const ThreadRuntimeModeSetCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   runtimeMode: RuntimeMode,
+  createdAt: IsoDateTime,
+});
+
+const ThreadProjectSetCommand = Schema.Struct({
+  type: Schema.Literal("thread.project.set"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  projectId: ProjectId,
+  allowUnrelatedRoots: Schema.optional(Schema.Boolean),
   createdAt: IsoDateTime,
 });
 
@@ -899,6 +917,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ProjectCreateCommand,
   ProjectMetaUpdateCommand,
   ProjectDeleteCommand,
+  ProjectMergeCommand,
   ThreadCreateCommand,
   ThreadDeleteCommand,
   ThreadArchiveCommand,
@@ -912,6 +931,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadPinReorderCommand,
   ThreadMetaUpdateCommand,
   ThreadRuntimeModeSetCommand,
+  ThreadProjectSetCommand,
   ThreadInteractionModeSetCommand,
   ThreadTurnStartCommand,
   ThreadTurnInterruptCommand,
@@ -927,6 +947,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ProjectCreateCommand,
   ProjectMetaUpdateCommand,
   ProjectDeleteCommand,
+  ProjectMergeCommand,
   ThreadCreateCommand,
   ThreadDeleteCommand,
   ThreadArchiveCommand,
@@ -940,6 +961,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadPinReorderCommand,
   ThreadMetaUpdateCommand,
   ThreadRuntimeModeSetCommand,
+  ThreadProjectSetCommand,
   ThreadInteractionModeSetCommand,
   ClientThreadTurnStartCommand,
   ThreadTurnInterruptCommand,
@@ -1058,6 +1080,7 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.pin-reordered",
   "thread.meta-updated",
   "thread.runtime-mode-set",
+  "thread.project-set",
   "thread.interaction-mode-set",
   "thread.message-sent",
   "thread.turn-start-requested",
@@ -1207,6 +1230,12 @@ export const ThreadMetaUpdatedPayload = Schema.Struct({
 export const ThreadRuntimeModeSetPayload = Schema.Struct({
   threadId: ThreadId,
   runtimeMode: RuntimeMode,
+  updatedAt: IsoDateTime,
+});
+
+export const ThreadProjectSetPayload = Schema.Struct({
+  threadId: ThreadId,
+  projectId: ProjectId,
   updatedAt: IsoDateTime,
 });
 
@@ -1406,6 +1435,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.runtime-mode-set"),
     payload: ThreadRuntimeModeSetPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.project-set"),
+    payload: ThreadProjectSetPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

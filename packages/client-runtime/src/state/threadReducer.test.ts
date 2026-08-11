@@ -123,6 +123,31 @@ describe("applyThreadDetailEvent", () => {
     });
   });
 
+  describe("thread.project-set", () => {
+    it("updates the project and timestamp for an open thread", () => {
+      const updatedAt = "2026-04-01T02:30:00.000Z";
+      const result = applyThreadDetailEvent(baseThread, {
+        ...baseEventFields,
+        sequence: 3,
+        occurredAt: updatedAt,
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.project-set",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          projectId: ProjectId.make("project-2"),
+          updatedAt,
+        },
+      });
+
+      expect(result.kind).toBe("updated");
+      if (result.kind === "updated") {
+        expect(result.thread.projectId).toBe("project-2");
+        expect(result.thread.updatedAt).toBe(updatedAt);
+      }
+    });
+  });
+
   describe("thread.archived / thread.unarchived", () => {
     it("sets archivedAt and clears title regeneration", () => {
       const regeneratingThread: OrchestrationThread = {

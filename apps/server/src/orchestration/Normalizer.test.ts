@@ -70,4 +70,30 @@ describe("canonicalizeClientCommandTimestamps", () => {
     expect(result.createdAt).toBe(serverReceivedAt);
     expect(result.bootstrap?.createThread?.createdAt).toBe(serverReceivedAt);
   });
+
+  it("canonicalizes project merge and thread project-set timestamps", () => {
+    const commands: ReadonlyArray<ClientOrchestrationCommand> = [
+      {
+        type: "project.merge",
+        commandId: CommandId.make("command-project-merge"),
+        sourceProjectId: ProjectId.make("project-source"),
+        targetProjectId: ProjectId.make("project-target"),
+        createdAt: clientCreatedAt,
+      },
+      {
+        type: "thread.project.set",
+        commandId: CommandId.make("command-thread-project-set"),
+        threadId: ThreadId.make("thread-1"),
+        projectId: ProjectId.make("project-target"),
+        createdAt: clientCreatedAt,
+      },
+    ];
+
+    for (const command of commands) {
+      expect(canonicalizeClientCommandTimestamps(command, serverReceivedAt)).toEqual({
+        ...command,
+        createdAt: serverReceivedAt,
+      });
+    }
+  });
 });
