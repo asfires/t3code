@@ -55,6 +55,11 @@ characters and uses SQLite's ASCII case-insensitive matching.
 The full command list and the current defaults are shown in **Settings** → **Keybindings**, which
 always matches the build you are running. Use that rather than a copied list.
 
+When the message composer is focused, press `Escape` to interrupt a running turn and move the
+message you just sent back into the composer for editing. This only works before the agent has
+shown assistant text, a tool call, a command, or another activity for that turn. Agent thinking does
+not close this short window. The shortcut is built into the composer and is not configurable.
+
 Note that `chat.new` and `chat.newLocal` both create a thread through the same path. A new thread
 inherits the project you were in, along with model and mode selections. Branch, worktree, and
 environment mode always come from your configured defaults, not from the thread you were looking

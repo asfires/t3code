@@ -19,6 +19,7 @@ import {
   OrchestrationThreadActivity,
   ProviderInteractionMode,
   ProviderDriverKind,
+  PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   RuntimeMode,
   TerminalOpenInput,
 } from "@t3tools/contracts";
@@ -244,6 +245,15 @@ import {
 } from "../state/entities";
 import { environmentShell } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
+import {
+  captureLastUserMessageImages,
+  deriveLastUserMessageRestoredText,
+  findLastUserMessagePopCandidate,
+  IMAGE_ONLY_MESSAGE_PLACEHOLDER,
+  isLastUserMessagePopWindowOpen,
+  LAST_USER_MESSAGE_POP_SETTLE_TIMEOUT_MS,
+  mergePoppedPrompt,
+} from "./chat/lastUserMessagePop";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
@@ -338,8 +348,6 @@ import {
 } from "../versionSkew";
 import { useAssetUrls } from "../assets/assetUrls";
 
-const IMAGE_ONLY_BOOTSTRAP_PROMPT =
-  "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
@@ -1332,6 +1340,7 @@ function ChatViewContent(props: ChatViewProps) {
   >({});
   const [isConnecting, _setIsConnecting] = useState(false);
   const [isRevertingCheckpoint, setIsRevertingCheckpoint] = useState(false);
+  const [isPoppingLastUserMessage, setIsPoppingLastUserMessage] = useState(false);
   const [maximizedRightPanelThreadKey, setMaximizedRightPanelThreadKey] = useState<string | null>(
     null,
   );
@@ -2151,6 +2160,48 @@ function ChatViewContent(props: ChatViewProps) {
   );
   const selectedProvider: ProviderDriverKind = lockedProvider ?? unlockedSelectedProvider;
   const phase = derivePhase(activeThread?.session ?? null);
+  const runningTurnStateRef = useRef({ threadId: activeThread?.id ?? null, phase });
+  runningTurnStateRef.current = { threadId: activeThread?.id ?? null, phase };
+  const runningTurnSettlementChecksRef = useRef(new Set<(cancel?: boolean) => void>());
+  useEffect(() => {
+    for (const check of runningTurnSettlementChecksRef.current) {
+      check();
+    }
+  }, [activeThread?.id, phase]);
+  useEffect(
+    () => () => {
+      for (const check of runningTurnSettlementChecksRef.current) {
+        check(true);
+      }
+      runningTurnSettlementChecksRef.current.clear();
+    },
+    [],
+  );
+  const waitForRunningTurnToSettle = useCallback((threadId: ThreadId): Promise<boolean> => {
+    const current = runningTurnStateRef.current;
+    if (current.threadId !== threadId) return Promise.resolve(false);
+    if (current.phase !== "running") return Promise.resolve(true);
+
+    return new Promise((resolve) => {
+      let timeoutId: number | null = null;
+      const finish = (settled: boolean) => {
+        runningTurnSettlementChecksRef.current.delete(check);
+        if (timeoutId !== null) window.clearTimeout(timeoutId);
+        resolve(settled);
+      };
+      const check = (cancel = false) => {
+        const next = runningTurnStateRef.current;
+        if (cancel || next.threadId !== threadId) {
+          finish(false);
+        } else if (next.phase !== "running") {
+          finish(true);
+        }
+      };
+      runningTurnSettlementChecksRef.current.add(check);
+      timeoutId = window.setTimeout(() => finish(false), LAST_USER_MESSAGE_POP_SETTLE_TIMEOUT_MS);
+      check();
+    });
+  }, []);
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
   const workLogEntries = useMemo(() => deriveWorkLogEntries(threadActivities), [threadActivities]);
   const turnPlans = useMemo(() => deriveTurnPlans(threadActivities), [threadActivities]);
@@ -2563,6 +2614,26 @@ function ChatViewContent(props: ChatViewProps) {
 
     return byUserMessageId;
   }, [inferredCheckpointTurnCountByTurnId, timelineEntries, turnDiffSummaryByAssistantMessageId]);
+  const latestCheckpoint = activeThread?.checkpoints.at(-1) ?? null;
+  const checkpointTurnCount = activeThread?.checkpoints.reduce(
+    (maxTurnCount, checkpoint) => Math.max(maxTurnCount, checkpoint.checkpointTurnCount),
+    0,
+  );
+  const activeRunningTurnId = activeThread?.session?.activeTurnId ?? null;
+  const lastUserMessagePopWindowOpen =
+    latestCheckpoint?.turnId !== activeRunningTurnId &&
+    isLastUserMessagePopWindowOpen({
+      phase,
+      activeTurnId: activeRunningTurnId,
+      timelineEntries,
+    });
+  const lastUserMessagePopCandidate = lastUserMessagePopWindowOpen
+    ? findLastUserMessagePopCandidate({
+        messages: timelineMessages,
+        turnCount: checkpointTurnCount ?? 0,
+        latestCheckpointCompletedAt: latestCheckpoint?.completedAt ?? null,
+      })
+    : null;
 
   const gitCwd = activeProject
     ? projectScriptCwd({
@@ -4770,50 +4841,59 @@ function ChatViewContent(props: ChatViewProps) {
   ]);
 
   const onRevertToTurnCount = useCallback(
-    async (turnCount: number) => {
+    async (turnCount: number, options?: { skipConfirm?: boolean }): Promise<boolean> => {
       const localApi = readLocalApi();
-      if (!localApi || !activeThread || isRevertingCheckpoint) return;
+      if (!localApi || !activeThread || isRevertingCheckpoint) return false;
 
       if (activeEnvironmentUnavailable && activeEnvironmentUnavailableLabel) {
         setThreadError(
           activeThread.id,
           `Reconnect ${activeEnvironmentUnavailableLabel} before reverting checkpoints.`,
         );
-        return;
+        return false;
       }
       if (phase === "running" || isSendBusy || isConnecting) {
         setThreadError(activeThread.id, "Interrupt the current turn before reverting checkpoints.");
-        return;
+        return false;
       }
-      const confirmed = await localApi.dialogs.confirm(
-        [
-          `Revert this thread to checkpoint ${turnCount}?`,
-          "This will discard newer messages and turn diffs in this thread.",
-          "This action cannot be undone.",
-        ].join("\n"),
-        { variant: "destructive" },
-      );
-      if (!confirmed) {
-        return;
+      if (!options?.skipConfirm) {
+        const confirmed = await localApi.dialogs.confirm(
+          [
+            `Revert this thread to checkpoint ${turnCount}?`,
+            "This will discard newer messages and turn diffs in this thread.",
+            "This action cannot be undone.",
+          ].join("\n"),
+          { variant: "destructive" },
+        );
+        if (!confirmed) {
+          return false;
+        }
       }
 
       setIsRevertingCheckpoint(true);
       setThreadError(activeThread.id, null);
-      const result = await revertThreadCheckpoint({
-        environmentId,
-        input: {
-          threadId: activeThread.id,
-          turnCount,
-        },
-      });
-      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
-        setThreadError(
-          activeThread.id,
-          error instanceof Error ? error.message : "Failed to revert thread state.",
-        );
+      try {
+        const result = await revertThreadCheckpoint({
+          environmentId,
+          input: {
+            threadId: activeThread.id,
+            turnCount,
+          },
+        });
+        if (result._tag === "Failure") {
+          if (!isAtomCommandInterrupted(result)) {
+            const error = squashAtomCommandFailure(result);
+            setThreadError(
+              activeThread.id,
+              error instanceof Error ? error.message : "Failed to revert thread state.",
+            );
+          }
+          return false;
+        }
+        return true;
+      } finally {
+        setIsRevertingCheckpoint(false);
       }
-      setIsRevertingCheckpoint(false);
     },
     [
       activeThread,
@@ -5043,7 +5123,7 @@ function ChatViewContent(props: ChatViewProps) {
       model: ctxSelectedModel,
       models: ctxSelectedProviderModels,
       effort: ctxSelectedPromptEffort,
-      text: messageTextForSend || IMAGE_ONLY_BOOTSTRAP_PROMPT,
+      text: messageTextForSend || IMAGE_ONLY_MESSAGE_PLACEHOLDER,
     });
     const turnAttachmentsPromise = Promise.all(
       composerImagesSnapshot.map(async (image) => ({
@@ -5282,20 +5362,27 @@ function ChatViewContent(props: ChatViewProps) {
     }
   };
 
-  const onInterrupt = async () => {
-    if (!activeThread) return;
+  const interruptActiveTurn = useCallback(async (): Promise<boolean> => {
+    if (!activeThread) return false;
     const result = await interruptThreadTurn({
       environmentId,
       input: buildThreadTurnInterruptInput(activeThread),
     });
-    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-      const error = squashAtomCommandFailure(result);
-      setThreadError(
-        activeThread.id,
-        error instanceof Error ? error.message : "Failed to interrupt the current turn.",
-      );
+    if (result._tag === "Failure") {
+      if (!isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        setThreadError(
+          activeThread.id,
+          error instanceof Error ? error.message : "Failed to interrupt the current turn.",
+        );
+      }
+      return false;
     }
-  };
+    return true;
+  }, [activeThread, environmentId, interruptThreadTurn, setThreadError]);
+  const onInterrupt = useCallback(() => {
+    void interruptActiveTurn();
+  }, [interruptActiveTurn]);
 
   const onRespondToApproval = useCallback(
     async (requestId: ApprovalRequestId, decision: ProviderApprovalDecision) => {
@@ -5946,6 +6033,128 @@ function ChatViewContent(props: ChatViewProps) {
     }
     void onRevertToTurnCountRef.current(targetTurnCount);
   }, []);
+  const onPopLastUserMessage = useCallback(async () => {
+    if (!lastUserMessagePopCandidate || !activeThread || isPoppingLastUserMessage) return;
+
+    setIsPoppingLastUserMessage(true);
+    const poppedThreadId = activeThread.id;
+    const poppedDraftTarget = composerDraftTarget;
+    const poppedMessageId = lastUserMessagePopCandidate.message.id;
+    const restoredText = deriveLastUserMessageRestoredText(
+      lastUserMessagePopCandidate.message.text,
+    );
+    const imageCapture = captureLastUserMessageImages(lastUserMessagePopCandidate.message);
+    let failureDescription: string | null = null;
+
+    try {
+      const interrupted = await interruptActiveTurn();
+      if (!interrupted) {
+        failureDescription = "The turn could not be interrupted.";
+      } else {
+        const settled = await waitForRunningTurnToSettle(poppedThreadId);
+        if (!settled) {
+          failureDescription = "The turn did not settle within 15 seconds.";
+        } else {
+          const reverted = await onRevertToTurnCountRef.current(
+            lastUserMessagePopCandidate.turnCount,
+            { skipConfirm: true },
+          );
+          if (!reverted) {
+            failureDescription = "The sent message could not be removed from thread history.";
+          } else {
+            setOptimisticUserMessages((existing) => {
+              const removed = existing.filter((message) => message.id === poppedMessageId);
+              for (const message of removed) {
+                revokeUserMessagePreviewUrls(message);
+              }
+              return existing.filter((message) => message.id !== poppedMessageId);
+            });
+            clearAttachmentPreviewHandoff(poppedMessageId);
+          }
+        }
+      }
+    } catch (error) {
+      failureDescription = chatActionErrorMessage(error);
+    }
+
+    const { images, failedNames } = await imageCapture.catch(() => ({
+      images: [],
+      failedNames: (lastUserMessagePopCandidate.message.attachments ?? []).map(
+        (attachment) => attachment.name,
+      ),
+    }));
+    const currentDraft = useComposerDraftStore.getState().getComposerDraft(poppedDraftTarget);
+    const currentPrompt = currentDraft?.prompt ?? "";
+    const nextPrompt = mergePoppedPrompt(currentPrompt, restoredText);
+    setComposerDraftPrompt(poppedDraftTarget, nextPrompt);
+
+    const existingImages = currentDraft?.images ?? [];
+    const existingIds = new Set(existingImages.map((image) => image.id));
+    const existingKeys = new Set(
+      existingImages.map((image) => JSON.stringify([image.mimeType, image.sizeBytes, image.name])),
+    );
+    const acceptedImages: ComposerImageAttachment[] = [];
+    const overflowNames: string[] = [];
+    for (const image of images) {
+      const dedupKey = JSON.stringify([image.mimeType, image.sizeBytes, image.name]);
+      if (existingIds.has(image.id) || existingKeys.has(dedupKey)) {
+        revokeBlobPreviewUrl(image.previewUrl);
+        continue;
+      }
+      if (existingImages.length + acceptedImages.length >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
+        overflowNames.push(image.name);
+        revokeBlobPreviewUrl(image.previewUrl);
+        continue;
+      }
+      existingIds.add(image.id);
+      existingKeys.add(dedupKey);
+      acceptedImages.push(image);
+    }
+    addComposerDraftImages(poppedDraftTarget, acceptedImages);
+
+    if (runningTurnStateRef.current.threadId === poppedThreadId) {
+      promptRef.current = nextPrompt;
+      composerImagesRef.current = [...existingImages, ...acceptedImages];
+      composerRef.current?.resetCursorState({
+        cursor: collapseExpandedComposerCursor(nextPrompt, nextPrompt.length),
+        prompt: nextPrompt,
+        detectTrigger: true,
+      });
+      window.requestAnimationFrame(() => {
+        composerRef.current?.focusAtEnd();
+      });
+    }
+
+    const unrestoredImageNames = [...failedNames, ...overflowNames];
+    if (unrestoredImageNames.length > 0) {
+      toastManager.add({
+        type: "warning",
+        title: "Some images could not be restored",
+        description: `${unrestoredImageNames.join(", ")} could not be restored to the composer.`,
+      });
+    }
+    if (failureDescription !== null) {
+      toastManager.add({
+        type: "error",
+        title: "Message restored, but the turn could not be rewound",
+        description: failureDescription,
+      });
+    }
+    setIsPoppingLastUserMessage(false);
+  }, [
+    activeThread,
+    addComposerDraftImages,
+    clearAttachmentPreviewHandoff,
+    composerDraftTarget,
+    composerImagesRef,
+    composerRef,
+    interruptActiveTurn,
+    isPoppingLastUserMessage,
+    lastUserMessagePopCandidate,
+    promptRef,
+    setComposerDraftPrompt,
+    waitForRunningTurnToSettle,
+  ]);
 
   // Empty state: no active thread
   if (!activeThread) {
@@ -6329,6 +6538,11 @@ function ChatViewContent(props: ChatViewProps) {
                             composerTerminalContextsRef={composerTerminalContextsRef}
                             composerElementContextsRef={composerElementContextsRef}
                             onSend={onSend}
+                            onPopLastUserMessage={
+                              lastUserMessagePopCandidate !== null && !isPoppingLastUserMessage
+                                ? onPopLastUserMessage
+                                : null
+                            }
                             onInterrupt={onInterrupt}
                             onImplementPlanInNewThread={onImplementPlanInNewThread}
                             onRespondToApproval={onRespondToApproval}

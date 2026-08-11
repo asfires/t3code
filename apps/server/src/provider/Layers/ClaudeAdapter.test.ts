@@ -161,8 +161,14 @@ function makeHarness(config?: {
   readonly baseDir?: string;
   readonly claudeConfig?: Partial<ClaudeSettings>;
   readonly instanceId?: ProviderInstanceId;
+  readonly queryFactory?: () => FakeClaudeQuery;
 }) {
   const query = new FakeClaudeQuery();
+  const queries: Array<FakeClaudeQuery> = [];
+  const createInputs: Array<{
+    readonly prompt: AsyncIterable<SDKUserMessage>;
+    readonly options: ClaudeQueryOptions;
+  }> = [];
   let createInput:
     | {
         readonly prompt: AsyncIterable<SDKUserMessage>;
@@ -174,7 +180,10 @@ function makeHarness(config?: {
     ...(config?.instanceId ? { instanceId: config.instanceId } : {}),
     createQuery: (input) => {
       createInput = input;
-      return query;
+      createInputs.push(input);
+      const nextQuery = config?.queryFactory?.() ?? query;
+      queries.push(nextQuery);
+      return nextQuery;
     },
     ...(config?.nativeEventLogger
       ? {
@@ -206,7 +215,9 @@ function makeHarness(config?: {
       Layer.provideMerge(NodeServices.layer),
     ),
     query,
+    queries,
     getLastCreateQueryInput: () => createInput,
+    getCreateQueryInputs: () => createInputs,
   };
 }
 
@@ -3362,7 +3373,7 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("passes Claude resume ids without pinning a stale assistant checkpoint", () => {
+  it.effect("passes Claude resume ids and assistant checkpoint to the SDK", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
@@ -3390,7 +3401,7 @@ describe("ClaudeAdapterLive", () => {
       const createInput = harness.getLastCreateQueryInput();
       assert.equal(createInput?.options.resume, "550e8400-e29b-41d4-a716-446655440000");
       assert.equal(createInput?.options.sessionId, undefined);
-      assert.equal(createInput?.options.resumeSessionAt, undefined);
+      assert.equal(createInput?.options.resumeSessionAt, "assistant-99");
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -3519,87 +3530,189 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect(
-    "supports rollbackThread by trimming in-memory turns and preserving earlier turns",
-    () => {
-      const harness = makeHarness();
-      return Effect.gen(function* () {
-        const adapter = yield* ClaudeAdapter;
+  it.effect("rolls the resume cursor back to the retained turn watermark", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
 
-        const session = yield* adapter.startSession({
-          threadId: THREAD_ID,
-          provider: ProviderDriverKind.make("claudeAgent"),
-          runtimeMode: "full-access",
-        });
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
 
-        const firstTurn = yield* adapter.sendTurn({
-          threadId: session.threadId,
-          input: "first",
-          attachments: [],
-        });
+      const firstTurn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "first",
+        attachments: [],
+      });
 
-        const firstCompletedFiber = yield* Stream.filter(
-          adapter.streamEvents,
-          (event) => event.type === "turn.completed",
-        ).pipe(Stream.runHead, Effect.forkChild);
+      const firstCompletedFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "turn.completed",
+      ).pipe(Stream.runHead, Effect.forkChild);
 
-        harness.query.emit({
-          type: "result",
-          subtype: "success",
-          is_error: false,
-          errors: [],
-          session_id: "sdk-session-rollback",
-          uuid: "result-first",
-        } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "assistant",
+        session_id: "550e8400-e29b-41d4-a716-446655440000",
+        uuid: "assistant-first",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-first",
+          content: [{ type: "text", text: "first response" }],
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: "550e8400-e29b-41d4-a716-446655440000",
+        uuid: "result-first",
+      } as unknown as SDKMessage);
 
-        const firstCompleted = yield* Fiber.join(firstCompletedFiber);
-        assert.equal(firstCompleted._tag, "Some");
-        if (firstCompleted._tag === "Some" && firstCompleted.value.type === "turn.completed") {
-          assert.equal(String(firstCompleted.value.turnId), String(firstTurn.turnId));
-        }
+      const firstCompleted = yield* Fiber.join(firstCompletedFiber);
+      assert.equal(firstCompleted._tag, "Some");
+      if (firstCompleted._tag === "Some" && firstCompleted.value.type === "turn.completed") {
+        assert.equal(String(firstCompleted.value.turnId), String(firstTurn.turnId));
+      }
 
-        const secondTurn = yield* adapter.sendTurn({
-          threadId: session.threadId,
-          input: "second",
-          attachments: [],
-        });
+      const secondTurn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "second",
+        attachments: [],
+      });
 
-        const secondCompletedFiber = yield* Stream.filter(
-          adapter.streamEvents,
-          (event) => event.type === "turn.completed",
-        ).pipe(Stream.runHead, Effect.forkChild);
+      const secondCompletedFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "turn.completed",
+      ).pipe(Stream.runHead, Effect.forkChild);
 
-        harness.query.emit({
-          type: "result",
-          subtype: "success",
-          is_error: false,
-          errors: [],
-          session_id: "sdk-session-rollback",
-          uuid: "result-second",
-        } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "assistant",
+        session_id: "550e8400-e29b-41d4-a716-446655440000",
+        uuid: "assistant-second",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-second",
+          content: [{ type: "text", text: "second response" }],
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: "550e8400-e29b-41d4-a716-446655440000",
+        uuid: "result-second",
+      } as unknown as SDKMessage);
 
-        const secondCompleted = yield* Fiber.join(secondCompletedFiber);
-        assert.equal(secondCompleted._tag, "Some");
-        if (secondCompleted._tag === "Some" && secondCompleted.value.type === "turn.completed") {
-          assert.equal(String(secondCompleted.value.turnId), String(secondTurn.turnId));
-        }
+      const secondCompleted = yield* Fiber.join(secondCompletedFiber);
+      assert.equal(secondCompleted._tag, "Some");
+      if (secondCompleted._tag === "Some" && secondCompleted.value.type === "turn.completed") {
+        assert.equal(String(secondCompleted.value.turnId), String(secondTurn.turnId));
+      }
 
-        const threadBeforeRollback = yield* adapter.readThread(session.threadId);
-        assert.equal(threadBeforeRollback.turns.length, 2);
+      const threadBeforeRollback = yield* adapter.readThread(session.threadId);
+      assert.equal(threadBeforeRollback.turns.length, 2);
 
-        const rolledBack = yield* adapter.rollbackThread(session.threadId, 1);
-        assert.equal(rolledBack.turns.length, 1);
-        assert.equal(rolledBack.turns[0]?.id, firstTurn.turnId);
+      const rolledBack = yield* adapter.rollbackThread(session.threadId, 1);
+      assert.equal(rolledBack.turns.length, 1);
+      assert.equal(rolledBack.turns[0]?.id, firstTurn.turnId);
 
-        const threadAfterRollback = yield* adapter.readThread(session.threadId);
-        assert.equal(threadAfterRollback.turns.length, 1);
-        assert.equal(threadAfterRollback.turns[0]?.id, firstTurn.turnId);
-      }).pipe(
-        Effect.provideService(Random.Random, makeDeterministicRandomService()),
-        Effect.provide(harness.layer),
-      );
-    },
-  );
+      const activeSessions = yield* adapter.listSessions();
+      assert.deepEqual(activeSessions[0]?.resumeCursor, {
+        threadId: THREAD_ID,
+        resume: "550e8400-e29b-41d4-a716-446655440000",
+        resumeSessionAt: "assistant-first",
+        turnCount: 1,
+      });
+
+      const threadAfterRollback = yield* adapter.readThread(session.threadId);
+      assert.equal(threadAfterRollback.turns.length, 1);
+      assert.equal(threadAfterRollback.turns[0]?.id, firstTurn.turnId);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("clears resume state at turn zero and recycles before the next prompt", () => {
+    const harness = makeHarness({
+      queryFactory: () => new FakeClaudeQuery(),
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const firstQuery = harness.queries[0];
+      assert.isDefined(firstQuery);
+      if (!firstQuery) {
+        return;
+      }
+
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "discard me",
+        attachments: [],
+      });
+      const completedFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "turn.completed",
+      ).pipe(Stream.runHead, Effect.forkChild);
+
+      firstQuery.emit({
+        type: "assistant",
+        session_id: "550e8400-e29b-41d4-a716-446655440000",
+        uuid: "assistant-discarded",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-discarded",
+          content: [{ type: "text", text: "discarded response" }],
+        },
+      } as unknown as SDKMessage);
+      firstQuery.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: "550e8400-e29b-41d4-a716-446655440000",
+        uuid: "result-discarded",
+      } as unknown as SDKMessage);
+      yield* Fiber.join(completedFiber);
+
+      yield* adapter.rollbackThread(session.threadId, 1);
+      const rolledBackSessions = yield* adapter.listSessions();
+      assert.deepEqual(rolledBackSessions[0]?.resumeCursor, {
+        threadId: THREAD_ID,
+        turnCount: 0,
+      });
+      assert.equal(yield* adapter.hasSession(THREAD_ID), true);
+      assert.equal(firstQuery.closeCalls, 0);
+
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "replacement",
+        attachments: [],
+      });
+
+      assert.equal(harness.queries.length, 2);
+      assert.equal(firstQuery.closeCalls, 1);
+      assert.equal(yield* adapter.hasSession(THREAD_ID), true);
+      const restartInput = harness.getCreateQueryInputs()[1];
+      assert.equal(restartInput?.options.resume, undefined);
+      assert.equal(restartInput?.options.resumeSessionAt, undefined);
+      assert.equal(typeof restartInput?.options.sessionId, "string");
+      const replacementPrompt = yield* Effect.promise(() => readFirstPromptText(restartInput));
+      assert.equal(replacementPrompt, "replacement");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
 
   it.effect("updates model on sendTurn when model override is provided", () => {
     const harness = makeHarness();

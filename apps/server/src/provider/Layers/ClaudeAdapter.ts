@@ -36,6 +36,7 @@ import {
   type ProviderRuntimeTurnStatus,
   type ProviderSendTurnInput,
   type ProviderSession,
+  type ProviderSessionStartInput,
   type ThreadTokenUsageSnapshot,
   type ProviderUserInputAnswers,
   type RuntimeContentStreamKind,
@@ -225,6 +226,7 @@ interface ClaudeSessionContext {
   readonly turns: Array<{
     id: TurnId;
     items: Array<unknown>;
+    lastAssistantUuid: string | undefined;
   }>;
   readonly inFlightTools: Map<number, ToolInFlight>;
   readonly claudeTasks: Map<string, ClaudeTaskState>;
@@ -245,6 +247,8 @@ interface ClaudeSessionContext {
   lastKnownTotalProcessedTokens: number | undefined;
   lastAssistantUuid: string | undefined;
   lastThreadStartedId: string | undefined;
+  restartInput: ProviderSessionStartInput;
+  recycleBeforeNextTurn: boolean;
   stopped: boolean;
 }
 
@@ -2315,6 +2319,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     context.turns.push({
       id: turnState.turnId,
       items: [...turnState.items],
+      lastAssistantUuid: context.lastAssistantUuid,
     });
 
     yield* emitThreadTokenUsage(context, usageSnapshot, {
@@ -4117,6 +4122,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           : {}),
         ...(Object.keys(settings).length > 0 ? { settings } : {}),
         ...(existingResumeSessionId ? { resume: existingResumeSessionId } : {}),
+        ...(existingResumeSessionId && resumeState?.resumeSessionAt
+          ? { resumeSessionAt: resumeState.resumeSessionAt }
+          : {}),
         ...(newSessionId ? { sessionId: newSessionId } : {}),
         includePartialMessages: true,
         canUseTool,
@@ -4221,6 +4229,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         lastKnownTotalProcessedTokens: undefined,
         lastAssistantUuid: resumeState?.resumeSessionAt,
         lastThreadStartedId: undefined,
+        restartInput: input,
+        recycleBeforeNextTurn: false,
         stopped: false,
       };
       yield* Ref.set(contextRef, context);
@@ -4301,7 +4311,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   );
 
   const sendTurn: ClaudeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
-    const context = yield* requireSession(input.threadId);
+    let context = yield* requireSession(input.threadId);
+    if (context.recycleBeforeNextTurn) {
+      yield* startSession({
+        ...context.restartInput,
+        ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
+        resumeCursor: context.session.resumeCursor,
+      });
+      context = yield* requireSession(input.threadId);
+    }
     const modelSelection =
       input.modelSelection !== undefined && input.modelSelection.instanceId === boundInstanceId
         ? input.modelSelection
@@ -4484,6 +4502,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const context = yield* requireSession(threadId);
       const nextLength = Math.max(0, context.turns.length - numTurns);
       context.turns.splice(nextLength);
+      const retainedTurn = context.turns.at(-1);
+      context.lastAssistantUuid = retainedTurn?.lastAssistantUuid;
+      if (!retainedTurn) {
+        context.resumeSessionId = undefined;
+      }
+      context.recycleBeforeNextTurn = true;
       yield* updateResumeCursor(context);
       return yield* snapshotThread(context);
     },

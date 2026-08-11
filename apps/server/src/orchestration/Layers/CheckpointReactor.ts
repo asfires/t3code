@@ -774,7 +774,15 @@ const make = Effect.gen(function* () {
     // reflects the reverted filesystem state.
     yield* workspaceEntries.refresh(sessionRuntime.value.cwd);
 
-    const rolledBackTurns = Math.max(0, currentTurnCount - event.payload.turnCount);
+    // A just-interrupted turn is already present in Claude/Codex provider
+    // history, but its completion checkpoint can still be in flight.
+    const hasSettledUncheckpointedLatestTurn =
+      thread.latestTurn !== null &&
+      thread.latestTurn.state !== "running" &&
+      !thread.checkpoints.some((checkpoint) => checkpoint.turnId === thread.latestTurn?.turnId);
+    const currentConversationTurnCount =
+      currentTurnCount + (hasSettledUncheckpointedLatestTurn ? 1 : 0);
+    const rolledBackTurns = Math.max(0, currentConversationTurnCount - event.payload.turnCount);
     if (rolledBackTurns > 0) {
       yield* providerService.rollbackConversation({
         threadId: sessionRuntime.value.threadId,

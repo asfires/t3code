@@ -567,6 +567,7 @@ export interface ChatComposerProps {
 
   // Callbacks
   onSend: (e?: { preventDefault: () => void }) => void;
+  onPopLastUserMessage: (() => Promise<void>) | null;
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
   onRespondToApproval: (
@@ -649,6 +650,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     composerTerminalContextsRef,
     composerElementContextsRef,
     onSend,
+    onPopLastUserMessage,
     onInterrupt,
     onImplementPlanInNewThread,
     onRespondToApproval,
@@ -1865,9 +1867,24 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // Callbacks: command key
   // ------------------------------------------------------------------
   const onComposerCommandKey = (
-    key: "ArrowDown" | "ArrowUp" | "Enter" | "Tab",
+    key: "ArrowDown" | "ArrowUp" | "Enter" | "Escape" | "Tab",
     event: KeyboardEvent,
   ) => {
+    if (key === "Escape") {
+      const { trigger } = resolveActiveComposerTrigger();
+      const composerMenuOpen =
+        composerMenuOpenRef.current ||
+        trigger !== null ||
+        isStashMenuOpen ||
+        isComposerModelPickerOpen ||
+        isCommandPaletteOpen() ||
+        document.querySelector(COMPOSER_FLOATING_LAYER_SELECTOR) !== null;
+      if (composerMenuOpen || onPopLastUserMessage === null) {
+        return false;
+      }
+      void onPopLastUserMessage();
+      return true;
+    }
     if (key === "Tab" && event.shiftKey) {
       if (!planModeUiEnabled) return false;
       toggleInteractionMode();
