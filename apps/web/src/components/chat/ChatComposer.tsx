@@ -63,6 +63,7 @@ import {
 } from "../../promptStashStore";
 import { ComposerStashBadge } from "./ComposerStashBadge";
 import { ComposerStashMenu } from "./ComposerStashMenu";
+import { CHAT_FLOATING_LAYER_SELECTOR } from "./chatEscapeTrigger";
 import { compressImageForStash, compressImageToByteLimit } from "../../lib/imageCompression";
 import { isCommandPaletteOpen } from "../../commandPaletteBus";
 import { getTerminalFocusOwner } from "../../lib/terminalFocus";
@@ -254,14 +255,6 @@ const runtimeModeConfig: Record<
 };
 
 const runtimeModeOptions = Object.keys(runtimeModeConfig) as RuntimeMode[];
-const COMPOSER_FLOATING_LAYER_SELECTOR = [
-  '[data-slot="popover-popup"]',
-  '[data-slot="menu-popup"]',
-  '[data-slot="select-popup"]',
-  '[data-slot="combobox-popup"]',
-  '[data-slot="autocomplete-popup"]',
-].join(",");
-
 const extendReplacementRangeForTrailingSpace = (
   text: string,
   rangeEnd: number,
@@ -291,7 +284,7 @@ const terminalContextIdListsEqual = (
   contexts.length === ids.length && contexts.every((context, index) => context.id === ids[index]);
 
 function isInsideComposerFloatingLayer(element: Element): boolean {
-  return element.closest(COMPOSER_FLOATING_LAYER_SELECTOR) !== null;
+  return element.closest(CHAT_FLOATING_LAYER_SELECTOR) !== null;
 }
 
 const ComposerFooterModeControls = memo(function ComposerFooterModeControls(props: {
@@ -454,6 +447,7 @@ export interface ChatComposerHandle {
   openModelPicker: () => void;
   toggleModelPicker: () => void;
   isModelPickerOpen: () => boolean;
+  isEscapeGateOpen: () => boolean;
   readSnapshot: () => {
     value: string;
     cursor: number;
@@ -567,7 +561,6 @@ export interface ChatComposerProps {
 
   // Callbacks
   onSend: (e?: { preventDefault: () => void }) => void;
-  onPopLastUserMessage: (() => Promise<void>) | null;
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
   onRespondToApproval: (
@@ -650,7 +643,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     composerTerminalContextsRef,
     composerElementContextsRef,
     onSend,
-    onPopLastUserMessage,
     onInterrupt,
     onImplementPlanInNewThread,
     onRespondToApproval,
@@ -1867,24 +1859,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // Callbacks: command key
   // ------------------------------------------------------------------
   const onComposerCommandKey = (
-    key: "ArrowDown" | "ArrowUp" | "Enter" | "Escape" | "Tab",
+    key: "ArrowDown" | "ArrowUp" | "Enter" | "Tab",
     event: KeyboardEvent,
   ) => {
-    if (key === "Escape") {
-      const { trigger } = resolveActiveComposerTrigger();
-      const composerMenuOpen =
-        composerMenuOpenRef.current ||
-        trigger !== null ||
-        isStashMenuOpen ||
-        isComposerModelPickerOpen ||
-        isCommandPaletteOpen() ||
-        document.querySelector(COMPOSER_FLOATING_LAYER_SELECTOR) !== null;
-      if (composerMenuOpen || onPopLastUserMessage === null) {
-        return false;
-      }
-      void onPopLastUserMessage();
-      return true;
-    }
     if (key === "Tab" && event.shiftKey) {
       if (!planModeUiEnabled) return false;
       toggleInteractionMode();
@@ -2562,6 +2539,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         setIsComposerModelPickerOpen((open) => !open);
       },
       isModelPickerOpen: () => isComposerModelPickerOpen,
+      isEscapeGateOpen: () =>
+        composerMenuOpenRef.current || isStashMenuOpen || isComposerModelPickerOpen,
       readSnapshot: () => {
         return readComposerSnapshot();
       },
@@ -2652,6 +2631,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       projectSelectionRequired,
       applyPromptReplacement,
       isComposerModelPickerOpen,
+      isStashMenuOpen,
       readComposerSnapshot,
       selectedModel,
       selectedModelOptionsForDispatch,
