@@ -877,6 +877,37 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.managed-worktree.record": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      if (thread.managedWorktree != null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' already has managed-worktree provenance.`,
+        });
+      }
+      const occurredAt = yield* nowIso;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.meta-updated",
+        payload: {
+          threadId: command.threadId,
+          branch: command.branch,
+          worktreePath: command.managedWorktree.path,
+          managedWorktree: command.managedWorktree,
+          updatedAt: occurredAt,
+        },
+      };
+    }
+
     case "thread.title.regeneration.complete": {
       const thread = yield* requireThread({
         readModel,
@@ -1440,6 +1471,70 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           turnCount: command.turnCount,
         },
       };
+    }
+
+    case "thread.turn.retract.complete": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const retraction = thread.turnRetraction;
+      if (retraction?.status !== "requested" || retraction.requestId !== command.requestId) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' has no matching pending retraction '${command.requestId}'.`,
+        });
+      }
+
+      const revertedEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.reverted",
+        payload: {
+          threadId: command.threadId,
+          turnCount: retraction.baselineTurnCount,
+          retraction: {
+            requestId: retraction.requestId,
+            messageId: retraction.messageId,
+            turnId: retraction.targetTurnId,
+            firstUserMessage: retraction.firstUserMessage,
+            completedAt: command.createdAt,
+          },
+        },
+      };
+      if (!retraction.firstUserMessage) {
+        return revertedEvent;
+      }
+
+      const deletedEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.deleted",
+        payload: {
+          threadId: command.threadId,
+          deletedAt: command.createdAt,
+          retraction: {
+            requestId: retraction.requestId,
+            messageId: retraction.messageId,
+            firstUserMessage: true,
+            ...(thread.managedWorktree != null
+              ? {
+                  managedWorktreeCreatedForCommandId: thread.managedWorktree.createdForCommandId,
+                }
+              : {}),
+          },
+        },
+      };
+      return [revertedEvent, deletedEvent];
     }
 
     case "thread.activity.append": {

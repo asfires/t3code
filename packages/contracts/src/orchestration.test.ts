@@ -82,6 +82,22 @@ it.effect("decodes thread.turn.retract in the client-dispatchable command union"
   }),
 );
 
+it.effect("keeps thread.turn.retract.complete internal-only", () =>
+  Effect.gen(function* () {
+    const input = {
+      type: "thread.turn.retract.complete",
+      commandId: "cmd-retract-complete",
+      threadId: "thread-1",
+      requestId: "cmd-retract",
+      createdAt: "2026-01-01T00:00:05.000Z",
+    };
+    const command = yield* decodeOrchestrationCommand(input);
+    assert.strictEqual(command.type, "thread.turn.retract.complete");
+    const clientResult = yield* Effect.exit(decodeClientOrchestrationCommand(input));
+    assert.strictEqual(clientResult._tag, "Failure");
+  }),
+);
+
 it.effect("decodes historical interrupt and reverted payloads without retraction metadata", () =>
   Effect.gen(function* () {
     const interrupt = yield* decodeThreadTurnInterruptRequestedPayload({

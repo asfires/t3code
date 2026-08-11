@@ -384,6 +384,13 @@ export const OrchestrationThreadTurnRetraction = Schema.Struct({
 });
 export type OrchestrationThreadTurnRetraction = typeof OrchestrationThreadTurnRetraction.Type;
 
+export const ManagedWorktreeProvenance = Schema.Struct({
+  projectCwd: TrimmedNonEmptyString,
+  path: TrimmedNonEmptyString,
+  createdForCommandId: CommandId,
+});
+export type ManagedWorktreeProvenance = typeof ManagedWorktreeProvenance.Type;
+
 export const OrchestrationThread = Schema.Struct({
   id: ThreadId,
   projectId: ProjectId,
@@ -395,6 +402,9 @@ export const OrchestrationThread = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  // Present only when first-send bootstrap created this worktree for the thread.
+  // Optional so snapshots from older servers remain compatible.
+  managedWorktree: Schema.optional(Schema.NullOr(ManagedWorktreeProvenance)),
   latestTurn: Schema.NullOr(OrchestrationLatestTurn),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -1050,6 +1060,22 @@ const ThreadRevertCompleteCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const ThreadTurnRetractCompleteCommand = Schema.Struct({
+  type: Schema.Literal("thread.turn.retract.complete"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  requestId: CommandId,
+  createdAt: IsoDateTime,
+});
+
+const ThreadManagedWorktreeRecordCommand = Schema.Struct({
+  type: Schema.Literal("thread.managed-worktree.record"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  branch: TrimmedNonEmptyString,
+  managedWorktree: ManagedWorktreeProvenance,
+});
+
 const ThreadTitleRegenerationCompleteCommand = Schema.Struct({
   type: Schema.Literal("thread.title.regeneration.complete"),
   commandId: CommandId,
@@ -1066,6 +1092,8 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadTurnDiffCompleteCommand,
   ThreadActivityAppendCommand,
   ThreadRevertCompleteCommand,
+  ThreadTurnRetractCompleteCommand,
+  ThreadManagedWorktreeRecordCommand,
   ThreadTitleRegenerationCompleteCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
@@ -1161,6 +1189,14 @@ export const ThreadCreatedPayload = Schema.Struct({
 export const ThreadDeletedPayload = Schema.Struct({
   threadId: ThreadId,
   deletedAt: IsoDateTime,
+  retraction: Schema.optional(
+    Schema.Struct({
+      requestId: CommandId,
+      messageId: MessageId,
+      firstUserMessage: Schema.Literal(true),
+      managedWorktreeCreatedForCommandId: Schema.optional(CommandId),
+    }),
+  ),
 });
 
 export const ThreadArchivedPayload = Schema.Struct({
@@ -1236,6 +1272,7 @@ export const ThreadMetaUpdatedPayload = Schema.Struct({
   modelSelection: Schema.optional(ModelSelection),
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  managedWorktree: Schema.optional(ManagedWorktreeProvenance),
   updatedAt: IsoDateTime,
 });
 

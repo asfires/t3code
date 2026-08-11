@@ -3,8 +3,14 @@ import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
+import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
+import {
+  ProjectionThreadRepository,
+  type ProjectionThread,
+} from "../../persistence/Services/ProjectionThreads.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import * as TerminalManager from "../../terminal/Manager.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -15,6 +21,26 @@ import {
 import { forkParked } from "../../serverActivation.ts";
 
 type ThreadDeletedEvent = Extract<OrchestrationEvent, { type: "thread.deleted" }>;
+
+export function managedWorktreeCleanupTarget(input: {
+  readonly event: ThreadDeletedEvent;
+  readonly thread: ProjectionThread;
+  readonly hasOtherLiveReference: boolean;
+}): ProjectionThread["managedWorktree"] {
+  const { event, thread } = input;
+  const managedWorktree = thread.managedWorktree;
+  if (
+    event.payload.retraction === undefined ||
+    managedWorktree === null ||
+    event.payload.retraction.managedWorktreeCreatedForCommandId !==
+      managedWorktree.createdForCommandId ||
+    thread.worktreePath !== managedWorktree.path ||
+    input.hasOtherLiveReference
+  ) {
+    return null;
+  }
+  return managedWorktree;
+}
 
 export const logCleanupCauseUnlessInterrupted = <R, E>({
   effect,
@@ -41,6 +67,8 @@ const make = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const providerService = yield* ProviderService;
   const terminalManager = yield* TerminalManager.TerminalManager;
+  const projectionThreadRepository = yield* ProjectionThreadRepository;
+  const gitWorkflow = yield* GitWorkflowService;
 
   const stopProviderSession = (threadId: ThreadDeletedEvent["payload"]["threadId"]) =>
     logCleanupCauseUnlessInterrupted({
@@ -56,12 +84,38 @@ const make = Effect.gen(function* () {
       threadId,
     });
 
+  const removeRetractedManagedWorktree = Effect.fn("removeRetractedManagedWorktree")(function* (
+    event: ThreadDeletedEvent,
+  ) {
+    if (event.payload.retraction === undefined) return;
+    const thread = yield* projectionThreadRepository.getById({
+      threadId: event.payload.threadId,
+    });
+    if (Option.isNone(thread) || thread.value.managedWorktree === null) return;
+    const hasOtherLiveReference = yield* projectionThreadRepository.hasOtherLiveWorktreeReference({
+      threadId: event.payload.threadId,
+      worktreePath: thread.value.managedWorktree.path,
+    });
+    const target = managedWorktreeCleanupTarget({
+      event,
+      thread: thread.value,
+      hasOtherLiveReference,
+    });
+    if (target === null) return;
+    yield* logCleanupCauseUnlessInterrupted({
+      effect: gitWorkflow.removeWorktree({ cwd: target.projectCwd, path: target.path }),
+      message: "thread retraction cleanup skipped managed worktree removal",
+      threadId: event.payload.threadId,
+    });
+  });
+
   const processThreadDeleted = Effect.fn("processThreadDeleted")(function* (
     event: ThreadDeletedEvent,
   ) {
     const { threadId } = event.payload;
     yield* stopProviderSession(threadId);
     yield* closeThreadTerminals(threadId);
+    yield* removeRetractedManagedWorktree(event);
   });
 
   const processThreadDeletedSafely = (event: ThreadDeletedEvent) =>

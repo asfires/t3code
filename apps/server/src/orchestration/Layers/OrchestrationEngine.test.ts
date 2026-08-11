@@ -606,17 +606,26 @@ describe("OrchestrationEngine", () => {
     );
     await system.run(
       engine.dispatch({
-        type: "thread.meta.update",
+        type: "thread.managed-worktree.record",
         commandId: CommandId.make("cmd-authoritative-worktree-bootstrap"),
         threadId: ThreadId.make("thread-worktree-bootstrap"),
         branch: "t3code/1234abcd",
-        worktreePath: "/tmp/project-worktree-bootstrap-worktree",
+        managedWorktree: {
+          projectCwd: "/tmp/project-worktree-bootstrap",
+          path: "/tmp/project-worktree-bootstrap-worktree",
+          createdForCommandId: CommandId.make("cmd-worktree-bootstrap-first-send"),
+        },
       }),
     );
 
     const snapshot = await system.readModel();
     expect(snapshot.threads[0]?.branch).toBe("t3code/1234abcd");
     expect(snapshot.threads[0]?.worktreePath).toBe("/tmp/project-worktree-bootstrap-worktree");
+    expect(snapshot.threads[0]?.managedWorktree).toEqual({
+      projectCwd: "/tmp/project-worktree-bootstrap",
+      path: "/tmp/project-worktree-bootstrap-worktree",
+      createdForCommandId: CommandId.make("cmd-worktree-bootstrap-first-send"),
+    });
     await system.dispose();
   });
 

@@ -99,6 +99,46 @@ function retract(thread: OrchestrationThread, commandId = "cmd-retract") {
   });
 }
 
+function pendingRetraction(firstUserMessage: boolean): OrchestrationThread {
+  return makeThread({
+    managedWorktree: {
+      projectCwd: "/tmp/project",
+      path: "/tmp/project-worktree",
+      createdForCommandId: CommandId.make("cmd-first-send"),
+    },
+    turnRetraction: {
+      requestId: CommandId.make("cmd-retract-request"),
+      messageId: MESSAGE_ID,
+      baselineTurnCount: firstUserMessage ? 0 : 2,
+      baselineCheckpointRef: CheckpointRef.make(
+        firstUserMessage
+          ? `refs/t3/checkpoints/${THREAD_ID}/0`
+          : `refs/t3/checkpoints/${THREAD_ID}/2`,
+      ),
+      targetTurnId: TURN_ID,
+      providerSendClaimed: true,
+      firstUserMessage,
+      requestedAt: MESSAGE_AT,
+      status: "requested",
+      completedAt: null,
+      failedAt: null,
+    },
+  });
+}
+
+function completeRetraction(thread: OrchestrationThread) {
+  return decideOrchestrationCommand({
+    command: {
+      type: "thread.turn.retract.complete",
+      commandId: CommandId.make("cmd-retract-complete"),
+      threadId: THREAD_ID,
+      requestId: CommandId.make("cmd-retract-request"),
+      createdAt: NOW,
+    },
+    readModel: readModel(thread),
+  });
+}
+
 function firstEvent(
   result:
     | Omit<OrchestrationEvent, "sequence">
@@ -113,6 +153,57 @@ function invariantDetail(error: unknown): string {
 }
 
 it.layer(NodeServices.layer)("thread.turn.retract decider", (it) => {
+  it.effect("atomically emits reverted and deleted for first-message completion", () =>
+    Effect.gen(function* () {
+      const decided = yield* completeRetraction(pendingRetraction(true));
+      const events = Array.isArray(decided) ? decided : [decided];
+      expect(events.map((event) => event.type)).toEqual(["thread.reverted", "thread.deleted"]);
+      expect(events[0]).toMatchObject({
+        commandId: CommandId.make("cmd-retract-complete"),
+        type: "thread.reverted",
+        payload: {
+          threadId: THREAD_ID,
+          turnCount: 0,
+          retraction: {
+            requestId: CommandId.make("cmd-retract-request"),
+            messageId: MESSAGE_ID,
+            turnId: TURN_ID,
+            firstUserMessage: true,
+            completedAt: NOW,
+          },
+        },
+      });
+      expect(events[1]).toMatchObject({
+        commandId: CommandId.make("cmd-retract-complete"),
+        type: "thread.deleted",
+        payload: {
+          threadId: THREAD_ID,
+          deletedAt: NOW,
+          retraction: {
+            requestId: CommandId.make("cmd-retract-request"),
+            messageId: MESSAGE_ID,
+            firstUserMessage: true,
+            managedWorktreeCreatedForCommandId: CommandId.make("cmd-first-send"),
+          },
+        },
+      });
+    }),
+  );
+
+  it.effect("emits only reverted for later-message completion", () =>
+    Effect.gen(function* () {
+      const decided = yield* completeRetraction(pendingRetraction(false));
+      const events = Array.isArray(decided) ? decided : [decided];
+      expect(events.map((event) => event.type)).toEqual(["thread.reverted"]);
+      expect(events[0]).toMatchObject({
+        payload: {
+          turnCount: 2,
+          retraction: { firstUserMessage: false },
+        },
+      });
+    }),
+  );
+
   it.effect("accepts queued, starting, and matching running lifecycle states", () =>
     Effect.gen(function* () {
       const queued = makeThread();
