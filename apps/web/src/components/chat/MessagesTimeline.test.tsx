@@ -131,6 +131,21 @@ vi.mock("../ui/copy-text-button", () => ({
       {label}
     </button>
   ),
+  CopyTextMenuButton: ({
+    items,
+    label,
+  }: {
+    items: readonly { text: string; label: string }[];
+    label: string;
+  }) => (
+    <div aria-label={label}>
+      {items.map((item) => (
+        <button key={item.label} type="button" data-copy-text={item.text}>
+          {item.label}
+        </button>
+      ))}
+    </div>
+  ),
 }));
 
 function matchMedia() {
@@ -144,6 +159,7 @@ function matchMedia() {
 let MessagesTimeline: typeof import("./MessagesTimeline").MessagesTimeline;
 let buildToolCallExpandedBody: typeof import("./MessagesTimeline").buildToolCallExpandedBody;
 let WorkEntryExpandedBody: typeof import("./MessagesTimeline").WorkEntryExpandedBody;
+let WorkEntryCopyControl: typeof import("./MessagesTimeline").WorkEntryCopyControl;
 let splitPreviewJsonPayload: typeof import("./MessagesTimeline").splitPreviewJsonPayload;
 
 beforeAll(async () => {
@@ -178,8 +194,13 @@ beforeAll(async () => {
     },
   });
 
-  ({ MessagesTimeline, WorkEntryExpandedBody, buildToolCallExpandedBody, splitPreviewJsonPayload } =
-    await import("./MessagesTimeline"));
+  ({
+    MessagesTimeline,
+    WorkEntryExpandedBody,
+    WorkEntryCopyControl,
+    buildToolCallExpandedBody,
+    splitPreviewJsonPayload,
+  } = await import("./MessagesTimeline"));
 }, 30_000);
 
 const ACTIVE_THREAD_ENVIRONMENT_ID = EnvironmentId.make("environment-local");
@@ -382,6 +403,48 @@ describe("MessagesTimeline", () => {
     });
   });
 
+  it("offers command and output copy choices for Claude and Codex commands", () => {
+    const providerOutputs = [
+      {
+        id: "claude",
+        toolData: { result: { content: "Claude output", is_error: false } },
+        expectedOutput: "Claude output",
+      },
+      {
+        id: "codex",
+        toolData: {
+          item: {
+            command: "pwd",
+            aggregatedOutput: "Codex output",
+            exitCode: 0,
+            status: "completed",
+          },
+        },
+        expectedOutput: "Codex output",
+      },
+    ];
+
+    for (const provider of providerOutputs) {
+      const body = buildToolCallExpandedBody(
+        {
+          id: `work-${provider.id}-copy-menu`,
+          createdAt: MESSAGE_CREATED_AT,
+          label: "Bash",
+          tone: "tool",
+          itemType: "command_execution",
+          command: "pwd",
+          toolData: provider.toolData,
+        },
+        undefined,
+      );
+      const markup = renderToStaticMarkup(<WorkEntryCopyControl body={body!} />);
+
+      expect(markup).toContain('aria-label="Copy command or output"');
+      expect(markup).toContain('data-copy-text="pwd"');
+      expect(markup).toContain(`data-copy-text="${provider.expectedOutput}"`);
+    }
+  });
+
   it("prefers Claude result output over Codex item output", () => {
     const body = buildToolCallExpandedBody(
       {
@@ -543,8 +606,13 @@ describe("MessagesTimeline", () => {
     });
 
     const markup = renderToStaticMarkup(<WorkEntryExpandedBody body={body!} />);
+    const copyControlMarkup = renderToStaticMarkup(<WorkEntryCopyControl body={body!} />);
     expect(markup).toContain("(No output)");
     expect(markup).not.toContain("Copy output");
+    expect(copyControlMarkup).toContain('data-copy-text="pwd"');
+    expect(copyControlMarkup).toContain("Copy command");
+    expect(copyControlMarkup).not.toContain("Copy command or output");
+    expect(copyControlMarkup).not.toContain("Copy output");
   });
 
   it("renders provider no-output sentinels as the empty state", () => {
@@ -635,7 +703,7 @@ describe("MessagesTimeline", () => {
     expect(errorMarkup).toContain("Error output\nfailed text\n\nOutput truncated");
   });
 
-  it("passes only the raw extracted output to the copy button", () => {
+  it("moves command output copy into the command copy menu", () => {
     const body = buildToolCallExpandedBody(
       {
         id: "work-output-copy",
@@ -656,11 +724,15 @@ describe("MessagesTimeline", () => {
     });
 
     const markup = renderToStaticMarkup(<WorkEntryExpandedBody body={body!} />);
+    const copyControlMarkup = renderToStaticMarkup(<WorkEntryCopyControl body={body!} />);
 
-    expect(markup).toContain('data-copy-text="raw output text"');
-    expect(markup).toContain("Copy output");
-    expect(markup).not.toContain('data-copy-text="a much longer command"');
+    expect(markup).not.toContain("Copy output");
     expect(markup).not.toContain("Copy command");
+    expect(copyControlMarkup).toContain('aria-label="Copy command or output"');
+    expect(copyControlMarkup).toContain('data-copy-text="a much longer command"');
+    expect(copyControlMarkup).toContain("Copy command");
+    expect(copyControlMarkup).toContain('data-copy-text="raw output text"');
+    expect(copyControlMarkup).toContain("Copy output");
     expect(markup).not.toContain("a much longer command");
     expect(markup).not.toContain("auxiliary detail");
     expect(markup).not.toContain('data-copy-text="auxiliary detail"');
@@ -682,7 +754,10 @@ describe("MessagesTimeline", () => {
     expect(body?.copyableCommand).toBeUndefined();
 
     const markup = renderToStaticMarkup(<WorkEntryExpandedBody body={body!} />);
+    const copyControlMarkup = renderToStaticMarkup(<WorkEntryCopyControl body={body!} />);
     expect(markup).not.toContain("Copy command");
+    expect(markup).not.toContain("Copy output");
+    expect(copyControlMarkup).toBe("");
   });
 
   it("uses the larger leading inset only when the top fade is enabled", () => {

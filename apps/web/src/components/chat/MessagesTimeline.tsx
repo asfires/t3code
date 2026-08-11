@@ -66,7 +66,7 @@ import {
   ZapIcon,
 } from "lucide-react";
 import { Button } from "../ui/button";
-import { CopyTextButton } from "../ui/copy-text-button";
+import { CopyTextButton, CopyTextMenuButton } from "../ui/copy-text-button";
 import { buildExpandedImagePreview, ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ProposedPlanCard } from "./ProposedPlanCard";
 import { ChangedFilesCard } from "./ChangedFilesTree";
@@ -2236,7 +2236,7 @@ export function buildToolCallExpandedBody(
   const blocks: ToolCallExpandedBodyBlock[] = [];
   const copyableCommand =
     workEntry.itemType === "command_execution"
-      ? (workEntry.rawCommand ?? workEntry.command)?.trim() || undefined
+      ? workEntry.rawCommand?.trim() || workEntry.command?.trim() || undefined
       : undefined;
   const addTextBlock = (text: string) => {
     const trimmed = text.trim();
@@ -2313,15 +2313,6 @@ export const WorkEntryExpandedBody = memo(function WorkEntryExpandedBody(props: 
               {block.text}
               {block.truncated ? "\n\nOutput truncated" : null}
             </pre>
-            <div className="mt-1 flex items-center gap-2 opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover/work-entry:opacity-100">
-              <CopyTextButton
-                text={block.text}
-                label="Copy output"
-                onCopyError={(cause) => {
-                  reportMarkdownActionFailure({ operation: "copy-tool-output" }, cause);
-                }}
-              />
-            </div>
           </div>
         ) : block.kind === "empty" ? (
           <p
@@ -2340,6 +2331,50 @@ export const WorkEntryExpandedBody = memo(function WorkEntryExpandedBody(props: 
         ),
       )}
     </div>
+  );
+});
+
+export const WorkEntryCopyControl = memo(function WorkEntryCopyControl(props: {
+  body: ToolCallExpandedBody;
+}) {
+  const command = props.body.copyableCommand;
+  if (!command) {
+    return null;
+  }
+
+  const output = props.body.blocks.find((block) => block.kind === "output")?.text;
+  if (!output?.trim()) {
+    return (
+      <CopyTextButton
+        text={command}
+        label="Copy command"
+        onCopyError={(cause) => {
+          reportMarkdownActionFailure({ operation: "copy-tool-command" }, cause);
+        }}
+      />
+    );
+  }
+
+  return (
+    <CopyTextMenuButton
+      label="Copy command or output"
+      items={[
+        {
+          text: command,
+          label: "Copy command",
+          onCopyError: (cause) => {
+            reportMarkdownActionFailure({ operation: "copy-tool-command" }, cause);
+          },
+        },
+        {
+          text: output,
+          label: "Copy output",
+          onCopyError: (cause) => {
+            reportMarkdownActionFailure({ operation: "copy-tool-output" }, cause);
+          },
+        },
+      ]}
+    />
   );
 });
 
@@ -2636,13 +2671,7 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
                   }
                 }}
               >
-                <CopyTextButton
-                  text={expandedBody.copyableCommand}
-                  label="Copy command"
-                  onCopyError={(cause) => {
-                    reportMarkdownActionFailure({ operation: "copy-tool-command" }, cause);
-                  }}
-                />
+                <WorkEntryCopyControl body={expandedBody} />
               </span>
             ) : null}
             <span
