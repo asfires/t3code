@@ -58,10 +58,12 @@ import {
   getProviderOptionDescriptors,
   resolvePromptInjectedEffort,
 } from "@t3tools/shared/model";
+import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
@@ -71,6 +73,7 @@ import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
@@ -1666,6 +1669,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }) as ClaudeQueryRuntime);
 
   const sessions = new Map<ThreadId, ClaudeSessionContext>();
+  /**
+   * One send at a time per thread. `sendTurn` can replace the SDK session
+   * (post-rollback recycle), and that replacement takes hundreds of ms during
+   * which the thread looks idle to the orchestration side. A second send
+   * arriving in that window used to race the recycle: both sends called
+   * `startSession`, and whichever session lost the race kept the turn that had
+   * already been opened and offered on it — a turn no live query could ever
+   * settle, so the session stayed "running" forever.
+   */
+  const sendTurnLocks = yield* Cache.make<ThreadId, Semaphore.Semaphore>({
+    capacity: 10_000,
+    timeToLive: Duration.minutes(30),
+    lookup: () => Semaphore.make(1),
+  });
   const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
 
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -3514,6 +3531,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       turnState.sdkProcessingObserved = true;
       if (turnState.interruptReplayPending) {
         turnState.interruptReplayPending = false;
+        yield* Effect.logInfo("claude.turn.interrupt-replay-fired", {
+          threadId: context.session.threadId,
+          turnId: turnState.turnId,
+        });
         yield* Effect.tryPromise({
           try: () => context.query.interrupt(),
           catch: (cause) => toRequestError(context.session.threadId, "turn/interruptReplay", cause),
@@ -4345,7 +4366,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     },
   );
 
-  const sendTurn: ClaudeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
+  const sendTurnExclusive = Effect.fn("sendTurnExclusive")(function* (
+    input: Parameters<ClaudeAdapterShape["sendTurn"]>[0],
+  ) {
     let context = yield* requireSession(input.threadId);
     if (context.recycleBeforeNextTurn) {
       yield* startSession({
@@ -4463,6 +4486,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     };
   });
 
+  const sendTurn: ClaudeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
+    const lock = yield* Cache.get(sendTurnLocks, input.threadId);
+    return yield* lock.withPermits(1)(sendTurnExclusive(input));
+  });
+
   const interruptTurn: ClaudeAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(
     function* (threadId, turnId) {
       const context = yield* requireSession(threadId);
@@ -4475,8 +4503,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // `turn.started` intentionally precedes offering the prompt to the
         // SDK queue. An interrupt in that gap is acknowledged by the SDK but
         // can be forgotten before query processing begins. Keep one replay
-        // latched until the first per-turn processing signal arrives.
+        // latched until the first per-turn processing signal arrives. The latch
+        // lives on the turn's own state, which is never reused by a later turn,
+        // so it dies with the turn it was armed for.
         activeTurnState.interruptReplayPending = true;
+        yield* Effect.logInfo("claude.turn.interrupt-replay-armed", {
+          threadId,
+          turnId: activeTurnState.turnId,
+          requestedTurnId: turnId ?? null,
+        });
       }
       // Stop-everything semantics: users reach for Stop precisely when a
       // fleet ran away. interrupt() alone only ends the parent turn —

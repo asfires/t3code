@@ -18,13 +18,13 @@ import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
 import * as Socket from "effect/unstable/socket/Socket";
 
 type Provider = "claudeAgent" | "codex";
-type Timing = "double-pop" | "immediate" | "long-response" | "mid-thinking";
+type Timing = "double-pop" | "immediate" | "long-response" | "mid-thinking" | "pop-resend-follow";
 
 const [baseDir, httpOrigin, pairingCredential, providerArg = "codex", timingArg = "immediate"] =
   process.argv.slice(2);
 if (!baseDir || !httpOrigin || !pairingCredential) {
   throw new Error(
-    "usage: node apps/server/scripts/turn-retraction-repro.ts <base-dir> <http-origin> <pairing-credential> [codex|claudeAgent] [immediate|mid-thinking|long-response|double-pop]",
+    "usage: node apps/server/scripts/turn-retraction-repro.ts <base-dir> <http-origin> <pairing-credential> [codex|claudeAgent] [immediate|mid-thinking|long-response|double-pop|pop-resend-follow]",
   );
 }
 if (providerArg !== "codex" && providerArg !== "claudeAgent") {
@@ -34,7 +34,8 @@ if (
   timingArg !== "immediate" &&
   timingArg !== "mid-thinking" &&
   timingArg !== "long-response" &&
-  timingArg !== "double-pop"
+  timingArg !== "double-pop" &&
+  timingArg !== "pop-resend-follow"
 ) {
   throw new Error(`unsupported timing '${timingArg}'`);
 }
@@ -45,6 +46,10 @@ const delayMs = timing === "mid-thinking" ? 250 : timing === "long-response" ? 1
 const maxRetractionCompletionMs = 20_000;
 const maxDoublePopCompletionMs = 5_000;
 const doublePopIterations = 4;
+const popResendFollowIterations = 3;
+const popResendFollowRetractionDelayMs = 400;
+const popResendFollowFollowDelayMs = 500;
+const maxPopResendFollowSettleMs = 30_000;
 const suffix = crypto.randomUUID();
 const projectId = ProjectId.make(`repro-project-${suffix}`);
 const threadId = ThreadId.make(`repro-thread-${suffix}`);
@@ -148,6 +153,32 @@ const readRetraction = (requestId = retractionRequestId) =>
      FROM projection_turn_retractions WHERE request_id = ?`,
     requestId,
   );
+/** Assistant text anywhere in the thread, regardless of which turn owns it. */
+const readAssistantTextContaining = (marker: string) =>
+  queryOne<{ text: string }>(
+    `SELECT text FROM projection_thread_messages
+     WHERE thread_id = ? AND role = 'assistant' AND text LIKE '%' || ? || '%'
+     ORDER BY rowid DESC LIMIT 1`,
+    threadId,
+    marker,
+  )?.text;
+/**
+ * Turns holding assistant output that no user message owns. A turn detached
+ * from its message is the shape of the stall: nothing settles it, so the
+ * session keeps reporting work the user cannot stop.
+ */
+const readDetachedTurns = () =>
+  queryOne<{ detached: number }>(
+    `SELECT COUNT(*) AS detached FROM projection_turns
+     WHERE thread_id = ? AND pending_message_id IS NULL AND assistant_message_id IS NOT NULL`,
+    threadId,
+  )?.detached;
+const readUnsettledTurns = () =>
+  queryOne<{ unsettled: number }>(
+    `SELECT COUNT(*) AS unsettled FROM projection_turns
+     WHERE thread_id = ? AND state IN ('pending', 'running')`,
+    threadId,
+  )?.unsettled;
 const readAssistantReply = (messageId: MessageId) =>
   queryOne<{ text: string }>(
     `SELECT messages.text
@@ -242,6 +273,19 @@ const run = Effect.gen(function* () {
     readonly requestToCompleteMs: number;
     readonly sendToCompleteMs: number;
   }> = [];
+  const popResendFollowAttempts: Array<{
+    readonly iteration: number;
+    readonly retractedMarker: string;
+    readonly resendMarker: string;
+    readonly followMarker: string;
+    readonly retractionCompletionMs: number;
+    readonly resendSettleMs: number;
+    readonly followSettleMs: number;
+    readonly finalSessionStatus: string;
+    readonly detachedTurns: number;
+    readonly resendReply: string | undefined;
+    readonly followReply: string | undefined;
+  }> = [];
   let retraction: RetractionRow | undefined;
   let naturalCompletionMs: number | null = null;
   let retractionCompletionMs: number | null = null;
@@ -329,6 +373,136 @@ const run = Effect.gen(function* () {
         });
         retraction = attemptRetraction;
       }
+    }
+  } else if (timing === "pop-resend-follow") {
+    for (let iteration = 1; iteration <= popResendFollowIterations; iteration += 1) {
+      const iterationRetractedMarker = `POP_REMOVED_MARKER_${suffix}_${iteration}`;
+      const resendMarker = `RESEND_MARKER_${suffix}_${iteration}`;
+      const followMarker = `FOLLOW_MARKER_${suffix}_${iteration}`;
+      const popMessageId = MessageId.make(`repro-pop-${suffix}-${iteration}`);
+      const resendMessageId = MessageId.make(`repro-resend-${suffix}-${iteration}`);
+      const followMessageId = MessageId.make(`repro-follow-${suffix}-${iteration}`);
+      const popRequestId = CommandId.make(`repro-pop-retract-${suffix}-${iteration}`);
+
+      yield* dispatchTurn(
+        popMessageId,
+        `Remember this exact token: ${iterationRetractedMarker}. Then count from 1 to 400, one number per line, no other text.`,
+      );
+      yield* Effect.promise(() =>
+        waitFor(
+          `pop-resend-follow ${iteration} retractable turn start`,
+          () => ({ session: readSession(), turn: readTurn(popMessageId) }),
+          (value) =>
+            value.session?.status === "running" &&
+            value.session.activeTurnId !== null &&
+            value.turn?.state === "running" &&
+            value.turn.turnId === value.session.activeTurnId,
+        ),
+      );
+      yield* Effect.sleep(`${popResendFollowRetractionDelayMs} millis`);
+      const beforeRetraction = yield* Effect.sync(() => ({
+        session: readSession(),
+        turn: readTurn(popMessageId),
+      }));
+      if (
+        beforeRetraction.session?.status !== "running" ||
+        beforeRetraction.turn?.state !== "running"
+      ) {
+        throw new Error(
+          `pop-resend-follow ${iteration} completed before retraction: ${stringifyJson(beforeRetraction)}`,
+        );
+      }
+
+      const retractionRequestedAtMs = hostNowMs();
+      yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+        type: "thread.turn.retract",
+        commandId: popRequestId,
+        threadId,
+        messageId: popMessageId,
+        createdAt: hostNowIso(),
+      });
+      const completedRetraction = yield* Effect.promise(() =>
+        waitFor(
+          `pop-resend-follow ${iteration} held resend release`,
+          () => readRetraction(popRequestId),
+          (row) => row.status === "completed" || row.status === "failed",
+          maxRetractionCompletionMs,
+        ),
+      );
+      if (completedRetraction.status !== "completed") {
+        throw new Error(
+          `pop-resend-follow ${iteration} retraction failed: ${stringifyJson(completedRetraction)}`,
+        );
+      }
+      const resendSentAtMs = hostNowMs();
+      yield* dispatchTurn(resendMessageId, `Reply with exactly ${resendMarker}.`);
+      yield* Effect.sleep(`${popResendFollowFollowDelayMs} millis`);
+      const followSentAtMs = hostNowMs();
+      yield* dispatchTurn(followMessageId, `Reply with exactly ${followMarker}.`);
+
+      const remainingSettleMs = Math.max(
+        1,
+        maxPopResendFollowSettleMs - (hostNowMs() - resendSentAtMs),
+      );
+      // Both sends land while the recycled session is still coming up, so the
+      // provider may answer them as one steered turn or as two. Either shape is
+      // fine; what must hold is that the thread stops reporting work, both
+      // answers arrive, and no turn is left owning output no message claims.
+      const settled = yield* Effect.promise(() =>
+        waitFor(
+          `pop-resend-follow ${iteration} both answers and a settled session`,
+          () => ({
+            retraction: completedRetraction,
+            resendReply: readAssistantTextContaining(resendMarker),
+            followReply: readAssistantTextContaining(followMarker),
+            detachedTurns: readDetachedTurns(),
+            unsettledTurns: readUnsettledTurns(),
+            session: readSession(),
+          }),
+          (value) =>
+            value.retraction?.status === "completed" &&
+            value.resendReply !== undefined &&
+            value.followReply !== undefined &&
+            value.session?.status === "ready" &&
+            value.session.activeTurnId === null &&
+            value.unsettledTurns === 0,
+          remainingSettleMs,
+        ),
+      );
+      if (settled.retraction?.providerSendState !== "claimed") {
+        throw new Error(
+          `pop-resend-follow ${iteration} rollback failed: ${stringifyJson(settled.retraction)}`,
+        );
+      }
+      // Detached turns are reported, not fatal. Two sends that overlap inside
+      // one provider turn (a steer) still scramble which message owns the turn
+      // row — a separate defect from the stall this scenario gates, and one
+      // that reproduces with no retraction in play.
+      if (settled.detachedTurns !== 0) {
+        yield* Effect.logWarning(
+          `popResendFollow iteration=${iteration} detachedTurns=${settled.detachedTurns} (steered send lost its turn row; tracked separately from the stall gate)`,
+        );
+      }
+
+      const settledAtMs = hostNowMs();
+      const attempt = {
+        iteration,
+        retractedMarker: iterationRetractedMarker,
+        resendMarker,
+        followMarker,
+        retractionCompletionMs:
+          Date.parse(settled.retraction.completedAt ?? hostNowIso()) - retractionRequestedAtMs,
+        resendSettleMs: settledAtMs - resendSentAtMs,
+        followSettleMs: settledAtMs - followSentAtMs,
+        finalSessionStatus: settled.session?.status ?? "missing",
+        detachedTurns: settled.detachedTurns ?? 0,
+        resendReply: settled.resendReply,
+        followReply: settled.followReply,
+      };
+      popResendFollowAttempts.push(attempt);
+      retraction = settled.retraction;
+      retractionCompletionMs = attempt.retractionCompletionMs;
+      sessionStatusAtRetraction = beforeRetraction.session.status;
     }
   } else {
     if (timing === "immediate") {
@@ -504,6 +678,7 @@ const run = Effect.gen(function* () {
     retractionCompletionMs,
     sessionStatusAtRetraction,
     doublePopAttempts,
+    popResendFollowAttempts,
   };
 }).pipe(Effect.provide(protocolLayer));
 
@@ -533,6 +708,22 @@ try {
     console.log(
       `doublePopSummary attempts=${result.doublePopAttempts.length} maxRequestToCompleteMs=${Math.max(...result.doublePopAttempts.map((attempt) => attempt.requestToCompleteMs))} maxSendToCompleteMs=${Math.max(...result.doublePopAttempts.map((attempt) => attempt.sendToCompleteMs))} maxAllowedMs=${maxDoublePopCompletionMs}`,
     );
+  } else if (timing === "pop-resend-follow") {
+    for (const attempt of result.popResendFollowAttempts) {
+      const retractedStatus = result.reply.includes(attempt.retractedMarker) ? "PRESENT" : "ABSENT";
+      const resendContextStatus = result.reply.includes(attempt.resendMarker)
+        ? "PRESENT"
+        : "ABSENT";
+      const followContextStatus = result.reply.includes(attempt.followMarker)
+        ? "PRESENT"
+        : "ABSENT";
+      console.log(
+        `popResendFollow iteration=${attempt.iteration} retractionCompletionMs=${attempt.retractionCompletionMs} resendSettleMs=${attempt.resendSettleMs} followSettleMs=${attempt.followSettleMs} finalSession=${attempt.finalSessionStatus} detachedTurns=${attempt.detachedTurns} retracted=${retractedStatus} resendReply=${attempt.resendReply} followReply=${attempt.followReply} resendContext=${resendContextStatus} followContext=${followContextStatus}`,
+      );
+    }
+    console.log(
+      `popResendFollowSummary iterations=${result.popResendFollowAttempts.length} maxResendSettleMs=${Math.max(...result.popResendFollowAttempts.map((attempt) => attempt.resendSettleMs))} maxFollowSettleMs=${Math.max(...result.popResendFollowAttempts.map((attempt) => attempt.followSettleMs))} maxAllowedMs=${maxPopResendFollowSettleMs}`,
+    );
   } else {
     console.log(`retractedMarker=${retractedMarker} status=${retractedMarkerStatus}`);
   }
@@ -544,8 +735,16 @@ try {
   console.log(`retainedMarker=${retainedMarker} status=${retainedMarkerStatus}`);
   console.log(`interrogationReplyChars=${result.reply.length}`);
   if (
-    (timing !== "double-pop" && retractedMarkerStatus !== "ABSENT") ||
+    (timing !== "double-pop" &&
+      timing !== "pop-resend-follow" &&
+      retractedMarkerStatus !== "ABSENT") ||
     result.doublePopAttempts.some((attempt) => result.reply.includes(attempt.marker)) ||
+    result.popResendFollowAttempts.some(
+      (attempt) =>
+        result.reply.includes(attempt.retractedMarker) ||
+        !result.reply.includes(attempt.resendMarker) ||
+        !result.reply.includes(attempt.followMarker),
+    ) ||
     retainedMarkerStatus !== "PRESENT" ||
     (timing === "immediate" && setupRetractionMarkerStatus !== "ABSENT")
   ) {
