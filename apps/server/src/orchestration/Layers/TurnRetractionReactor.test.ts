@@ -52,7 +52,11 @@ import {
   type ProjectionSnapshotQueryShape,
 } from "../Services/ProjectionSnapshotQuery.ts";
 import { TurnRetractionReactor } from "../Services/TurnRetractionReactor.ts";
-import { makeTurnRetractionReactor, TurnRetractionRetryTicks } from "./TurnRetractionReactor.ts";
+import {
+  makeTurnRetractionReactor,
+  TurnRetractionInterruptTimeout,
+  TurnRetractionRetryTicks,
+} from "./TurnRetractionReactor.ts";
 
 const NOW = "2026-08-11T12:00:00.000Z";
 const THREAD_ID = ThreadId.make("thread-retraction-reactor");
@@ -71,6 +75,7 @@ type MutableState = {
   failRestoreAfterEffect: boolean;
   failCompletionAfterCommit: boolean;
   terminalRollbackFailure: boolean;
+  interruptAcknowledgementHangs: boolean;
   readonly order: string[];
   readonly dispatched: OrchestrationCommand[];
 };
@@ -106,6 +111,7 @@ function makeState(providerSendState: ProjectionTurnRetraction["providerSendStat
     failRestoreAfterEffect: false,
     failCompletionAfterCommit: false,
     terminalRollbackFailure: false,
+    interruptAcknowledgementHangs: false,
     order: [],
     dispatched: [],
   };
@@ -290,7 +296,12 @@ async function startHarness(state: MutableState) {
     interruptTurn: () =>
       Effect.sync(() => {
         state.order.push("interrupt");
-      }),
+        if (state.interruptAcknowledgementHangs) {
+          // Models Codex emitting turn/completed while its turn/interrupt RPC
+          // response remains unresolved.
+          state.sessionStatus = "ready";
+        }
+      }).pipe(Effect.andThen(state.interruptAcknowledgementHangs ? Effect.never : Effect.void)),
     respondToRequest: () => unsupported(),
     respondToUserInput: () => unsupported(),
     stopSession: () => unsupported(),
@@ -358,6 +369,7 @@ async function startHarness(state: MutableState) {
 
   const layer = Layer.effect(TurnRetractionReactor, makeTurnRetractionReactor).pipe(
     Layer.provideMerge(Layer.succeed(TurnRetractionRetryTicks, Stream.fromQueue(retryTicks))),
+    Layer.provideMerge(Layer.succeed(TurnRetractionInterruptTimeout, "1 millis")),
     Layer.provideMerge(Layer.succeed(OrchestrationEngineService, engine)),
     Layer.provideMerge(Layer.succeed(ProjectionSnapshotQuery, query)),
     Layer.provideMerge(Layer.succeed(ProjectionTurnRetractionRepository, repository)),
@@ -402,6 +414,10 @@ it("drives claimed convergence from interrupt through a settlement event", async
   expect(state.order).toEqual(["interrupt"]);
   expect(state.row.status).toBe("requested");
 
+  await harness.retryTick();
+  await harness.runtime.runPromise(harness.reactor.drain);
+  expect(state.order).toEqual(["interrupt"]);
+
   state.sessionStatus = "ready";
   await harness.emitDomain({
     sequence: 10,
@@ -432,6 +448,18 @@ it("drives claimed convergence from interrupt through a settlement event", async
   await harness.runtime.runPromise(harness.reactor.drain);
 
   expect(state.order).toEqual(["interrupt", "rollback", "restore", "complete"]);
+  expect(state.historyTurnCount).toBe(1);
+  expect(state.row.status).toBe("completed");
+  await stopHarness(harness);
+});
+
+it("converges when settlement is projected but the interrupt acknowledgement hangs", async () => {
+  const state = makeState("claimed");
+  state.interruptAcknowledgementHangs = true;
+  const harness = await startHarness(state);
+
+  expect(state.order).toEqual(["interrupt", "rollback", "restore", "complete"]);
+  expect(state.sessionStatus).toBe("ready");
   expect(state.historyTurnCount).toBe(1);
   expect(state.row.status).toBe("completed");
   await stopHarness(harness);

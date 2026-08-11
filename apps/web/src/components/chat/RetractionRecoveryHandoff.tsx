@@ -170,7 +170,7 @@ export function applyRetractionRecoverySignal(input: {
   return surfaceRetractionRecoveryDraft({
     requestId: input.recovery.requestId,
     sourceThreadRef: input.recovery.sourceThreadRef,
-    navigate: input.navigate,
+    ...(input.signal.kind === "source-thread-gone" ? { navigate: input.navigate } : {}),
   })
     ? "draft-surfaced"
     : null;
@@ -249,7 +249,7 @@ function PendingRetractionRecoveryWatcher(props: {
           title:
             outcome === "thread-restored"
               ? "Message restored, but the turn could not be retracted"
-              : "Recovery draft opened because the turn could not be retracted",
+              : "Recovery draft preserved because the turn could not be retracted",
           description: signal.detail,
         }),
       );
@@ -257,9 +257,9 @@ function PendingRetractionRecoveryWatcher(props: {
       toastManager.add(
         stackedThreadToast({
           type: "warning",
-          title: "Recovery draft opened",
+          title: "Recovery draft preserved",
           description:
-            "The retraction result could not be confirmed after 60 seconds, so your message was preserved in a draft.",
+            "The retraction result could not be confirmed after 60 seconds, so your message is visible as a draft in the sidebar.",
         }),
       );
     }

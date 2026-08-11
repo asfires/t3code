@@ -295,7 +295,7 @@ export function handoffCompletedFirstMessageRetraction(input: {
 export function surfaceRetractionRecoveryDraft(input: {
   requestId: CommandId;
   sourceThreadRef: ScopedThreadRef;
-  navigate: (input: {
+  navigate?: (input: {
     to: "/draft/$draftId";
     params: { draftId: DraftId };
     replace: true;
@@ -327,10 +327,12 @@ export function surfaceRetractionRecoveryDraft(input: {
     hidden: false,
   });
   useRetractionRecoveryStore.getState().forget(input.requestId);
-  void input.navigate({
-    to: "/draft/$draftId",
-    params: { draftId: recovery.draftId },
-    replace: true,
-  });
+  if (input.navigate) {
+    void input.navigate({
+      to: "/draft/$draftId",
+      params: { draftId: recovery.draftId },
+      replace: true,
+    });
+  }
   return true;
 }

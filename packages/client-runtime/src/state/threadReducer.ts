@@ -12,6 +12,8 @@ import type {
   OrchestrationThreadActivity,
   TurnId,
 } from "@t3tools/contracts";
+import { CheckpointRef } from "@t3tools/contracts";
+import * as Encoding from "effect/Encoding";
 
 export type ThreadDetailReducerResult =
   | { readonly kind: "updated"; readonly thread: OrchestrationThread }
@@ -34,6 +36,9 @@ const activityOrder = O.combineAll<OrchestrationThreadActivity>([
   O.mapInput(O.String, (a) => a.createdAt),
   O.mapInput(O.String, (a) => a.id),
 ]);
+
+const checkpointRefForThreadTurn = (threadId: string, turnCount: number) =>
+  CheckpointRef.make(`refs/t3/checkpoints/${Encoding.encodeBase64Url(threadId)}/turn/${turnCount}`);
 
 /**
  * Matches the validity rule in `deriveLatestContextWindowSnapshot` (and the
@@ -258,23 +263,45 @@ export function applyThreadDetailEvent(
       };
 
     case "thread.turn-interrupt-requested": {
-      if (event.payload.turnId === undefined) {
-        return { kind: "unchanged" };
-      }
       const latestTurn = thread.latestTurn;
-      if (latestTurn === null || latestTurn.turnId !== event.payload.turnId) {
+      const interruptsLatestTurn =
+        event.payload.turnId !== undefined && latestTurn?.turnId === event.payload.turnId;
+      if (!interruptsLatestTurn && event.payload.retraction === undefined) {
         return { kind: "unchanged" };
       }
       return {
         kind: "updated",
         thread: {
           ...thread,
-          latestTurn: {
-            ...latestTurn,
-            state: "interrupted",
-            startedAt: latestTurn.startedAt ?? event.payload.createdAt,
-            completedAt: latestTurn.completedAt ?? event.payload.createdAt,
-          },
+          latestTurn: interruptsLatestTurn
+            ? {
+                ...latestTurn,
+                state: "interrupted",
+                startedAt: latestTurn.startedAt ?? event.payload.createdAt,
+                completedAt: latestTurn.completedAt ?? event.payload.createdAt,
+              }
+            : latestTurn,
+          ...(event.payload.retraction !== undefined
+            ? {
+                turnRetraction: {
+                  requestId: event.payload.retraction.requestId,
+                  messageId: event.payload.retraction.messageId,
+                  baselineTurnCount: event.payload.retraction.baselineTurnCount,
+                  baselineCheckpointRef: checkpointRefForThreadTurn(
+                    event.payload.threadId,
+                    event.payload.retraction.baselineTurnCount,
+                  ),
+                  targetTurnId: event.payload.retraction.targetTurnId,
+                  providerSendClaimed: false,
+                  providerSendState: "unclaimed" as const,
+                  firstUserMessage: event.payload.retraction.firstUserMessage,
+                  requestedAt: event.payload.createdAt,
+                  status: "requested" as const,
+                  completedAt: null,
+                  failedAt: null,
+                },
+              }
+            : {}),
           updatedAt: event.occurredAt,
         },
       };
@@ -558,6 +585,30 @@ export function applyThreadDetailEvent(
                   completedAt: latestCheckpoint.completedAt,
                   assistantMessageId: latestCheckpoint.assistantMessageId ?? null,
                 },
+          ...(event.payload.retraction !== undefined
+            ? {
+                turnRetraction: {
+                  requestId: event.payload.retraction.requestId,
+                  messageId: event.payload.retraction.messageId,
+                  baselineTurnCount: event.payload.turnCount,
+                  baselineCheckpointRef: checkpointRefForThreadTurn(
+                    event.payload.threadId,
+                    event.payload.turnCount,
+                  ),
+                  targetTurnId: event.payload.retraction.turnId,
+                  providerSendClaimed: thread.turnRetraction?.providerSendClaimed ?? false,
+                  providerSendState: thread.turnRetraction?.providerSendState ?? "unclaimed",
+                  firstUserMessage: event.payload.retraction.firstUserMessage,
+                  requestedAt:
+                    thread.turnRetraction?.requestId === event.payload.retraction.requestId
+                      ? thread.turnRetraction.requestedAt
+                      : event.payload.retraction.completedAt,
+                  status: "completed" as const,
+                  completedAt: event.payload.retraction.completedAt,
+                  failedAt: null,
+                },
+              }
+            : {}),
           updatedAt: event.occurredAt,
         },
       };
@@ -566,6 +617,14 @@ export function applyThreadDetailEvent(
     // ── Activities ──────────────────────────────────────────────────
     case "thread.activity-appended": {
       const activity = event.payload.activity;
+      const failedRetractionRequestId =
+        activity.kind === "turn.retract.failed" &&
+        typeof activity.payload === "object" &&
+        activity.payload !== null &&
+        "requestId" in activity.payload &&
+        typeof activity.payload.requestId === "string"
+          ? activity.payload.requestId
+          : null;
       // A resolvable context-window update supersedes earlier resolvable ones
       // for the same turn: consumers only read the latest value (walking the
       // array backwards), and providers stream these updates continuously, so
@@ -592,7 +651,22 @@ export function applyThreadDetailEvent(
 
       return {
         kind: "updated",
-        thread: { ...thread, activities, updatedAt: event.occurredAt },
+        thread: {
+          ...thread,
+          activities,
+          ...(failedRetractionRequestId !== null &&
+          thread.turnRetraction?.requestId === failedRetractionRequestId
+            ? {
+                turnRetraction: {
+                  ...thread.turnRetraction,
+                  status: "failed" as const,
+                  completedAt: null,
+                  failedAt: activity.createdAt,
+                },
+              }
+            : {}),
+          updatedAt: event.occurredAt,
+        },
       };
     }
 

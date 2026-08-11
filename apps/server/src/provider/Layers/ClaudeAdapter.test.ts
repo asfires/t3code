@@ -3653,6 +3653,76 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("rolls a resumed session back to its lifetime turn boundary", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const resumeSessionId = "550e8400-e29b-41d4-a716-446655440000";
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        resumeCursor: {
+          threadId: THREAD_ID,
+          resume: resumeSessionId,
+          resumeSessionAt: "assistant-before-restart",
+          turnCount: 4,
+        },
+      });
+
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "fifth",
+        attachments: [],
+      });
+      const completedFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "turn.completed",
+      ).pipe(Stream.runHead, Effect.forkChild);
+      harness.query.emit({
+        type: "assistant",
+        session_id: resumeSessionId,
+        uuid: "assistant-fifth",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-fifth",
+          content: [{ type: "text", text: "fifth response" }],
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: resumeSessionId,
+        uuid: "result-fifth",
+      } as unknown as SDKMessage);
+      yield* Fiber.join(completedFiber);
+
+      const beforeRollback = yield* adapter.listSessions();
+      assert.equal(
+        (beforeRollback[0]?.resumeCursor as { turnCount?: number } | undefined)?.turnCount,
+        5,
+      );
+
+      assert.isDefined(adapter.rollbackThreadTo);
+      if (!adapter.rollbackThreadTo) return;
+      const rolledBack = yield* adapter.rollbackThreadTo(session.threadId, 4);
+      assert.equal(rolledBack.turns.length, 0);
+
+      const afterRollback = yield* adapter.listSessions();
+      assert.deepEqual(afterRollback[0]?.resumeCursor, {
+        threadId: THREAD_ID,
+        resume: resumeSessionId,
+        resumeSessionAt: "assistant-before-restart",
+        turnCount: 4,
+      });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("clears resume state at turn zero and recycles before the next prompt", () => {
     const harness = makeHarness({
       queryFactory: () => new FakeClaudeQuery(),

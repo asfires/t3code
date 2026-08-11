@@ -155,6 +155,7 @@ describe("retraction recovery handoff", () => {
 
   it("restores into an existing source composer for a correlated failed row", async () => {
     const recovery = await seedRecovery();
+    const navigate = vi.fn();
     const signal = resolveRetractionRecoverySignal({
       recovery,
       liveCompletion: null,
@@ -175,9 +176,10 @@ describe("retraction recovery handoff", () => {
     });
 
     expect(signal).toMatchObject({ kind: "failed", sourceThreadExists: true });
-    expect(signal && applyRetractionRecoverySignal({ recovery, signal, navigate: vi.fn() })).toBe(
+    expect(signal && applyRetractionRecoverySignal({ recovery, signal, navigate })).toBe(
       "thread-restored",
     );
+    expect(navigate).not.toHaveBeenCalled();
     expect(useComposerDraftStore.getState().getComposerDraft(sourceThreadRef)?.prompt).toBe(
       "preserve this message",
     );
@@ -217,6 +219,7 @@ describe("retraction recovery handoff", () => {
     expect(signal && applyRetractionRecoverySignal({ recovery, signal, navigate })).toBe(
       "draft-surfaced",
     );
+    expect(navigate).not.toHaveBeenCalled();
     expect(useComposerDraftStore.getState().getComposerDraft(sourceThreadRef)).toBeNull();
     expect(useComposerDraftStore.getState().getDraftSession(draftId)?.hidden).toBe(false);
   });
@@ -240,6 +243,7 @@ describe("retraction recovery handoff", () => {
     expect(signal && applyRetractionRecoverySignal({ recovery, signal, navigate })).toBe(
       "draft-surfaced",
     );
+    expect(navigate).not.toHaveBeenCalled();
     expect(useComposerDraftStore.getState().getDraftSession(draftId)?.hidden).toBe(false);
   });
 

@@ -257,7 +257,10 @@ import {
 } from "./chat/chatEscapeTrigger";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { shouldRenderEmptyThreadHero } from "./chat/emptyThreadHero";
-import { useRetractionRecoveryStore } from "./chat/lastUserMessageRecovery";
+import {
+  findCorrelatedRetractionFailure,
+  useRetractionRecoveryStore,
+} from "./chat/lastUserMessageRecovery";
 import { useLastUserMessageRetraction } from "./chat/useLastUserMessageRetraction";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
@@ -1507,8 +1510,18 @@ function ChatViewContent(props: ChatViewProps) {
   // depend on which route is mounted.
   const isServerThread = activeServerThread !== null;
   const activeThread = activeServerThread ?? localDraftThread;
+  const retractionFailureDetail =
+    activeServerThread?.turnRetraction?.status === "failed"
+      ? findCorrelatedRetractionFailure(
+          activeServerThread.activities,
+          activeServerThread.turnRetraction.requestId,
+        )
+      : null;
   const threadError = isServerThread
-    ? (localServerError ?? activeServerThread?.session?.lastError ?? null)
+    ? (localServerError ??
+      retractionFailureDetail ??
+      activeServerThread?.session?.lastError ??
+      null)
     : localDraftError;
   const runtimeMode = composerRuntimeMode ?? activeThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE;
   // Plan mode is legacy (Settings → Beta). With the flag off the effective

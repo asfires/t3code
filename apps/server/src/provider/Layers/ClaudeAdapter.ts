@@ -211,6 +211,8 @@ interface ClaudeTaskAgentState {
 
 interface ClaudeSessionContext {
   session: ProviderSession;
+  /** Lifetime turns already represented by the cursor used to start this SDK session. */
+  sessionBaseTurnCount: number;
   readonly promptQueue: Queue.Queue<PromptQueueItem>;
   readonly query: ClaudeQueryRuntime;
   streamFiber: Fiber.Fiber<void, Error> | undefined;
@@ -1747,7 +1749,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       threadId,
       ...(context.resumeSessionId ? { resume: context.resumeSessionId } : {}),
       ...(context.lastAssistantUuid ? { resumeSessionAt: context.lastAssistantUuid } : {}),
-      turnCount: context.turns.length,
+      turnCount: context.sessionBaseTurnCount + context.turns.length,
     };
 
     context.session = {
@@ -4207,6 +4209,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
       const context: ClaudeSessionContext = {
         session,
+        sessionBaseTurnCount: resumeState?.turnCount ?? 0,
         promptQueue,
         query: queryRuntime,
         streamFiber: undefined,
@@ -4503,10 +4506,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const nextLength = Math.max(0, context.turns.length - numTurns);
       context.turns.splice(nextLength);
       const retainedTurn = context.turns.at(-1);
-      context.lastAssistantUuid = retainedTurn?.lastAssistantUuid;
-      if (!retainedTurn) {
-        context.resumeSessionId = undefined;
-      }
+      const sessionBase = readClaudeResumeState(context.restartInput.resumeCursor);
+      context.lastAssistantUuid = retainedTurn?.lastAssistantUuid ?? sessionBase?.resumeSessionAt;
+      context.resumeSessionId = retainedTurn ? context.resumeSessionId : sessionBase?.resume;
       context.recycleBeforeNextTurn = true;
       yield* updateResumeCursor(context);
       return yield* snapshotThread(context);
@@ -4524,23 +4526,34 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         issue: "retainedTurnCount must be an integer >= 0.",
       });
     }
-    if (context.turns.length < retainedTurnCount) {
+    const lifetimeTurnCount = context.sessionBaseTurnCount + context.turns.length;
+    if (lifetimeTurnCount < retainedTurnCount) {
       return yield* new ProviderAdapterValidationError({
         provider: PROVIDER,
         operation: "rollbackThreadTo",
-        issue: `Provider history has ${context.turns.length} turns, below retained boundary ${retainedTurnCount}.`,
+        issue: `Provider history has ${lifetimeTurnCount} turns, below retained boundary ${retainedTurnCount}.`,
       });
     }
-    const remainingDelta = context.turns.length - retainedTurnCount;
-    if (remainingDelta > 0) {
-      yield* rollbackThread(threadId, remainingDelta);
+    const delta = lifetimeTurnCount - retainedTurnCount;
+    const sessionLocalTurnCount = context.turns.length;
+    if (delta > 0) {
+      yield* rollbackThread(threadId, Math.min(delta, sessionLocalTurnCount));
+    }
+    if (delta > sessionLocalTurnCount) {
+      // The requested boundary predates this SDK session. Claude only gives us
+      // the cursor that opened the session, not intermediate historical
+      // watermarks, so retain that oldest available resume position while
+      // moving the logical lifetime boundary to the requested count.
+      context.sessionBaseTurnCount = retainedTurnCount;
+      yield* updateResumeCursor(context);
     }
     const snapshot = yield* snapshotThread(context);
-    if (snapshot.turns.length !== retainedTurnCount) {
+    const resultingLifetimeTurnCount = context.sessionBaseTurnCount + snapshot.turns.length;
+    if (resultingLifetimeTurnCount !== retainedTurnCount) {
       return yield* new ProviderAdapterRequestError({
         provider: PROVIDER,
         method: "thread/rollback-to",
-        detail: `Expected ${retainedTurnCount} retained turns, found ${snapshot.turns.length}.`,
+        detail: `Expected ${retainedTurnCount} retained turns, found ${resultingLifetimeTurnCount}.`,
       });
     }
     return snapshot;
