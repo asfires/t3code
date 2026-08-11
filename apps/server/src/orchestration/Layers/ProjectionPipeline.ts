@@ -1,5 +1,6 @@
 import {
   ApprovalRequestId,
+  CommandId,
   type ChatAttachment,
   type OrchestrationEvent,
   type OrchestrationSessionStatus,
@@ -10,6 +11,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
@@ -42,7 +44,9 @@ import { ProjectionThreadMessageRepositoryLive } from "../../persistence/Layers/
 import { ProjectionThreadProposedPlanRepositoryLive } from "../../persistence/Layers/ProjectionThreadProposedPlans.ts";
 import { ProjectionThreadSessionRepositoryLive } from "../../persistence/Layers/ProjectionThreadSessions.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
+import { ProjectionTurnRetractionRepositoryLive } from "../../persistence/Layers/ProjectionTurnRetractions.ts";
 import { ProjectionThreadRepositoryLive } from "../../persistence/Layers/ProjectionThreads.ts";
+import { ProjectionTurnRetractionRepository } from "../../persistence/Services/ProjectionTurnRetractions.ts";
 import { ServerConfig } from "../../config.ts";
 import {
   OrchestrationProjectionPipeline,
@@ -54,6 +58,7 @@ import {
   parseThreadSegmentFromAttachmentId,
   toSafeThreadAttachmentSegment,
 } from "../../attachmentStore.ts";
+import { checkpointRefForThreadTurn } from "../../checkpointing/Utils.ts";
 
 export const ORCHESTRATION_PROJECTOR_NAMES = {
   projects: "projection.projects",
@@ -65,10 +70,15 @@ export const ORCHESTRATION_PROJECTOR_NAMES = {
   threadTurns: "projection.thread-turns",
   checkpoints: "projection.checkpoints",
   pendingApprovals: "projection.pending-approvals",
+  turnRetractions: "projection.turn-retractions",
 } as const;
 
 type ProjectorName =
   (typeof ORCHESTRATION_PROJECTOR_NAMES)[keyof typeof ORCHESTRATION_PROJECTOR_NAMES];
+
+const decodeTurnRetractionFailurePayload = Schema.decodeUnknownOption(
+  Schema.Struct({ requestId: CommandId }),
+);
 
 /**
  * Turn state to settle still-running turns with when their session leaves the
@@ -480,6 +490,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     const projectionThreadSessionRepository = yield* ProjectionThreadSessionRepository;
     const projectionTurnRepository = yield* ProjectionTurnRepository;
     const projectionPendingApprovalRepository = yield* ProjectionPendingApprovalRepository;
+    const projectionTurnRetractionRepository = yield* ProjectionTurnRetractionRepository;
 
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -1606,6 +1617,60 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       }
     });
 
+    const applyTurnRetractionsProjection: ProjectorDefinition["apply"] = Effect.fn(
+      "applyTurnRetractionsProjection",
+    )(function* (event, _attachmentSideEffects) {
+      switch (event.type) {
+        case "thread.turn-interrupt-requested": {
+          const retraction = event.payload.retraction;
+          if (retraction === undefined) return;
+          yield* projectionTurnRetractionRepository.upsertPending({
+            requestId: retraction.requestId,
+            threadId: event.payload.threadId,
+            messageId: retraction.messageId,
+            baselineTurnCount: retraction.baselineTurnCount,
+            baselineCheckpointRef: checkpointRefForThreadTurn(
+              event.payload.threadId,
+              retraction.baselineTurnCount,
+            ),
+            targetTurnId: retraction.targetTurnId,
+            providerSendClaimed: false,
+            firstUserMessage: retraction.firstUserMessage,
+            requestedAt: event.payload.createdAt,
+            status: "requested",
+            completedAt: null,
+            failedAt: null,
+          });
+          return;
+        }
+
+        case "thread.reverted": {
+          const retraction = event.payload.retraction;
+          if (retraction === undefined) return;
+          yield* projectionTurnRetractionRepository.markCompleted({
+            requestId: retraction.requestId,
+            completedAt: retraction.completedAt,
+            targetTurnId: retraction.turnId,
+          });
+          return;
+        }
+
+        case "thread.activity-appended": {
+          if (event.payload.activity.kind !== "turn.retract.failed") return;
+          const payload = decodeTurnRetractionFailurePayload(event.payload.activity.payload);
+          if (Option.isNone(payload)) return;
+          yield* projectionTurnRetractionRepository.markFailed({
+            requestId: payload.value.requestId,
+            failedAt: event.payload.activity.createdAt,
+          });
+          return;
+        }
+
+        default:
+          return;
+      }
+    });
+
     const projectors: ReadonlyArray<ProjectorDefinition> = [
       {
         name: ORCHESTRATION_PROJECTOR_NAMES.projects,
@@ -1638,6 +1703,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       {
         name: ORCHESTRATION_PROJECTOR_NAMES.pendingApprovals,
         apply: applyPendingApprovalsProjection,
+      },
+      {
+        name: ORCHESTRATION_PROJECTOR_NAMES.turnRetractions,
+        apply: applyTurnRetractionsProjection,
       },
       {
         name: ORCHESTRATION_PROJECTOR_NAMES.threads,
@@ -1745,5 +1814,6 @@ export const OrchestrationProjectionPipelineLive = Layer.effect(
   Layer.provideMerge(ProjectionThreadSessionRepositoryLive),
   Layer.provideMerge(ProjectionTurnRepositoryLive),
   Layer.provideMerge(ProjectionPendingApprovalRepositoryLive),
+  Layer.provideMerge(ProjectionTurnRetractionRepositoryLive),
   Layer.provideMerge(ProjectionStateRepositoryLive),
 );

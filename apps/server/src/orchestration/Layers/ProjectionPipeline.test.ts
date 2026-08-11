@@ -24,6 +24,7 @@ import {
   SqlitePersistenceMemory,
 } from "../../persistence/Layers/Sqlite.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
+import { ProjectionTurnRetractionRepository } from "../../persistence/Services/ProjectionTurnRetractions.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import {
@@ -240,6 +241,147 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
     }),
   );
 });
+
+it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-retraction-projection-test-")))(
+  "turn retraction projection",
+  (it) => {
+    it.effect(
+      "replays pending, failed, and completed tombstones and exposes pending startup scan",
+      () =>
+        Effect.gen(function* () {
+          const pipeline = yield* OrchestrationProjectionPipeline;
+          const eventStore = yield* OrchestrationEventStore;
+          const retractions = yield* ProjectionTurnRetractionRepository;
+          const threadId = ThreadId.make("thread-retraction");
+          const requestedAt = "2026-01-01T00:00:00.000Z";
+
+          yield* eventStore.append({
+            type: "thread.turn-interrupt-requested",
+            eventId: EventId.make("evt-retract-requested-1"),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: requestedAt,
+            commandId: CommandId.make("cmd-retract-1"),
+            causationEventId: null,
+            correlationId: CommandId.make("cmd-retract-1"),
+            metadata: {},
+            payload: {
+              threadId,
+              turnId: TurnId.make("turn-3"),
+              createdAt: requestedAt,
+              retraction: {
+                requestId: CommandId.make("cmd-retract-1"),
+                messageId: MessageId.make("message-3"),
+                targetTurnId: TurnId.make("turn-3"),
+                baselineTurnCount: 2,
+                firstUserMessage: false,
+              },
+            },
+          });
+          yield* pipeline.bootstrap;
+
+          const pending = yield* retractions.listPending();
+          assert.equal(pending.length, 1);
+          assert.equal(pending[0]?.requestId, CommandId.make("cmd-retract-1"));
+          assert.equal(pending[0]?.providerSendClaimed, false);
+          assert.equal(pending[0]?.status, "requested");
+          assert.equal(pending[0]?.baselineTurnCount, 2);
+          assert.match(pending[0]?.baselineCheckpointRef ?? "", /\/turn\/2$/);
+
+          yield* eventStore.append({
+            type: "thread.activity-appended",
+            eventId: EventId.make("evt-retract-failed-1"),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: "2026-01-01T00:00:01.000Z",
+            commandId: CommandId.make("cmd-retract-failed-1"),
+            causationEventId: null,
+            correlationId: CommandId.make("cmd-retract-1"),
+            metadata: {},
+            payload: {
+              threadId,
+              activity: {
+                id: EventId.make("activity-retract-failed-1"),
+                tone: "error",
+                kind: "turn.retract.failed",
+                summary: "Could not retract turn",
+                payload: { requestId: CommandId.make("cmd-retract-1") },
+                turnId: TurnId.make("turn-3"),
+                createdAt: "2026-01-01T00:00:01.000Z",
+              },
+            },
+          });
+          yield* pipeline.bootstrap;
+
+          const failed = yield* retractions.getByRequestId({
+            requestId: CommandId.make("cmd-retract-1"),
+          });
+          assert.equal(failed._tag, "Some");
+          if (failed._tag === "Some") {
+            assert.equal(failed.value.status, "failed");
+            assert.equal(failed.value.failedAt, "2026-01-01T00:00:01.000Z");
+          }
+          assert.equal((yield* retractions.listPending()).length, 0);
+
+          yield* eventStore.append({
+            type: "thread.turn-interrupt-requested",
+            eventId: EventId.make("evt-retract-requested-2"),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: "2026-01-01T00:00:02.000Z",
+            commandId: CommandId.make("cmd-retract-2"),
+            causationEventId: null,
+            correlationId: CommandId.make("cmd-retract-2"),
+            metadata: {},
+            payload: {
+              threadId,
+              createdAt: "2026-01-01T00:00:02.000Z",
+              retraction: {
+                requestId: CommandId.make("cmd-retract-2"),
+                messageId: MessageId.make("message-4"),
+                targetTurnId: null,
+                baselineTurnCount: 0,
+                firstUserMessage: true,
+              },
+            },
+          });
+          yield* eventStore.append({
+            type: "thread.reverted",
+            eventId: EventId.make("evt-retract-completed-2"),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: "2026-01-01T00:00:03.000Z",
+            commandId: CommandId.make("cmd-retract-complete-2"),
+            causationEventId: null,
+            correlationId: CommandId.make("cmd-retract-2"),
+            metadata: {},
+            payload: {
+              threadId,
+              turnCount: 0,
+              retraction: {
+                requestId: CommandId.make("cmd-retract-2"),
+                messageId: MessageId.make("message-4"),
+                turnId: null,
+                firstUserMessage: true,
+                completedAt: "2026-01-01T00:00:03.000Z",
+              },
+            },
+          });
+          yield* pipeline.bootstrap;
+
+          const completed = yield* retractions.getByRequestId({
+            requestId: CommandId.make("cmd-retract-2"),
+          });
+          assert.equal(completed._tag, "Some");
+          if (completed._tag === "Some") {
+            assert.equal(completed.value.status, "completed");
+            assert.equal(completed.value.completedAt, "2026-01-01T00:00:03.000Z");
+          }
+          assert.equal((yield* retractions.listPending()).length, 0);
+        }),
+    );
+  },
+);
 
 it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-base-")))(
   "OrchestrationProjectionPipeline",

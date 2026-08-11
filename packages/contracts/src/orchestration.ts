@@ -361,6 +361,24 @@ export const ThreadTitleRegeneration = Schema.Struct({
 });
 export type ThreadTitleRegeneration = typeof ThreadTitleRegeneration.Type;
 
+export const ThreadTurnRetractionStatus = Schema.Literals(["requested", "completed", "failed"]);
+export type ThreadTurnRetractionStatus = typeof ThreadTurnRetractionStatus.Type;
+
+export const OrchestrationThreadTurnRetraction = Schema.Struct({
+  requestId: CommandId,
+  messageId: MessageId,
+  baselineTurnCount: NonNegativeInt,
+  baselineCheckpointRef: CheckpointRef,
+  targetTurnId: Schema.NullOr(TurnId),
+  providerSendClaimed: Schema.Boolean,
+  firstUserMessage: Schema.Boolean,
+  requestedAt: IsoDateTime,
+  status: ThreadTurnRetractionStatus,
+  completedAt: Schema.NullOr(IsoDateTime),
+  failedAt: Schema.NullOr(IsoDateTime),
+});
+export type OrchestrationThreadTurnRetraction = typeof OrchestrationThreadTurnRetraction.Type;
+
 export const OrchestrationThread = Schema.Struct({
   id: ThreadId,
   projectId: ProjectId,
@@ -397,6 +415,8 @@ export const OrchestrationThread = Schema.Struct({
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   // Pending-only state. Optional so older servers remain compatible.
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
+  // Durable retract intent. Optional so snapshots from older servers remain compatible.
+  turnRetraction: Schema.optional(Schema.NullOr(OrchestrationThreadTurnRetraction)),
   deletedAt: Schema.NullOr(IsoDateTime),
   messages: Schema.Array(OrchestrationMessage),
   proposedPlans: Schema.Array(OrchestrationProposedPlan).pipe(
@@ -856,6 +876,14 @@ const ThreadTurnInterruptCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+export const ThreadTurnRetractCommand = Schema.Struct({
+  type: Schema.Literal("thread.turn.retract"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  messageId: MessageId,
+  createdAt: IsoDateTime,
+});
+
 const ThreadApprovalRespondCommand = Schema.Struct({
   type: Schema.Literal("thread.approval.respond"),
   commandId: CommandId,
@@ -915,6 +943,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadInteractionModeSetCommand,
   ThreadTurnStartCommand,
   ThreadTurnInterruptCommand,
+  ThreadTurnRetractCommand,
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
@@ -943,6 +972,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadInteractionModeSetCommand,
   ClientThreadTurnStartCommand,
   ThreadTurnInterruptCommand,
+  ThreadTurnRetractCommand,
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
@@ -1247,6 +1277,15 @@ export const ThreadTurnInterruptRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   turnId: Schema.optional(TurnId),
   createdAt: IsoDateTime,
+  retraction: Schema.optional(
+    Schema.Struct({
+      requestId: CommandId,
+      messageId: MessageId,
+      targetTurnId: Schema.NullOr(TurnId),
+      baselineTurnCount: NonNegativeInt,
+      firstUserMessage: Schema.Boolean,
+    }),
+  ),
 });
 
 export const ThreadApprovalResponseRequestedPayload = Schema.Struct({
@@ -1272,6 +1311,15 @@ export const ThreadCheckpointRevertRequestedPayload = Schema.Struct({
 export const ThreadRevertedPayload = Schema.Struct({
   threadId: ThreadId,
   turnCount: NonNegativeInt,
+  retraction: Schema.optional(
+    Schema.Struct({
+      requestId: CommandId,
+      messageId: MessageId,
+      turnId: Schema.NullOr(TurnId),
+      firstUserMessage: Schema.Boolean,
+      completedAt: IsoDateTime,
+    }),
+  ),
 });
 
 export const ThreadSessionStopRequestedPayload = Schema.Struct({

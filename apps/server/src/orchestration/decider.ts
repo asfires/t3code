@@ -142,6 +142,43 @@ function threadHasQueuedTurnStart(
   );
 }
 
+function newestUserMessage(thread: OrchestrationReadModel["threads"][number]) {
+  return thread.messages
+    .filter((message) => message.role === "user")
+    .toSorted(
+      (left, right) =>
+        right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id),
+    )[0];
+}
+
+function turnHasVisibleAssistantOutput(
+  thread: OrchestrationReadModel["threads"][number],
+  turnId: string,
+): boolean {
+  if (
+    thread.messages.some(
+      (message) =>
+        message.role === "assistant" && message.turnId === turnId && message.text.length > 0,
+    )
+  ) {
+    return true;
+  }
+  if (
+    thread.activities.some(
+      (activity) =>
+        activity.turnId === turnId &&
+        activity.kind !== "task.progress" &&
+        activity.kind !== "task.started",
+    )
+  ) {
+    return true;
+  }
+  if (thread.proposedPlans.some((plan) => plan.turnId === turnId)) {
+    return true;
+  }
+  return thread.checkpoints.some((checkpoint) => checkpoint.turnId === turnId);
+}
+
 function withEventBase(
   input: Pick<OrchestrationCommand, "commandId"> & {
     readonly aggregateKind: OrchestrationEvent["aggregateKind"];
@@ -1042,6 +1079,75 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           threadId: command.threadId,
           ...(command.turnId !== undefined ? { turnId: command.turnId } : {}),
           createdAt: command.createdAt,
+        },
+      };
+    }
+
+    case "thread.turn.retract": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const latestUserMessage = newestUserMessage(thread);
+      if (latestUserMessage?.id !== command.messageId) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Message '${command.messageId}' is not the newest user message on thread '${command.threadId}'.`,
+        });
+      }
+      if (thread.turnRetraction?.status === "requested") {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' already has pending retraction '${thread.turnRetraction.requestId}'.`,
+        });
+      }
+
+      const queued = threadHasQueuedTurnStart(thread, command.createdAt);
+      const starting = thread.session?.status === "starting" && queued;
+      const targetTurnId =
+        thread.session?.status === "running" &&
+        thread.session.activeTurnId !== null &&
+        thread.latestTurn?.turnId === thread.session.activeTurnId
+          ? thread.session.activeTurnId
+          : null;
+      if (!queued && !starting && targetTurnId === null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' has no queued, starting, or matching running turn to retract.`,
+        });
+      }
+      if (targetTurnId !== null && turnHasVisibleAssistantOutput(thread, targetTurnId)) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Turn '${targetTurnId}' already has assistant-visible output and can no longer be retracted.`,
+        });
+      }
+
+      const baselineTurnCount = thread.checkpoints.reduce(
+        (latest, checkpoint) => Math.max(latest, checkpoint.checkpointTurnCount),
+        0,
+      );
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.turn-interrupt-requested",
+        payload: {
+          threadId: command.threadId,
+          ...(targetTurnId !== null ? { turnId: targetTurnId } : {}),
+          createdAt: command.createdAt,
+          retraction: {
+            requestId: command.commandId,
+            messageId: command.messageId,
+            targetTurnId,
+            baselineTurnCount,
+            firstUserMessage:
+              thread.messages.filter((message) => message.role === "user").length === 1,
+          },
         },
       };
     }

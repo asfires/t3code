@@ -5,6 +5,7 @@ import * as Schema from "effect/Schema";
 import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
+  ClientOrchestrationCommand,
   ModelSelection,
   OrchestrationCommand,
   OrchestrationEvent,
@@ -23,6 +24,9 @@ import {
   ThreadCreatedPayload,
   ThreadTurnDiff,
   ThreadTurnStartRequestedPayload,
+  ThreadTurnRetractCommand,
+  ThreadTurnInterruptRequestedPayload,
+  ThreadRevertedPayload,
 } from "./orchestration.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
@@ -51,8 +55,116 @@ function getOptionValue(
 }
 const decodeThreadCreatedPayload = Schema.decodeUnknownEffect(ThreadCreatedPayload);
 const decodeOrchestrationCommand = Schema.decodeUnknownEffect(OrchestrationCommand);
+const decodeClientOrchestrationCommand = Schema.decodeUnknownEffect(ClientOrchestrationCommand);
 const decodeOrchestrationEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
 const decodeThreadMetaUpdatedPayload = Schema.decodeUnknownEffect(ThreadMetaUpdatedPayload);
+const decodeThreadTurnRetractCommand = Schema.decodeUnknownEffect(ThreadTurnRetractCommand);
+const decodeThreadTurnInterruptRequestedPayload = Schema.decodeUnknownEffect(
+  ThreadTurnInterruptRequestedPayload,
+);
+const decodeThreadRevertedPayload = Schema.decodeUnknownEffect(ThreadRevertedPayload);
+const encodeThreadTurnInterruptRequestedPayload = Schema.encodeUnknownEffect(
+  ThreadTurnInterruptRequestedPayload,
+);
+const encodeThreadRevertedPayload = Schema.encodeUnknownEffect(ThreadRevertedPayload);
+
+it.effect("decodes thread.turn.retract in the client-dispatchable command union", () =>
+  Effect.gen(function* () {
+    const command = yield* decodeThreadTurnRetractCommand({
+      type: "thread.turn.retract",
+      commandId: "cmd-retract",
+      threadId: "thread-1",
+      messageId: "message-1",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    const unionCommand = yield* decodeClientOrchestrationCommand(command);
+    assert.strictEqual(unionCommand.type, "thread.turn.retract");
+  }),
+);
+
+it.effect("decodes historical interrupt and reverted payloads without retraction metadata", () =>
+  Effect.gen(function* () {
+    const interrupt = yield* decodeThreadTurnInterruptRequestedPayload({
+      threadId: "thread-1",
+      turnId: "turn-1",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    const reverted = yield* decodeThreadRevertedPayload({ threadId: "thread-1", turnCount: 0 });
+    assert.strictEqual(interrupt.retraction, undefined);
+    assert.strictEqual(reverted.retraction, undefined);
+
+    const storedInterrupt = yield* decodeOrchestrationEvent({
+      sequence: 1,
+      eventId: "event-interrupt-old",
+      aggregateKind: "thread",
+      aggregateId: "thread-1",
+      occurredAt: "2026-01-01T00:00:00.000Z",
+      commandId: "cmd-interrupt-old",
+      causationEventId: null,
+      correlationId: "cmd-interrupt-old",
+      metadata: {},
+      type: "thread.turn-interrupt-requested",
+      payload: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    });
+    assert.strictEqual(storedInterrupt.type, "thread.turn-interrupt-requested");
+  }),
+);
+
+it.effect("roundtrips additive retraction metadata on interrupt and reverted payloads", () =>
+  Effect.gen(function* () {
+    const interrupt = yield* decodeThreadTurnInterruptRequestedPayload({
+      threadId: "thread-1",
+      turnId: "turn-1",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      retraction: {
+        requestId: "cmd-retract",
+        messageId: "message-1",
+        targetTurnId: "turn-1",
+        baselineTurnCount: 2,
+        firstUserMessage: false,
+      },
+    });
+    assert.deepStrictEqual(yield* encodeThreadTurnInterruptRequestedPayload(interrupt), {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      retraction: {
+        requestId: "cmd-retract",
+        messageId: "message-1",
+        targetTurnId: "turn-1",
+        baselineTurnCount: 2,
+        firstUserMessage: false,
+      },
+    });
+
+    const reverted = yield* decodeThreadRevertedPayload({
+      threadId: "thread-1",
+      turnCount: 2,
+      retraction: {
+        requestId: "cmd-retract",
+        messageId: "message-1",
+        turnId: "turn-1",
+        firstUserMessage: false,
+        completedAt: "2026-01-01T00:00:05.000Z",
+      },
+    });
+    assert.deepStrictEqual(yield* encodeThreadRevertedPayload(reverted), {
+      threadId: "thread-1",
+      turnCount: 2,
+      retraction: {
+        requestId: "cmd-retract",
+        messageId: "message-1",
+        turnId: "turn-1",
+        firstUserMessage: false,
+        completedAt: "2026-01-01T00:00:05.000Z",
+      },
+    });
+  }),
+);
 
 it.effect("parses turn diff input when fromTurnCount <= toTurnCount", () =>
   Effect.gen(function* () {

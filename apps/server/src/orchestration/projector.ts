@@ -8,6 +8,8 @@ import {
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
+import { checkpointRefForThreadTurn } from "../checkpointing/Utils.ts";
+
 import { toProjectorDecodeError, type OrchestrationProjectorDecodeError } from "./Errors.ts";
 import {
   MessageSentPayloadSchema,
@@ -32,6 +34,7 @@ import {
   ThreadUnsnoozedPayload,
   ThreadRevertedPayload,
   ThreadSessionSetPayload,
+  ThreadTurnInterruptRequestedPayload,
   ThreadTurnDiffCompletedPayload,
 } from "./Schemas.ts";
 
@@ -612,6 +615,42 @@ export function projectEvent(
         };
       });
 
+    case "thread.turn-interrupt-requested":
+      return decodeForEvent(
+        ThreadTurnInterruptRequestedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => {
+          if (payload.retraction === undefined) return nextBase;
+          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          if (!thread) return nextBase;
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              turnRetraction: {
+                requestId: payload.retraction.requestId,
+                messageId: payload.retraction.messageId,
+                baselineTurnCount: payload.retraction.baselineTurnCount,
+                baselineCheckpointRef: checkpointRefForThreadTurn(
+                  payload.threadId,
+                  payload.retraction.baselineTurnCount,
+                ),
+                targetTurnId: payload.retraction.targetTurnId,
+                providerSendClaimed: false,
+                firstUserMessage: payload.retraction.firstUserMessage,
+                requestedAt: payload.createdAt,
+                status: "requested",
+                completedAt: null,
+                failedAt: null,
+              },
+              updatedAt: event.occurredAt,
+            }),
+          };
+        }),
+      );
+
     case "thread.proposed-plan-upserted":
       return Effect.gen(function* () {
         const payload = yield* decodeForEvent(
@@ -764,6 +803,29 @@ export function projectEvent(
               proposedPlans,
               activities,
               latestTurn,
+              ...(payload.retraction !== undefined
+                ? {
+                    turnRetraction: {
+                      requestId: payload.retraction.requestId,
+                      messageId: payload.retraction.messageId,
+                      baselineTurnCount: payload.turnCount,
+                      baselineCheckpointRef: checkpointRefForThreadTurn(
+                        payload.threadId,
+                        payload.turnCount,
+                      ),
+                      targetTurnId: payload.retraction.turnId,
+                      providerSendClaimed: false,
+                      firstUserMessage: payload.retraction.firstUserMessage,
+                      requestedAt:
+                        thread.turnRetraction?.requestId === payload.retraction.requestId
+                          ? thread.turnRetraction.requestedAt
+                          : payload.retraction.completedAt,
+                      status: "completed" as const,
+                      completedAt: payload.retraction.completedAt,
+                      failedAt: null,
+                    },
+                  }
+                : {}),
               updatedAt: event.occurredAt,
             }),
           };
@@ -790,10 +852,30 @@ export function projectEvent(
             .toSorted(compareThreadActivities)
             .slice(-500);
 
+          const failedRetractionRequestId =
+            payload.activity.kind === "turn.retract.failed" &&
+            typeof payload.activity.payload === "object" &&
+            payload.activity.payload !== null &&
+            "requestId" in payload.activity.payload &&
+            typeof payload.activity.payload.requestId === "string"
+              ? payload.activity.payload.requestId
+              : null;
+
           return {
             ...nextBase,
             threads: updateThread(nextBase.threads, payload.threadId, {
               activities,
+              ...(failedRetractionRequestId !== null &&
+              thread.turnRetraction?.requestId === failedRetractionRequestId
+                ? {
+                    turnRetraction: {
+                      ...thread.turnRetraction,
+                      status: "failed" as const,
+                      completedAt: null,
+                      failedAt: payload.activity.createdAt,
+                    },
+                  }
+                : {}),
               updatedAt: event.occurredAt,
             }),
           };
