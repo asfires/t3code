@@ -216,6 +216,7 @@ const PersistedDraftThreadState = Schema.Struct({
   worktreePath: Schema.NullOr(Schema.String),
   envMode: DraftThreadEnvModeSchema,
   startFromOrigin: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  hidden: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   promotedTo: Schema.optionalKey(
     Schema.NullOr(
       Schema.Struct({
@@ -320,6 +321,7 @@ export interface DraftSessionState {
   worktreePath: string | null;
   envMode: DraftThreadEnvMode;
   startFromOrigin: boolean;
+  hidden: boolean;
   promotedTo?: ScopedThreadRef | null;
 }
 
@@ -370,6 +372,22 @@ interface ComposerDraftStoreState {
   getDraftThread: (threadRef: ComposerThreadTarget) => DraftThreadState | null;
   listDraftThreadKeys: () => string[];
   hasDraftThreadsInEnvironment: (environmentId: EnvironmentId) => boolean;
+  /** Creates draft metadata without making it the project's active draft. */
+  createUnmappedDraftSession: (
+    projectRef: ScopedProjectRef,
+    draftId: DraftId,
+    options: {
+      threadId: ThreadId;
+      branch?: string | null;
+      worktreePath?: string | null;
+      createdAt?: string;
+      envMode?: DraftThreadEnvMode;
+      startFromOrigin?: boolean;
+      runtimeMode?: RuntimeMode;
+      interactionMode?: ProviderInteractionMode;
+      hidden?: boolean;
+    },
+  ) => void;
   /** Creates or updates the draft session tracked for a logical project. */
   setLogicalProjectDraftThreadId: (
     logicalProjectKey: string,
@@ -384,6 +402,7 @@ interface ComposerDraftStoreState {
       startFromOrigin?: boolean;
       runtimeMode?: RuntimeMode;
       interactionMode?: ProviderInteractionMode;
+      hidden?: boolean;
     },
   ) => void;
   /** Creates or updates the draft session tracked for a concrete project ref. */
@@ -399,6 +418,7 @@ interface ComposerDraftStoreState {
       startFromOrigin?: boolean;
       runtimeMode?: RuntimeMode;
       interactionMode?: ProviderInteractionMode;
+      hidden?: boolean;
     },
   ) => void;
   /** Updates mutable draft-session metadata without touching composer content. */
@@ -413,6 +433,7 @@ interface ComposerDraftStoreState {
       startFromOrigin?: boolean;
       runtimeMode?: RuntimeMode;
       interactionMode?: ProviderInteractionMode;
+      hidden?: boolean;
     },
   ) => void;
   clearProjectDraftThreadId: (projectRef: ScopedProjectRef) => void;
@@ -1363,6 +1384,7 @@ function createDraftThreadState(
     startFromOrigin?: boolean;
     runtimeMode?: RuntimeMode;
     interactionMode?: ProviderInteractionMode;
+    hidden?: boolean;
   },
 ): DraftThreadState {
   // A project change (including switching environments within a logical
@@ -1403,6 +1425,7 @@ function createDraftThreadState(
     envMode:
       options?.envMode ?? (nextWorktreePath ? "worktree" : (existingThread?.envMode ?? "local")),
     startFromOrigin: nextStartFromOrigin,
+    hidden: options?.hidden ?? existingThread?.hidden ?? false,
     promotedTo: null,
   };
 }
@@ -1435,6 +1458,7 @@ function draftThreadsEqual(left: DraftThreadState | undefined, right: DraftThrea
     left.worktreePath === right.worktreePath &&
     left.envMode === right.envMode &&
     left.startFromOrigin === right.startFromOrigin &&
+    left.hidden === right.hidden &&
     scopedThreadRefsEqual(left.promotedTo, right.promotedTo)
   );
 }
@@ -1530,6 +1554,7 @@ function normalizePersistedDraftThreads(
       const branch = candidateDraftThread.branch;
       const worktreePath = candidateDraftThread.worktreePath;
       const startFromOrigin = candidateDraftThread.startFromOrigin === true;
+      const hidden = candidateDraftThread.hidden === true;
       const normalizedWorktreePath = typeof worktreePath === "string" ? worktreePath : null;
       const promotedToCandidate = candidateDraftThread.promotedTo;
       const promotedToRecord =
@@ -1578,6 +1603,7 @@ function normalizePersistedDraftThreads(
         worktreePath: normalizedWorktreePath,
         envMode: normalizeDraftThreadEnvMode(candidateDraftThread.envMode, normalizedWorktreePath),
         startFromOrigin,
+        hidden,
         promotedTo,
       };
     }
@@ -1624,6 +1650,7 @@ function normalizePersistedDraftThreads(
           worktreePath: null,
           envMode: "local",
           startFromOrigin: false,
+          hidden: false,
           promotedTo: null,
         };
       } else if (
@@ -2227,6 +2254,7 @@ function toHydratedDraftThreadState(
     worktreePath: persistedDraftThread.worktreePath,
     envMode: persistedDraftThread.envMode,
     startFromOrigin: persistedDraftThread.startFromOrigin,
+    hidden: persistedDraftThread.hidden,
     promotedTo: persistedDraftThread.promotedTo
       ? scopeThreadRef(
           persistedDraftThread.promotedTo.environmentId as EnvironmentId,
@@ -2262,7 +2290,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             return null;
           }
           const draftThread = get().draftThreadsByThreadKey[draftId];
-          if (!draftThread || isDraftThreadPromoting(draftThread)) {
+          if (!draftThread || draftThread.hidden || isDraftThreadPromoting(draftThread)) {
             return null;
           }
           return toProjectDraftSession(DraftId.make(draftId), draftThread);
@@ -2279,7 +2307,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             state.logicalProjectDraftThreadKeyByLogicalProjectKey,
           )) {
             const draftThread = state.draftThreadsByThreadKey[draftId];
-            if (!draftThread || isDraftThreadPromoting(draftThread)) {
+            if (!draftThread || draftThread.hidden || isDraftThreadPromoting(draftThread)) {
               continue;
             }
             if (
@@ -2290,7 +2318,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             }
           }
           for (const [draftId, draftThread] of Object.entries(state.draftThreadsByThreadKey)) {
-            if (isDraftThreadPromoting(draftThread)) {
+            if (draftThread.hidden || isDraftThreadPromoting(draftThread)) {
               continue;
             }
             if (
@@ -2331,6 +2359,26 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
           Object.values(get().draftThreadsByThreadKey).some(
             (draftThread) => draftThread.environmentId === environmentId,
           ),
+        createUnmappedDraftSession: (projectRef, draftId, options) => {
+          if (draftId.length === 0) return;
+          set((state) => {
+            const existingThread = state.draftThreadsByThreadKey[draftId];
+            const nextDraftThread = createDraftThreadState(
+              projectRef,
+              options.threadId,
+              projectDraftKey(projectRef),
+              existingThread,
+              options,
+            );
+            if (draftThreadsEqual(existingThread, nextDraftThread)) return state;
+            return {
+              draftThreadsByThreadKey: {
+                ...state.draftThreadsByThreadKey,
+                [draftId]: nextDraftThread,
+              },
+            };
+          });
+        },
         setLogicalProjectDraftThreadId: (logicalProjectKey, projectRef, draftId, options) => {
           const normalizedLogicalProjectKey = logicalProjectDraftKey(logicalProjectKey);
           if (normalizedLogicalProjectKey.length === 0 || draftId.length === 0) {
@@ -2461,6 +2509,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               envMode:
                 options.envMode ?? (nextWorktreePath ? "worktree" : (existing.envMode ?? "local")),
               startFromOrigin: nextStartFromOrigin,
+              hidden: options.hidden ?? existing.hidden,
               promotedTo: existing.promotedTo ?? null,
             };
             const isUnchanged =
@@ -2474,6 +2523,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               nextDraftThread.worktreePath === existing.worktreePath &&
               nextDraftThread.envMode === existing.envMode &&
               nextDraftThread.startFromOrigin === existing.startFromOrigin &&
+              nextDraftThread.hidden === existing.hidden &&
               scopedThreadRefsEqual(nextDraftThread.promotedTo, existing.promotedTo);
             if (isUnchanged) {
               return state;

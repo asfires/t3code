@@ -254,7 +254,15 @@ import {
   LAST_USER_MESSAGE_POP_SETTLE_TIMEOUT_MS,
   mergePoppedPrompt,
 } from "./chat/lastUserMessagePop";
+import { createPreDispatchCancellationLatch } from "./chat/preDispatchCancellationLatch";
+import { CHAT_FLOATING_LAYER_SELECTOR, shouldHandleChatEscape } from "./chat/chatEscapeTrigger";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
+import { shouldRenderEmptyThreadHero } from "./chat/emptyThreadHero";
+import { RetractionRecoveryHandoff } from "./chat/RetractionRecoveryHandoff";
+import {
+  type FirstMessageRetractionCompletion,
+  useRetractionRecoveryStore,
+} from "./chat/lastUserMessageRecovery";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
@@ -1381,6 +1389,7 @@ function ChatViewContent(props: ChatViewProps) {
   const attachmentPreviewHandoffByMessageIdRef = useRef<Record<string, string[]>>({});
   const attachmentPreviewPromotionInFlightByMessageIdRef = useRef<Record<string, true>>({});
   const sendInFlightRef = useRef(false);
+  const preDispatchCancellationLatchRef = useRef(createPreDispatchCancellationLatch());
   const terminalUiOpenByThreadRef = useRef<Record<string, boolean>>({});
 
   useLayoutEffect(() => {
@@ -1969,6 +1978,39 @@ function ChatViewContent(props: ChatViewProps) {
     : (primaryEnvironment?.serverConfig ?? null);
   const pullRequestsCapabilityKnown = serverConfig !== null;
   const supportsPullRequests = serverConfig?.environment.capabilities.pullRequests === true;
+  const supportsThreadTurnRetraction =
+    serverConfig?.environment.capabilities.threadTurnRetraction === true;
+  const pendingRetractionRecovery = useRetractionRecoveryStore((state) =>
+    routeKind === "server"
+      ? (Object.values(state.byRequestId).find(
+          (recovery) =>
+            recovery.sourceThreadRef.environmentId === routeThreadRef.environmentId &&
+            recovery.sourceThreadRef.threadId === routeThreadRef.threadId,
+        ) ?? null)
+      : null,
+  );
+  const projectedRetractionCompletion = useMemo<FirstMessageRetractionCompletion | null>(() => {
+    const retraction = activeThread?.turnRetraction;
+    if (
+      !pendingRetractionRecovery ||
+      !retraction ||
+      retraction.status !== "completed" ||
+      retraction.requestId !== pendingRetractionRecovery.requestId ||
+      retraction.completedAt === null
+    ) {
+      return null;
+    }
+    return {
+      threadId: activeThread.id,
+      retraction: {
+        requestId: retraction.requestId,
+        messageId: retraction.messageId,
+        turnId: retraction.targetTurnId,
+        firstUserMessage: retraction.firstUserMessage,
+        completedAt: retraction.completedAt,
+      },
+    };
+  }, [activeThread, pendingRetractionRecovery]);
   const versionMismatch = resolveServerConfigVersionMismatch(serverConfig);
   const versionMismatchDismissKey =
     versionMismatch && activeThread
@@ -2565,8 +2607,14 @@ function ChatViewContent(props: ChatViewProps) {
   const [dockedDraftHeroThreadKey, setDockedDraftHeroThreadKey] = useState<string | null>(null);
   const draftHeroDockRequested =
     activeThreadKey !== null && dockedDraftHeroThreadKey === activeThreadKey;
-  const isDraftHeroState =
-    isLocalDraftThread && timelineEntries.length === 0 && !isWorking && !draftHeroDockRequested;
+  const isDraftHeroState = shouldRenderEmptyThreadHero({
+    routeKind,
+    timelineEntryCount: timelineEntries.length,
+    isWorking,
+    phase,
+    dockRequested: draftHeroDockRequested,
+    threadDetailLoading,
+  });
   const [
     attachDraftHeroTransitionGroupRef,
     attachDraftHeroComposerAnchorRef,
@@ -5081,6 +5129,13 @@ function ChatViewContent(props: ChatViewProps) {
       return;
     }
 
+    const composerImagesSnapshot = [...composerImages];
+    const composerTerminalContextsSnapshot = [...sendableComposerTerminalContexts];
+    const composerElementContextsSnapshot = [...composerElementContexts];
+    const composerPreviewAnnotationsSnapshot = [...composerPreviewAnnotations];
+    const composerReviewCommentsSnapshot: ReviewCommentContext[] = [...composerReviewComments];
+    const messageIdForSend = newMessageId();
+    preDispatchCancellationLatchRef.current.arm(messageIdForSend);
     sendInFlightRef.current = true;
     if (isDraftHeroState && activeThreadKey) {
       let resolveDockStarted: (() => void) | undefined;
@@ -5097,13 +5152,16 @@ function ChatViewContent(props: ChatViewProps) {
       void dockTransition.catch(() => resolveDockStarted?.());
       await dockStarted;
     }
+    if (preDispatchCancellationLatchRef.current.isCancelled(messageIdForSend)) {
+      preDispatchCancellationLatchRef.current.clear(messageIdForSend);
+      sendInFlightRef.current = false;
+      setDockedDraftHeroThreadKey((currentThreadKey) =>
+        currentThreadKey === activeThreadKey ? null : currentThreadKey,
+      );
+      return;
+    }
     beginLocalDispatch({ preparingWorktree: Boolean(baseBranchForWorktree) });
 
-    const composerImagesSnapshot = [...composerImages];
-    const composerTerminalContextsSnapshot = [...sendableComposerTerminalContexts];
-    const composerElementContextsSnapshot = [...composerElementContexts];
-    const composerPreviewAnnotationsSnapshot = [...composerPreviewAnnotations];
-    const composerReviewCommentsSnapshot: ReviewCommentContext[] = [...composerReviewComments];
     const messageTextWithContexts = appendElementContextsToPrompt(
       appendTerminalContextsToPrompt(promptForSend, composerTerminalContextsSnapshot),
       composerElementContextsSnapshot,
@@ -5116,7 +5174,6 @@ function ChatViewContent(props: ChatViewProps) {
       messageTextWithPreviewAnnotations,
       composerReviewCommentsSnapshot,
     );
-    const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();
     const outgoingMessageText = formatOutgoingPrompt({
       provider: ctxSelectedProvider,
@@ -5251,6 +5308,7 @@ function ChatViewContent(props: ChatViewProps) {
     }
 
     let turnStartSucceeded = false;
+    let preDispatchCancelled = false;
     if (failure === null && turnAttachmentsResult._tag === "Success") {
       const bootstrap =
         isLocalDraftThread || baseBranchForWorktree
@@ -5282,34 +5340,39 @@ function ChatViewContent(props: ChatViewProps) {
                 : {}),
             }
           : undefined;
-      beginLocalDispatch({ preparingWorktree: false });
-      const startResult = await startThreadTurn({
-        environmentId,
-        input: {
-          threadId: threadIdForSend,
-          message: {
-            messageId: messageIdForSend,
-            role: "user",
-            text: outgoingMessageText,
-            attachments: turnAttachmentsResult.value,
-          },
-          modelSelection: ctxSelectedModelSelection,
-          titleSeed: title,
-          runtimeMode,
-          interactionMode,
-          ...(bootstrap ? { bootstrap } : {}),
-          createdAt: messageCreatedAt,
-        },
-      });
-      if (startResult._tag === "Failure") {
-        failure = startResult;
+      if (!preDispatchCancellationLatchRef.current.beginDispatch(messageIdForSend)) {
+        preDispatchCancelled =
+          preDispatchCancellationLatchRef.current.isCancelled(messageIdForSend);
       } else {
-        turnStartSucceeded = true;
-        acknowledgeActiveThreadWoke();
+        beginLocalDispatch({ preparingWorktree: false });
+        const startResult = await startThreadTurn({
+          environmentId,
+          input: {
+            threadId: threadIdForSend,
+            message: {
+              messageId: messageIdForSend,
+              role: "user",
+              text: outgoingMessageText,
+              attachments: turnAttachmentsResult.value,
+            },
+            modelSelection: ctxSelectedModelSelection,
+            titleSeed: title,
+            runtimeMode,
+            interactionMode,
+            ...(bootstrap ? { bootstrap } : {}),
+            createdAt: messageCreatedAt,
+          },
+        });
+        if (startResult._tag === "Failure") {
+          failure = startResult;
+        } else {
+          turnStartSucceeded = true;
+          acknowledgeActiveThreadWoke();
+        }
       }
     }
 
-    if (failure !== null) {
+    if (failure !== null || preDispatchCancelled) {
       if (
         promptRef.current.length === 0 &&
         composerImagesRef.current.length === 0 &&
@@ -5345,7 +5408,7 @@ function ChatViewContent(props: ChatViewProps) {
           detectTrigger: true,
         });
       }
-      if (!isAtomCommandInterrupted(failure)) {
+      if (failure !== null && !isAtomCommandInterrupted(failure)) {
         const error = squashAtomCommandFailure(failure);
         setThreadError(
           threadIdForSend,
@@ -5353,6 +5416,7 @@ function ChatViewContent(props: ChatViewProps) {
         );
       }
     }
+    preDispatchCancellationLatchRef.current.clear(messageIdForSend);
     sendInFlightRef.current = false;
     if (!turnStartSucceeded) {
       setDockedDraftHeroThreadKey((currentThreadKey) =>
@@ -6033,6 +6097,8 @@ function ChatViewContent(props: ChatViewProps) {
     }
     void onRevertToTurnCountRef.current(targetTurnCount);
   }, []);
+  // Post-dispatch seam: WO5b can replace this saga with thread.turn.retract;
+  // the pre-dispatch latch and chat-scoped Escape trigger stay unchanged.
   const onPopLastUserMessage = useCallback(async () => {
     if (!lastUserMessagePopCandidate || !activeThread || isPoppingLastUserMessage) return;
 
@@ -6155,6 +6221,36 @@ function ChatViewContent(props: ChatViewProps) {
     setComposerDraftPrompt,
     waitForRunningTurnToSettle,
   ]);
+
+  useEffect(() => {
+    const onWindowKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (
+        !shouldHandleChatEscape({
+          event,
+          terminalFocused: getTerminalFocusOwner() !== null,
+          commandPaletteOpen: isCommandPaletteOpen(),
+          composerEscapeGateOpen: composerRef.current?.isEscapeGateOpen() ?? false,
+          floatingLayerOpen: document.querySelector(CHAT_FLOATING_LAYER_SELECTOR) !== null,
+        })
+      ) {
+        return;
+      }
+
+      const cancelledMessageId = preDispatchCancellationLatchRef.current.cancel();
+      if (cancelledMessageId === null) {
+        if (lastUserMessagePopCandidate === null || isPoppingLastUserMessage) {
+          return;
+        }
+        void onPopLastUserMessage();
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+    };
+
+    window.addEventListener("keydown", onWindowKeyDown);
+    return () => window.removeEventListener("keydown", onWindowKeyDown);
+  }, [isPoppingLastUserMessage, lastUserMessagePopCandidate, onPopLastUserMessage]);
 
   // Empty state: no active thread
   if (!activeThread) {
@@ -6299,6 +6395,14 @@ function ChatViewContent(props: ChatViewProps) {
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-background">
+      {supportsThreadTurnRetraction && pendingRetractionRecovery ? (
+        <RetractionRecoveryHandoff
+          environmentId={environmentId}
+          recovery={pendingRetractionRecovery}
+          projectedCompletion={projectedRetractionCompletion}
+          navigate={navigate}
+        />
+      ) : null}
       {rightPanelOpen && !shouldUseRightPanelSheet ? panelLayoutControls : null}
       <div
         className={cn(
@@ -6538,11 +6642,6 @@ function ChatViewContent(props: ChatViewProps) {
                             composerTerminalContextsRef={composerTerminalContextsRef}
                             composerElementContextsRef={composerElementContextsRef}
                             onSend={onSend}
-                            onPopLastUserMessage={
-                              lastUserMessagePopCandidate !== null && !isPoppingLastUserMessage
-                                ? onPopLastUserMessage
-                                : null
-                            }
                             onInterrupt={onInterrupt}
                             onImplementPlanInNewThread={onImplementPlanInNewThread}
                             onRespondToApproval={onRespondToApproval}
