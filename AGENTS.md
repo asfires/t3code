@@ -164,6 +164,25 @@ section by keeping the fork's version.
   dist artifacts, and don't touch `~/.t3/userdata` from task threads.
 - Merge flow: Adam reviews, merges, and deletes PR branches on GitHub, then
   restarts via `t3start`. Nothing else to do after your PR is approved.
+  Worktrees of merged-and-deleted branches are pruned automatically —
+  `t3wt prune` stops their leftover processes (dev servers included) and
+  deletes them — so never stash anything valuable in an old worktree or
+  count on its dev server outliving the merge.
+- Verification handoff: when the thread's work is done and viewable in the
+  web app, never end with a bare "done" — Adam verifies changes himself in a
+  running app before merging. Start the dev server in the background from
+  the worktree root (`vp run dev`; worktree-local `.t3` state and
+  path-hashed ports make parallel threads safe), wait for startup, and
+  paste the full pairing URL (`/pair#token=...`) in your final reply for
+  Adam to click. Never open that URL yourself — the token is single-use;
+  mint a replacement with `node apps/server/src/bin.ts pair` if it gets
+  consumed. Leave the server running — teardown is automatic: once Adam
+  merges the PR and deletes the branch, `t3wt prune` stops the worktree's
+  leftover processes and removes it. The link is the whole deliverable.
+  This bullet is standing permission to run the dev server at handoff; it
+  does not extend to browsers or computer use. For changes that aren't
+  visible in the web app, state concretely how to observe the result
+  instead (command to run, log to tail, or the mobile test flow).
 - Upstream syncs are explicit and discretionary, done as a
   `sync-upstream-<date>` branch PR'd into fork `main` — never a bare pull of
   upstream into `main`.
