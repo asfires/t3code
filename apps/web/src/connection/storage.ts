@@ -62,8 +62,9 @@ const StoredShellSnapshotJson = Schema.fromJsonString(StoredShellSnapshot);
 // orphaned retracted messages out-of-band: the deletion emits no events, so
 // a warm cache resuming via `afterSequence` would render the ghost messages
 // forever. Any server-side row surgery needs a bump here to reach clients.
+// v6 pairs with server migration 045's full projection rebuild.
 const StoredThreadSnapshot = Schema.Struct({
-  schemaVersion: Schema.Literal(5),
+  schemaVersion: Schema.Literal(6),
   environmentId: EnvironmentId,
   threadId: ThreadId,
   snapshot: OrchestrationThreadDetailSnapshot,
@@ -571,7 +572,7 @@ export const connectionStorageLayer = Layer.effectContext(
       saveThread: (environmentId, snapshot) =>
         Effect.gen(function* () {
           const encoded = yield* encodeStoredThreadSnapshot({
-            schemaVersion: 5,
+            schemaVersion: 6,
             environmentId,
             threadId: snapshot.thread.id,
             snapshot,
