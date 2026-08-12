@@ -274,26 +274,6 @@ describe("buildThreadFeed", () => {
     );
   });
 
-  it("omits silent turn-retraction failures from the mobile feed", () => {
-    const thread = makeThread({
-      id: ThreadId.make("thread-silent-retraction"),
-      projectId: ProjectId.make("project-1"),
-      title: "Silent retraction",
-      activities: [
-        makeActivity({
-          id: EventId.make("silent-retraction-failure"),
-          kind: "turn.retract.failed",
-          summary: "Message retract failed",
-          tone: "error",
-          createdAt: "2026-04-01T00:00:01.000Z",
-          payload: { silent: true },
-        }),
-      ],
-    });
-
-    expect(buildThreadFeed(thread)).toEqual([]);
-  });
-
   it("keeps MCP inputs available to expanded mobile work rows", () => {
     const turnId = TurnId.make("turn-mcp");
     const thread = makeThread({

@@ -318,13 +318,6 @@ function deriveWorkLogEntries(
   const ordered = Arr.sort(activities, activityOrder);
   const entries: DerivedWorkLogEntry[] = [];
   for (const activity of ordered) {
-    if (
-      activity.kind === "turn.retract.failed" &&
-      typeof activity.payload === "object" &&
-      (activity.payload as { silent?: unknown } | null)?.silent === true
-    ) {
-      continue;
-    }
     if (activity.kind === "tool.started") continue;
     if (activity.kind === "task.started") continue;
     // Terminal bypassed updates pass: Codex children's only terminal signal.
