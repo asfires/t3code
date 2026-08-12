@@ -1,5 +1,6 @@
 import {
   type ApprovalRequestId,
+  type CommandId,
   DEFAULT_MODEL,
   defaultInstanceIdForDriver,
   type EnvironmentId,
@@ -244,7 +245,30 @@ import {
 } from "../state/entities";
 import { environmentShell } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
+import {
+  findLastUserMessagePopCandidate,
+  IMAGE_ONLY_MESSAGE_PLACEHOLDER,
+  isLastUserMessagePopWindowOpen,
+} from "./chat/lastUserMessagePop";
+import { createPreDispatchCancellationLatch } from "./chat/preDispatchCancellationLatch";
+import { createPendingRetractionSendGate } from "./chat/pendingRetractionSendGate";
+import {
+  hideOptimisticallyRetractedMessage,
+  unhideOptimisticallyRetractedMessage,
+} from "./chat/optimisticRetraction";
+import {
+  CHAT_FLOATING_LAYER_SELECTOR,
+  runChatEscapeAction,
+  shouldHandleChatEscape,
+} from "./chat/chatEscapeTrigger";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
+import { shouldRenderEmptyThreadHero } from "./chat/emptyThreadHero";
+import { findCorrelatedRetractionFailure } from "./chat/lastUserMessageRecovery";
+import {
+  deriveEffectiveSessionPresentation,
+  usePendingRetractionForThread,
+} from "./chat/retractedTurnPresentation";
+import { useLastUserMessageRetraction } from "./chat/useLastUserMessageRetraction";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
@@ -338,12 +362,20 @@ import {
 } from "../versionSkew";
 import { useAssetUrls } from "../assets/assetUrls";
 
-const IMAGE_ONLY_BOOTSTRAP_PROMPT =
-  "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
 const EMPTY_PENDING_USER_INPUT_ANSWERS: Record<string, PendingUserInputDraftAnswer> = {};
+const sentMessageRecoveryContextByMessageId = new Map<
+  MessageId,
+  {
+    envMode: DraftThreadEnvMode;
+    baseBranch: string | null;
+    startFromOrigin: boolean;
+    prompt: string;
+    images: ComposerImageAttachment[];
+  }
+>();
 function useDraftHeroLayoutTransition(isDraftHeroState: boolean) {
   const transitionGroupRef = useRef<HTMLDivElement | null>(null);
   const composerAnchorRef = useRef<HTMLDivElement | null>(null);
@@ -1322,6 +1354,9 @@ function ChatViewContent(props: ChatViewProps) {
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [expandedImage, setExpandedImage] = useState<ExpandedImagePreview | null>(null);
   const [optimisticUserMessages, setOptimisticUserMessages] = useState<ChatMessage[]>([]);
+  const [optimisticRetractionsByMessageId, setOptimisticRetractionsByMessageId] = useState<
+    Record<string, CommandId>
+  >({});
   const optimisticUserMessagesRef = useRef(optimisticUserMessages);
   optimisticUserMessagesRef.current = optimisticUserMessages;
   const [localDraftErrorsByDraftId, setLocalDraftErrorsByDraftId] = useState<
@@ -1372,6 +1407,7 @@ function ChatViewContent(props: ChatViewProps) {
   const attachmentPreviewHandoffByMessageIdRef = useRef<Record<string, string[]>>({});
   const attachmentPreviewPromotionInFlightByMessageIdRef = useRef<Record<string, true>>({});
   const sendInFlightRef = useRef(false);
+  const preDispatchCancellationLatchRef = useRef(createPreDispatchCancellationLatch());
   const terminalUiOpenByThreadRef = useRef<Record<string, boolean>>({});
 
   useLayoutEffect(() => {
@@ -1490,8 +1526,18 @@ function ChatViewContent(props: ChatViewProps) {
   // depend on which route is mounted.
   const isServerThread = activeServerThread !== null;
   const activeThread = activeServerThread ?? localDraftThread;
+  const retractionFailureDetail =
+    activeServerThread?.turnRetraction?.status === "failed"
+      ? findCorrelatedRetractionFailure(
+          activeServerThread.activities,
+          activeServerThread.turnRetraction.requestId,
+        )
+      : null;
   const threadError = isServerThread
-    ? (localServerError ?? activeServerThread?.session?.lastError ?? null)
+    ? (localServerError ??
+      retractionFailureDetail ??
+      activeServerThread?.session?.lastError ??
+      null)
     : localDraftError;
   const runtimeMode = composerRuntimeMode ?? activeThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE;
   // Plan mode is legacy (Settings → Beta). With the flag off the effective
@@ -1960,6 +2006,26 @@ function ChatViewContent(props: ChatViewProps) {
     : (primaryEnvironment?.serverConfig ?? null);
   const pullRequestsCapabilityKnown = serverConfig !== null;
   const supportsPullRequests = serverConfig?.environment.capabilities.pullRequests === true;
+  const supportsThreadTurnRetraction =
+    serverConfig?.environment.capabilities.threadTurnRetraction === true;
+  const pendingRetractionRecovery = usePendingRetractionForThread(
+    routeKind === "server" ? routeThreadRef : null,
+  );
+  const retractionPending =
+    pendingRetractionRecovery !== null || activeThread?.turnRetraction?.status === "requested";
+  const retractionPendingRef = useRef(retractionPending);
+  retractionPendingRef.current = retractionPending;
+  const pendingRetractionSendGateRef = useRef(createPendingRetractionSendGate());
+  const [heldSendPending, setHeldSendPending] = useState(false);
+  useEffect(() => {
+    if (!retractionPending) pendingRetractionSendGateRef.current.release();
+  }, [retractionPending]);
+  useEffect(
+    () => () => {
+      pendingRetractionSendGateRef.current.dispose();
+    },
+    [],
+  );
   const versionMismatch = resolveServerConfigVersionMismatch(serverConfig);
   const versionMismatchDismissKey =
     versionMismatch && activeThread
@@ -2255,7 +2321,27 @@ function ChatViewContent(props: ChatViewProps) {
     activePendingUserInput: activePendingUserInput?.requestId ?? null,
     threadError,
   });
-  const isWorking = phase === "running" || isSendBusy || isConnecting || isRevertingCheckpoint;
+  // The just-popped turn is still settling server-side for a beat. Every
+  // surface reads this one derivation so the thread presents as if the turn
+  // never started. `phase` stays raw for the decisions that must respect the
+  // real session (the pop window, the revert-checkpoint guard, local dispatch
+  // bookkeeping); `presentedPhase` is what the composer and timeline read.
+  const {
+    phase: presentedPhase,
+    isWorking,
+    activeTurnInProgress,
+  } = deriveEffectiveSessionPresentation({
+    phase,
+    pendingRetraction: pendingRetractionRecovery,
+    projectedRetraction: activeThread?.turnRetraction ?? null,
+    activeTurnId: activeThread?.session?.activeTurnId ?? null,
+    retractionPending,
+    latestTurnSettled,
+    isSendBusy,
+    heldSendPending,
+    isConnecting,
+    isRevertingCheckpoint,
+  });
   const activeWorkStartedAt = deriveActiveWorkStartedAt(
     activeLatestTurn,
     activeThread?.session ?? null,
@@ -2491,16 +2577,46 @@ function ChatViewContent(props: ChatViewProps) {
             return changed ? { ...message, attachments } : message;
           });
 
-    if (optimisticUserMessages.length === 0) {
-      return serverMessagesWithPreviewHandoff;
-    }
     const serverIds = new Set(serverMessagesWithPreviewHandoff.map((message) => message.id));
     const pendingMessages = optimisticUserMessages.filter((message) => !serverIds.has(message.id));
-    if (pendingMessages.length === 0) {
-      return serverMessagesWithPreviewHandoff;
-    }
-    return [...serverMessagesWithPreviewHandoff, ...pendingMessages];
-  }, [attachmentPreviewHandoffByMessageId, displayServerMessages, optimisticUserMessages]);
+    const allMessages =
+      pendingMessages.length === 0
+        ? serverMessagesWithPreviewHandoff
+        : [...serverMessagesWithPreviewHandoff, ...pendingMessages];
+    if (Object.keys(optimisticRetractionsByMessageId).length === 0) return allMessages;
+    return allMessages.filter(
+      (message) => optimisticRetractionsByMessageId[message.id] === undefined,
+    );
+  }, [
+    attachmentPreviewHandoffByMessageId,
+    displayServerMessages,
+    optimisticRetractionsByMessageId,
+    optimisticUserMessages,
+  ]);
+
+  useEffect(() => {
+    if (Object.keys(optimisticRetractionsByMessageId).length === 0) return;
+    const visibleMessageIds = new Set<string>([
+      ...displayServerMessages.map((message) => message.id),
+      ...optimisticUserMessages.map((message) => message.id),
+    ]);
+    setOptimisticRetractionsByMessageId((existing) => {
+      const next = Object.fromEntries(
+        Object.entries(existing).filter(([messageId]) => visibleMessageIds.has(messageId)),
+      ) as Record<string, CommandId>;
+      return Object.keys(next).length === Object.keys(existing).length ? existing : next;
+    });
+  }, [displayServerMessages, optimisticRetractionsByMessageId, optimisticUserMessages]);
+  useEffect(() => {
+    const retraction = activeThread?.turnRetraction;
+    if (retraction?.status !== "failed") return;
+    setOptimisticRetractionsByMessageId((existing) =>
+      unhideOptimisticallyRetractedMessage(existing, {
+        requestId: retraction.requestId,
+        messageId: retraction.messageId,
+      }),
+    );
+  }, [activeThread?.turnRetraction]);
   const timelineEntries = useMemo(
     () =>
       deriveTimelineEntries(
@@ -2514,8 +2630,14 @@ function ChatViewContent(props: ChatViewProps) {
   const [dockedDraftHeroThreadKey, setDockedDraftHeroThreadKey] = useState<string | null>(null);
   const draftHeroDockRequested =
     activeThreadKey !== null && dockedDraftHeroThreadKey === activeThreadKey;
-  const isDraftHeroState =
-    isLocalDraftThread && timelineEntries.length === 0 && !isWorking && !draftHeroDockRequested;
+  const isDraftHeroState = shouldRenderEmptyThreadHero({
+    routeKind,
+    timelineEntryCount: timelineEntries.length,
+    isWorking,
+    phase,
+    dockRequested: draftHeroDockRequested,
+    threadDetailLoading,
+  });
   const [
     attachDraftHeroTransitionGroupRef,
     attachDraftHeroComposerAnchorRef,
@@ -2563,6 +2685,19 @@ function ChatViewContent(props: ChatViewProps) {
 
     return byUserMessageId;
   }, [inferredCheckpointTurnCountByTurnId, timelineEntries, turnDiffSummaryByAssistantMessageId]);
+  const activeRunningTurnId = activeThread?.session?.activeTurnId ?? null;
+  const lastUserMessagePopWindowOpen =
+    supportsThreadTurnRetraction &&
+    isLastUserMessagePopWindowOpen({
+      phase,
+      activeTurnId: activeRunningTurnId,
+      timelineEntries,
+      localTurnStartPending: isSendBusy,
+      retractionPending,
+    });
+  const lastUserMessagePopCandidate = lastUserMessagePopWindowOpen
+    ? findLastUserMessagePopCandidate({ messages: timelineMessages })
+    : null;
 
   const gitCwd = activeProject
     ? projectScriptCwd({
@@ -4770,50 +4905,59 @@ function ChatViewContent(props: ChatViewProps) {
   ]);
 
   const onRevertToTurnCount = useCallback(
-    async (turnCount: number) => {
+    async (turnCount: number, options?: { skipConfirm?: boolean }): Promise<boolean> => {
       const localApi = readLocalApi();
-      if (!localApi || !activeThread || isRevertingCheckpoint) return;
+      if (!localApi || !activeThread || isRevertingCheckpoint) return false;
 
       if (activeEnvironmentUnavailable && activeEnvironmentUnavailableLabel) {
         setThreadError(
           activeThread.id,
           `Reconnect ${activeEnvironmentUnavailableLabel} before reverting checkpoints.`,
         );
-        return;
+        return false;
       }
       if (phase === "running" || isSendBusy || isConnecting) {
         setThreadError(activeThread.id, "Interrupt the current turn before reverting checkpoints.");
-        return;
+        return false;
       }
-      const confirmed = await localApi.dialogs.confirm(
-        [
-          `Revert this thread to checkpoint ${turnCount}?`,
-          "This will discard newer messages and turn diffs in this thread.",
-          "This action cannot be undone.",
-        ].join("\n"),
-        { variant: "destructive" },
-      );
-      if (!confirmed) {
-        return;
+      if (!options?.skipConfirm) {
+        const confirmed = await localApi.dialogs.confirm(
+          [
+            `Revert this thread to checkpoint ${turnCount}?`,
+            "This will discard newer messages and turn diffs in this thread.",
+            "This action cannot be undone.",
+          ].join("\n"),
+          { variant: "destructive" },
+        );
+        if (!confirmed) {
+          return false;
+        }
       }
 
       setIsRevertingCheckpoint(true);
       setThreadError(activeThread.id, null);
-      const result = await revertThreadCheckpoint({
-        environmentId,
-        input: {
-          threadId: activeThread.id,
-          turnCount,
-        },
-      });
-      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
-        setThreadError(
-          activeThread.id,
-          error instanceof Error ? error.message : "Failed to revert thread state.",
-        );
+      try {
+        const result = await revertThreadCheckpoint({
+          environmentId,
+          input: {
+            threadId: activeThread.id,
+            turnCount,
+          },
+        });
+        if (result._tag === "Failure") {
+          if (!isAtomCommandInterrupted(result)) {
+            const error = squashAtomCommandFailure(result);
+            setThreadError(
+              activeThread.id,
+              error instanceof Error ? error.message : "Failed to revert thread state.",
+            );
+          }
+          return false;
+        }
+        return true;
+      } finally {
+        setIsRevertingCheckpoint(false);
       }
-      setIsRevertingCheckpoint(false);
     },
     [
       activeThread,
@@ -4847,6 +4991,25 @@ function ChatViewContent(props: ChatViewProps) {
         }),
       );
     };
+    if (retractionPendingRef.current) {
+      if (sendInFlightRef.current) return;
+      sendInFlightRef.current = true;
+      setHeldSendPending(true);
+      const released = await pendingRetractionSendGateRef.current.wait();
+      setHeldSendPending(false);
+      sendInFlightRef.current = false;
+      if (!released || retractionPendingRef.current) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Message not sent",
+            description:
+              "The previous message was still retracting after 20 seconds. Your draft is unchanged; try sending it again.",
+          }),
+        );
+        return;
+      }
+    }
     if (
       !activeThread ||
       isSendBusy ||
@@ -5001,6 +5164,21 @@ function ChatViewContent(props: ChatViewProps) {
       return;
     }
 
+    const composerImagesSnapshot = [...composerImages];
+    const composerTerminalContextsSnapshot = [...sendableComposerTerminalContexts];
+    const composerElementContextsSnapshot = [...composerElementContexts];
+    const composerPreviewAnnotationsSnapshot = [...composerPreviewAnnotations];
+    const composerReviewCommentsSnapshot: ReviewCommentContext[] = [...composerReviewComments];
+    const messageIdForSend = newMessageId();
+    sentMessageRecoveryContextByMessageId.clear();
+    sentMessageRecoveryContextByMessageId.set(messageIdForSend, {
+      envMode: sendEnvMode,
+      baseBranch: activeThreadBranch,
+      startFromOrigin,
+      prompt: promptForSend,
+      images: composerImagesSnapshot,
+    });
+    preDispatchCancellationLatchRef.current.arm(messageIdForSend);
     sendInFlightRef.current = true;
     if (isDraftHeroState && activeThreadKey) {
       let resolveDockStarted: (() => void) | undefined;
@@ -5017,13 +5195,17 @@ function ChatViewContent(props: ChatViewProps) {
       void dockTransition.catch(() => resolveDockStarted?.());
       await dockStarted;
     }
+    if (preDispatchCancellationLatchRef.current.isCancelled(messageIdForSend)) {
+      sentMessageRecoveryContextByMessageId.delete(messageIdForSend);
+      preDispatchCancellationLatchRef.current.clear(messageIdForSend);
+      sendInFlightRef.current = false;
+      setDockedDraftHeroThreadKey((currentThreadKey) =>
+        currentThreadKey === activeThreadKey ? null : currentThreadKey,
+      );
+      return;
+    }
     beginLocalDispatch({ preparingWorktree: Boolean(baseBranchForWorktree) });
 
-    const composerImagesSnapshot = [...composerImages];
-    const composerTerminalContextsSnapshot = [...sendableComposerTerminalContexts];
-    const composerElementContextsSnapshot = [...composerElementContexts];
-    const composerPreviewAnnotationsSnapshot = [...composerPreviewAnnotations];
-    const composerReviewCommentsSnapshot: ReviewCommentContext[] = [...composerReviewComments];
     const messageTextWithContexts = appendElementContextsToPrompt(
       appendTerminalContextsToPrompt(promptForSend, composerTerminalContextsSnapshot),
       composerElementContextsSnapshot,
@@ -5036,14 +5218,13 @@ function ChatViewContent(props: ChatViewProps) {
       messageTextWithPreviewAnnotations,
       composerReviewCommentsSnapshot,
     );
-    const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();
     const outgoingMessageText = formatOutgoingPrompt({
       provider: ctxSelectedProvider,
       model: ctxSelectedModel,
       models: ctxSelectedProviderModels,
       effort: ctxSelectedPromptEffort,
-      text: messageTextForSend || IMAGE_ONLY_BOOTSTRAP_PROMPT,
+      text: messageTextForSend || IMAGE_ONLY_MESSAGE_PLACEHOLDER,
     });
     const turnAttachmentsPromise = Promise.all(
       composerImagesSnapshot.map(async (image) => ({
@@ -5171,6 +5352,7 @@ function ChatViewContent(props: ChatViewProps) {
     }
 
     let turnStartSucceeded = false;
+    let preDispatchCancelled = false;
     if (failure === null && turnAttachmentsResult._tag === "Success") {
       const bootstrap =
         isLocalDraftThread || baseBranchForWorktree
@@ -5202,34 +5384,39 @@ function ChatViewContent(props: ChatViewProps) {
                 : {}),
             }
           : undefined;
-      beginLocalDispatch({ preparingWorktree: false });
-      const startResult = await startThreadTurn({
-        environmentId,
-        input: {
-          threadId: threadIdForSend,
-          message: {
-            messageId: messageIdForSend,
-            role: "user",
-            text: outgoingMessageText,
-            attachments: turnAttachmentsResult.value,
-          },
-          modelSelection: ctxSelectedModelSelection,
-          titleSeed: title,
-          runtimeMode,
-          interactionMode,
-          ...(bootstrap ? { bootstrap } : {}),
-          createdAt: messageCreatedAt,
-        },
-      });
-      if (startResult._tag === "Failure") {
-        failure = startResult;
+      if (!preDispatchCancellationLatchRef.current.beginDispatch(messageIdForSend)) {
+        preDispatchCancelled =
+          preDispatchCancellationLatchRef.current.isCancelled(messageIdForSend);
       } else {
-        turnStartSucceeded = true;
-        acknowledgeActiveThreadWoke();
+        beginLocalDispatch({ preparingWorktree: false });
+        const startResult = await startThreadTurn({
+          environmentId,
+          input: {
+            threadId: threadIdForSend,
+            message: {
+              messageId: messageIdForSend,
+              role: "user",
+              text: outgoingMessageText,
+              attachments: turnAttachmentsResult.value,
+            },
+            modelSelection: ctxSelectedModelSelection,
+            titleSeed: title,
+            runtimeMode,
+            interactionMode,
+            ...(bootstrap ? { bootstrap } : {}),
+            createdAt: messageCreatedAt,
+          },
+        });
+        if (startResult._tag === "Failure") {
+          failure = startResult;
+        } else {
+          turnStartSucceeded = true;
+          acknowledgeActiveThreadWoke();
+        }
       }
     }
 
-    if (failure !== null) {
+    if (failure !== null || preDispatchCancelled) {
       if (
         promptRef.current.length === 0 &&
         composerImagesRef.current.length === 0 &&
@@ -5265,7 +5452,7 @@ function ChatViewContent(props: ChatViewProps) {
           detectTrigger: true,
         });
       }
-      if (!isAtomCommandInterrupted(failure)) {
+      if (failure !== null && !isAtomCommandInterrupted(failure)) {
         const error = squashAtomCommandFailure(failure);
         setThreadError(
           threadIdForSend,
@@ -5273,8 +5460,10 @@ function ChatViewContent(props: ChatViewProps) {
         );
       }
     }
+    preDispatchCancellationLatchRef.current.clear(messageIdForSend);
     sendInFlightRef.current = false;
     if (!turnStartSucceeded) {
+      sentMessageRecoveryContextByMessageId.delete(messageIdForSend);
       setDockedDraftHeroThreadKey((currentThreadKey) =>
         currentThreadKey === activeThreadKey ? null : currentThreadKey,
       );
@@ -5282,20 +5471,27 @@ function ChatViewContent(props: ChatViewProps) {
     }
   };
 
-  const onInterrupt = async () => {
-    if (!activeThread) return;
+  const interruptActiveTurn = useCallback(async (): Promise<boolean> => {
+    if (!activeThread) return false;
     const result = await interruptThreadTurn({
       environmentId,
       input: buildThreadTurnInterruptInput(activeThread),
     });
-    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-      const error = squashAtomCommandFailure(result);
-      setThreadError(
-        activeThread.id,
-        error instanceof Error ? error.message : "Failed to interrupt the current turn.",
-      );
+    if (result._tag === "Failure") {
+      if (!isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        setThreadError(
+          activeThread.id,
+          error instanceof Error ? error.message : "Failed to interrupt the current turn.",
+        );
+      }
+      return false;
     }
-  };
+    return true;
+  }, [activeThread, environmentId, interruptThreadTurn, setThreadError]);
+  const onInterrupt = useCallback(() => {
+    void interruptActiveTurn();
+  }, [interruptActiveTurn]);
 
   const onRespondToApproval = useCallback(
     async (requestId: ApprovalRequestId, decision: ProviderApprovalDecision) => {
@@ -5470,6 +5666,7 @@ function ChatViewContent(props: ChatViewProps) {
       if (
         !activeThread ||
         !isServerThread ||
+        retractionPending ||
         isSendBusy ||
         isConnecting ||
         sendInFlightRef.current
@@ -5612,6 +5809,7 @@ function ChatViewContent(props: ChatViewProps) {
       isConnecting,
       isSendBusy,
       isServerThread,
+      retractionPending,
       localCheckoutBranchMismatch,
       persistThreadSettingsForNextTurn,
       resetLocalDispatch,
@@ -5630,6 +5828,7 @@ function ChatViewContent(props: ChatViewProps) {
       !activeProject ||
       !activeProposedPlan ||
       !isServerThread ||
+      retractionPending ||
       isSendBusy ||
       isConnecting ||
       activeEnvironmentUnavailable ||
@@ -5773,6 +5972,7 @@ function ChatViewContent(props: ChatViewProps) {
     isConnecting,
     isSendBusy,
     isServerThread,
+    retractionPending,
     navigate,
     resetLocalDispatch,
     runtimeMode,
@@ -5946,6 +6146,107 @@ function ChatViewContent(props: ChatViewProps) {
     }
     void onRevertToTurnCountRef.current(targetTurnCount);
   }, []);
+  const lastUserMessageRecoveryContext = lastUserMessagePopCandidate
+    ? sentMessageRecoveryContextByMessageId.get(lastUserMessagePopCandidate.message.id)
+    : undefined;
+  const onOptimisticRetractionStarted = useCallback(
+    ({ requestId, messageId }: { requestId: CommandId; messageId: MessageId }) => {
+      retractionPendingRef.current = true;
+      setOptimisticRetractionsByMessageId((existing) =>
+        hideOptimisticallyRetractedMessage(existing, { requestId, messageId }),
+      );
+    },
+    [],
+  );
+  const onOptimisticRetractionFailed = useCallback(
+    ({ requestId, messageId }: { requestId: CommandId; messageId: MessageId }) => {
+      retractionPendingRef.current = false;
+      pendingRetractionSendGateRef.current.release();
+      setOptimisticRetractionsByMessageId((existing) =>
+        unhideOptimisticallyRetractedMessage(existing, { requestId, messageId }),
+      );
+    },
+    [],
+  );
+  const navigateToRecoveryDraft = useCallback(
+    (recoveryDraftId: DraftId) => {
+      void navigate({
+        to: "/draft/$draftId",
+        params: buildDraftThreadRouteParams(recoveryDraftId),
+        replace: true,
+      });
+    },
+    [navigate],
+  );
+  const onPopLastUserMessage = useLastUserMessageRetraction({
+    activeThread,
+    activeProjectRef,
+    activeThreadBranch: lastUserMessageRecoveryContext
+      ? lastUserMessageRecoveryContext.baseBranch
+      : activeThreadBranch,
+    activeEnvironmentUnavailable,
+    candidate: lastUserMessagePopCandidate,
+    isFirstUserMessage: timelineMessages.filter((message) => message.role === "user").length === 1,
+    ...(lastUserMessageRecoveryContext
+      ? {
+          optimisticBundle: {
+            prompt: lastUserMessageRecoveryContext.prompt,
+            images: lastUserMessageRecoveryContext.images,
+          },
+        }
+      : {}),
+    pendingRecovery: pendingRetractionRecovery,
+    retractionPending,
+    runtimeMode,
+    interactionMode,
+    envMode: lastUserMessageRecoveryContext?.envMode ?? envMode,
+    startFromOrigin: lastUserMessageRecoveryContext?.startFromOrigin ?? startFromOrigin,
+    composerRef,
+    promptRef,
+    composerImagesRef,
+    onOptimisticRetractionStarted,
+    onOptimisticRetractionFailed,
+    navigateToRecoveryDraft,
+    setThreadError,
+  });
+
+  useEffect(() => {
+    const onWindowKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (
+        !shouldHandleChatEscape({
+          event,
+          terminalFocused: getTerminalFocusOwner() !== null,
+          commandPaletteOpen: isCommandPaletteOpen(),
+          composerEscapeGateOpen: composerRef.current?.isEscapeGateOpen() ?? false,
+          floatingLayerOpen: document.querySelector(CHAT_FLOATING_LAYER_SELECTOR) !== null,
+        })
+      ) {
+        return;
+      }
+
+      const handled = runChatEscapeAction({
+        cancelPreDispatch: () => preDispatchCancellationLatchRef.current.cancel(),
+        retractionPending,
+        threadTurnRetraction: supportsThreadTurnRetraction,
+        hasRetractionCandidate: lastUserMessagePopCandidate !== null,
+        focusComposer: scheduleComposerFocus,
+        retractLastUserMessage: () => void onPopLastUserMessage(),
+      });
+      if (!handled) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+    };
+
+    window.addEventListener("keydown", onWindowKeyDown);
+    return () => window.removeEventListener("keydown", onWindowKeyDown);
+  }, [
+    lastUserMessagePopCandidate,
+    onPopLastUserMessage,
+    retractionPending,
+    scheduleComposerFocus,
+    supportsThreadTurnRetraction,
+  ]);
 
   // Empty state: no active thread
   if (!activeThread) {
@@ -6169,7 +6470,7 @@ function ChatViewContent(props: ChatViewProps) {
                 key={activeThread.id}
                 isWorking={isWorking}
                 workingStepLabel={workingStepLabel}
-                activeTurnInProgress={isWorking || !latestTurnSettled}
+                activeTurnInProgress={activeTurnInProgress}
                 activeTurnStartedAt={activeWorkStartedAt}
                 listRef={legendListRef}
                 timelineEntries={timelineEntries}
@@ -6293,9 +6594,9 @@ function ChatViewContent(props: ChatViewProps) {
                             isLocalDraftThread={isLocalDraftThread}
                             forceExpandedOnMobile={forceExpandedMobileComposer && isDraftHeroState}
                             projectSelectionRequired={isLocalDraftThread && activeProject === null}
-                            phase={phase}
+                            phase={presentedPhase}
                             isConnecting={isConnecting}
-                            isSendBusy={isSendBusy}
+                            isSendBusy={isSendBusy || heldSendPending}
                             sendDisabledReason={threadDetailLoading ? "Messages loading" : null}
                             isPreparingWorktree={isPreparingWorktree}
                             environmentUnavailable={activeEnvironmentUnavailableState}

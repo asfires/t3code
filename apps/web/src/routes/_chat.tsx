@@ -10,6 +10,7 @@ import { usePrimaryEnvironmentId } from "../state/environments";
 import { selectProjectGroupingSettings } from "../logicalProject";
 import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
 import { dispatchPreviewAction } from "../components/preview/previewActionBus";
+import { RetractionRecoveryHandoff } from "../components/chat/RetractionRecoveryHandoff";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { isPreviewFocused } from "../lib/previewFocus";
@@ -175,10 +176,12 @@ function ChatRouteGlobalShortcuts() {
 }
 
 function ChatRouteLayout() {
+  const navigate = Route.useNavigate();
   return (
     <>
       <ChatRouteGlobalShortcuts />
       <Outlet />
+      <RetractionRecoveryHandoff navigate={navigate} />
     </>
   );
 }

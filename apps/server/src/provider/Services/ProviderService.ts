@@ -23,6 +23,7 @@ import type {
   ProviderStopSessionInput,
   ThreadId,
   ProviderTurnStartResult,
+  TurnId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
@@ -103,6 +104,16 @@ export interface ProviderServiceShape {
   readonly rollbackConversation: (input: {
     readonly threadId: ThreadId;
     readonly numTurns: number;
+  }) => Effect.Effect<void, ProviderServiceError>;
+
+  /**
+   * Roll back provider conversation state to an absolute retained-turn
+   * boundary. Repeating the same target is harmless.
+   */
+  readonly rollbackConversationTo: (input: {
+    readonly threadId: ThreadId;
+    readonly retainedTurnCount: number;
+    readonly targetTurnId?: TurnId;
   }) => Effect.Effect<void, ProviderServiceError>;
 
   /**

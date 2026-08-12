@@ -6,14 +6,28 @@
  *
  * @module CheckpointReactor
  */
+import { type CheckpointRef, type ThreadId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Scope from "effect/Scope";
+
+import type { CheckpointStoreError } from "../../checkpointing/Errors.ts";
+import type { ProjectionRepositoryError } from "../../persistence/Errors.ts";
 
 /**
  * CheckpointReactorShape - Service API for checkpoint reactor lifecycle.
  */
 export interface CheckpointReactorShape {
+  /**
+   * Ensures the current pre-turn Git checkpoint exists before provider dispatch.
+   * Returns null when the workspace is unavailable or non-Git; file restoration
+   * is necessarily best-effort for those workspaces and provider send may proceed.
+   */
+  readonly ensurePreTurnBaseline: (input: {
+    readonly threadId: ThreadId;
+    readonly createdAt: string;
+  }) => Effect.Effect<CheckpointRef | null, CheckpointStoreError | ProjectionRepositoryError>;
+
   /**
    * Start the checkpoint reactor.
    *

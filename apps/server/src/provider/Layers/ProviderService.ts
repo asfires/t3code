@@ -13,6 +13,7 @@ import {
   ModelSelection,
   NonNegativeInt,
   ThreadId,
+  TurnId,
   ProviderInterruptTurnInput,
   ProviderRespondToRequestInput,
   ProviderRespondToUserInputInput,
@@ -74,6 +75,12 @@ type ProviderServiceMethod<Name extends keyof ProviderService.ProviderService["S
 const ProviderRollbackConversationInput = Schema.Struct({
   threadId: ThreadId,
   numTurns: NonNegativeInt,
+});
+
+const ProviderRollbackConversationToInput = Schema.Struct({
+  threadId: ThreadId,
+  retainedTurnCount: NonNegativeInt,
+  targetTurnId: Schema.optional(TurnId),
 });
 
 function toValidationError(
@@ -1065,6 +1072,74 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     );
   });
 
+  const rollbackConversationTo: ProviderServiceMethod<"rollbackConversationTo"> = Effect.fn(
+    "rollbackConversationTo",
+  )(function* (rawInput) {
+    const input = yield* decodeInputOrValidationError({
+      operation: "ProviderService.rollbackConversationTo",
+      schema: ProviderRollbackConversationToInput,
+      payload: rawInput,
+    });
+    let metricProvider = "unknown";
+    return yield* Effect.gen(function* () {
+      const routed = yield* resolveRoutableSession({
+        threadId: input.threadId,
+        operation: "ProviderService.rollbackConversationTo",
+        allowRecovery: true,
+      });
+      metricProvider = routed.adapter.provider;
+      yield* Effect.annotateCurrentSpan({
+        "provider.operation": "rollback-conversation-to",
+        "provider.kind": routed.adapter.provider,
+        "provider.thread_id": input.threadId,
+        "provider.retained_turn_count": input.retainedTurnCount,
+      });
+
+      if (routed.adapter.rollbackThreadTo !== undefined) {
+        yield* routed.adapter.rollbackThreadTo(
+          routed.threadId,
+          input.retainedTurnCount,
+          input.targetTurnId,
+        );
+      } else {
+        // Compatibility conversion for providers that only expose relative
+        // rollback: read the absolute length, apply only the remaining delta,
+        // then verify the retained boundary.
+        const current = yield* routed.adapter.readThread(routed.threadId);
+        if (current.turns.length < input.retainedTurnCount) {
+          return yield* toValidationError(
+            "ProviderService.rollbackConversationTo",
+            `Provider history has ${current.turns.length} turns, below retained boundary ${input.retainedTurnCount}.`,
+          );
+        }
+        const remainingDelta = current.turns.length - input.retainedTurnCount;
+        if (remainingDelta > 0) {
+          yield* routed.adapter.rollbackThread(routed.threadId, remainingDelta);
+        }
+        const verified = yield* routed.adapter.readThread(routed.threadId);
+        if (verified.turns.length !== input.retainedTurnCount) {
+          return yield* toValidationError(
+            "ProviderService.rollbackConversationTo",
+            `Provider history verification expected ${input.retainedTurnCount} turns, found ${verified.turns.length}.`,
+          );
+        }
+      }
+
+      yield* analytics.record("provider.conversation.rolled_back", {
+        provider: routed.adapter.provider,
+        retainedTurns: input.retainedTurnCount,
+      });
+    }).pipe(
+      withMetrics({
+        counter: providerTurnsTotal,
+        outcomeAttributes: () =>
+          providerMetricAttributes(metricProvider, {
+            operation: "rollback-to",
+          }),
+      }),
+    );
+  });
+
   const runStopAll = Effect.fn("runStopAll")(function* () {
     const threadIds = yield* directory.listThreadIds();
     const currentAdapters = yield* getAdapterEntries;
@@ -1136,6 +1211,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     getCapabilities,
     getInstanceInfo,
     rollbackConversation,
+    rollbackConversationTo,
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (ProviderRuntimeIngestion, CheckpointReactor, etc.) each
     // independently receive all runtime events.

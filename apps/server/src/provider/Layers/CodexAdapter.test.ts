@@ -309,6 +309,72 @@ const sessionErrorLayer = it.layer(
 );
 
 sessionErrorLayer("CodexAdapterLive session errors", (it) => {
+  it.effect("computes the remaining absolute rollback delta and is idempotent", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("absolute-rollback-thread");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      NodeAssert.ok(adapter.rollbackThreadTo);
+      const snapshot = (turnIds: ReadonlyArray<string>): CodexThreadSnapshot => ({
+        threadId: "provider-thread-1",
+        turns: turnIds.map((id) => ({ id: asTurnId(id), items: [] })),
+      });
+      runtime.readThreadImpl
+        .mockResolvedValueOnce(snapshot(["turn-1", "turn-2", "turn-3"]))
+        .mockResolvedValue(snapshot(["turn-1"]));
+      runtime.rollbackThreadImpl.mockResolvedValue(snapshot(["turn-1"]));
+
+      const first = yield* adapter.rollbackThreadTo(threadId, 1);
+      NodeAssert.equal(first.turns.length, 1);
+      NodeAssert.deepStrictEqual(runtime.rollbackThreadImpl.mock.calls, [[2]]);
+
+      const repeated = yield* adapter.rollbackThreadTo(threadId, 1);
+      NodeAssert.equal(repeated.turns.length, 1);
+      NodeAssert.deepStrictEqual(runtime.rollbackThreadImpl.mock.calls, [[2]]);
+    }),
+  );
+
+  it.effect("rolls back from the target turn when absolute counts already match", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("target-rollback-thread");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      NodeAssert.ok(adapter.rollbackThreadTo);
+      const snapshot = (turnIds: ReadonlyArray<string>): CodexThreadSnapshot => ({
+        threadId: "provider-thread-1",
+        turns: turnIds.map((id) => ({ id: asTurnId(id), items: [] })),
+      });
+      const targetTurnId = asTurnId("turn-retracted");
+      runtime.readThreadImpl
+        .mockResolvedValueOnce(snapshot(["turn-1", "turn-2", targetTurnId]))
+        .mockResolvedValue(snapshot(["turn-1", "turn-2"]));
+      runtime.rollbackThreadImpl.mockResolvedValue(snapshot(["turn-1", "turn-2"]));
+
+      const first = yield* adapter.rollbackThreadTo(threadId, 3, targetTurnId);
+      NodeAssert.deepStrictEqual(
+        first.turns.map((turn) => turn.id),
+        [asTurnId("turn-1"), asTurnId("turn-2")],
+      );
+      NodeAssert.deepStrictEqual(runtime.rollbackThreadImpl.mock.calls, [[1]]);
+
+      const repeated = yield* adapter.rollbackThreadTo(threadId, 3, targetTurnId);
+      NodeAssert.equal(repeated.turns.length, 2);
+      NodeAssert.deepStrictEqual(runtime.rollbackThreadImpl.mock.calls, [[1]]);
+    }),
+  );
+
   it.effect("maps missing adapter sessions to ProviderAdapterSessionNotFoundError", () =>
     Effect.gen(function* () {
       const adapter = yield* CodexAdapter;

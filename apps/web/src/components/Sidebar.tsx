@@ -135,6 +135,7 @@ import {
   sortSettledThreadsForSidebar,
   sortThreadsForSidebar,
 } from "./Sidebar.logic";
+import { useRetractedTurnPresentationSuppressed } from "./chat/retractedTurnPresentation";
 import { resolveLocalCheckoutBranchMismatch } from "./BranchToolbar.logic";
 import {
   ThreadWorktreeIndicator,
@@ -568,7 +569,7 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
     // new-thread surfaces mint fresh drafts and leave invested ones behind
     // unmapped, so the mapping only knows about the latest per project.
     for (const [draftKey, session] of Object.entries(draftThreadsByThreadKey)) {
-      if (session.promotedTo != null) {
+      if (session.hidden || session.promotedTo != null) {
         continue;
       }
       if (
@@ -753,7 +754,16 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // Same semantics as the legacy sidebar (never-visited counts as read):
   // switching sidebars must not light up every historical thread as unread.
   const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
-  const status = resolveSidebarThreadStatus(thread);
+  // A turn the user just popped back into the composer is still settling on
+  // the server. The row keeps its pre-turn presentation until it lands, so the
+  // retraction never flashes a Working badge here.
+  const retractedTurnSuppressed = useRetractedTurnPresentationSuppressed({
+    threadRef,
+    activeTurnId: thread.session?.activeTurnId ?? null,
+  });
+  const status = resolveSidebarThreadStatus(thread, {
+    suppressRunningTurn: retractedTurnSuppressed,
+  });
   // A woken thread reappears at its original position (the sort is
   // deliberately static), so the pill has to carry the weight. Snoozing is
   // an explicit act, so the pill clears only when the user re-engages:

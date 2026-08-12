@@ -24,6 +24,7 @@ import {
   type RuntimeTaskUsage,
   ProviderApprovalDecision,
   ThreadId,
+  type TurnId,
   ProviderSendTurnInput,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -92,6 +93,7 @@ interface CodexAdapterSessionContext {
   readonly scope: Scope.Closeable;
   readonly runtime: CodexSessionRuntimeShape;
   readonly eventFiber: Fiber.Fiber<void, never>;
+  lastStartedTurnId: TurnId | undefined;
   stopped: boolean;
 }
 
@@ -1756,6 +1758,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           scope: sessionScope,
           runtime,
           eventFiber,
+          lastStartedTurnId: undefined,
           stopped: false,
         });
         sessionScopeTransferred = true;
@@ -1812,7 +1815,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       input.modelSelection?.instanceId === boundInstanceId
         ? getCodexServiceTierOptionValue(input.modelSelection)
         : undefined;
-    return yield* session.runtime
+    const result = yield* session.runtime
       .sendTurn({
         ...(input.input !== undefined ? { input: input.input } : {}),
         ...(input.modelSelection?.instanceId === boundInstanceId
@@ -1828,6 +1831,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
       })
       .pipe(Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/start", cause)));
+    session.lastStartedTurnId = result.turnId;
+    return result;
   });
 
   const requireSession = Effect.fn("requireSession")(function* (threadId: ThreadId) {
@@ -1889,6 +1894,86 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       })),
     );
   };
+
+  const rollbackThreadTo: NonNullable<CodexAdapterShape["rollbackThreadTo"]> = Effect.fn(
+    "rollbackThreadTo",
+  )(function* (threadId, retainedTurnCount, targetTurnId) {
+    if (!Number.isInteger(retainedTurnCount) || retainedTurnCount < 0) {
+      return yield* new ProviderAdapterValidationError({
+        provider: PROVIDER,
+        operation: "rollbackThreadTo",
+        issue: "retainedTurnCount must be an integer >= 0.",
+      });
+    }
+    const session = yield* requireSession(threadId);
+    const current = yield* readThread(threadId);
+    const targetIndex =
+      targetTurnId === undefined ? -1 : current.turns.findIndex((turn) => turn.id === targetTurnId);
+    if (targetTurnId === undefined && current.turns.length < retainedTurnCount) {
+      return yield* new ProviderAdapterValidationError({
+        provider: PROVIDER,
+        operation: "rollbackThreadTo",
+        issue: `Provider history has ${current.turns.length} turns, below retained boundary ${retainedTurnCount}.`,
+      });
+    }
+    // A resumed Codex thread can report a durable turn count that already
+    // equals T3's checkpoint boundary while its live context still contains
+    // the just-interrupted turn. Prefer the concrete provider turn id over
+    // count arithmetic. If thread/read has not exposed a turn started by this
+    // runtime yet, one native rollback still removes that hidden live turn.
+    const hiddenCurrentRuntimeTarget =
+      targetTurnId !== undefined && targetIndex < 0 && session.lastStartedTurnId === targetTurnId;
+    const remainingDelta =
+      targetIndex >= 0
+        ? current.turns.length - targetIndex
+        : hiddenCurrentRuntimeTarget
+          ? 1
+          : targetTurnId !== undefined
+            ? 0
+            : current.turns.length - retainedTurnCount;
+    if (remainingDelta > 0) {
+      yield* rollbackThread(threadId, remainingDelta);
+    }
+    const verified = yield* readThread(threadId);
+    if (targetTurnId !== undefined) {
+      if (verified.turns.some((turn) => turn.id === targetTurnId)) {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "thread/rollback-to",
+          detail: `Provider history still contains retracted turn '${targetTurnId}'.`,
+        });
+      }
+      const expectedVisibleTurns =
+        targetIndex >= 0
+          ? current.turns.slice(0, targetIndex)
+          : hiddenCurrentRuntimeTarget
+            ? current.turns
+            : undefined;
+      if (
+        expectedVisibleTurns !== undefined &&
+        (verified.turns.length !== expectedVisibleTurns.length ||
+          verified.turns.some((turn, index) => turn.id !== expectedVisibleTurns[index]?.id))
+      ) {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "thread/rollback-to",
+          detail: `Provider rollback for '${targetTurnId}' did not preserve the preceding turn history.`,
+        });
+      }
+      if (session.lastStartedTurnId === targetTurnId) {
+        session.lastStartedTurnId = undefined;
+      }
+      return verified;
+    }
+    if (verified.turns.length !== retainedTurnCount) {
+      return yield* new ProviderAdapterRequestError({
+        provider: PROVIDER,
+        method: "thread/rollback-to",
+        detail: `Expected ${retainedTurnCount} retained turns, found ${verified.turns.length}.`,
+      });
+    }
+    return verified;
+  });
 
   const respondToRequest: CodexAdapterShape["respondToRequest"] = (threadId, requestId, decision) =>
     requireSession(threadId).pipe(
@@ -1977,6 +2062,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     interruptTurn,
     readThread,
     rollbackThread,
+    rollbackThreadTo,
     respondToRequest,
     respondToUserInput,
     stopSession,

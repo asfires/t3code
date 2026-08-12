@@ -34,6 +34,9 @@ import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
+import { ProjectionTurnRetractionRepository } from "../../persistence/Services/ProjectionTurnRetractions.ts";
+import { ProjectionTurnRetractionRepositoryLive } from "../../persistence/Layers/ProjectionTurnRetractions.ts";
 import {
   ProviderCommandReactor,
   type ProviderCommandReactorShape,
@@ -314,6 +317,8 @@ const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+  const checkpointReactor = yield* CheckpointReactor;
+  const turnRetractions = yield* ProjectionTurnRetractionRepository;
   const providerService = yield* ProviderService;
   const providerRegistry = yield* ProviderRegistry;
   const gitWorkflow = yield* GitWorkflowService;
@@ -1094,6 +1099,18 @@ const make = Effect.gen(function* () {
       return;
     }
 
+    // First gate: when retract won before provider startup, persist the
+    // send-cancelled handoff and do not create a provider session. WO3 owns
+    // completion for rows in { status: requested, providerSendState: cancelled }.
+    if (
+      yield* turnRetractions.cancelPendingProviderSend({
+        threadId: event.payload.threadId,
+        messageId: event.payload.messageId,
+      })
+    ) {
+      return;
+    }
+
     const isFirstUserMessageTurn =
       thread.messages.filter((entry) => entry.role === "user").length === 1;
     if (isFirstUserMessageTurn) {
@@ -1179,6 +1196,34 @@ const make = Effect.gen(function* () {
       return;
     }
 
+    // Provider dispatch cannot cross this boundary until the pre-turn Git ref
+    // exists. Non-Git workspaces return null and proceed with best-effort file
+    // restoration semantics.
+    const baselineReady = yield* checkpointReactor
+      .ensurePreTurnBaseline({
+        threadId: event.payload.threadId,
+        createdAt: event.payload.createdAt,
+      })
+      .pipe(
+        Effect.as(true),
+        Effect.catchCause((cause) => handleTurnStartFailure(cause).pipe(Effect.as(false))),
+      );
+    if (!baselineReady) {
+      return;
+    }
+
+    // Second gate and linearization point: atomically claim before calling the
+    // provider. If retract committed while startup/baseline work was in flight,
+    // this transitions the row to send-cancelled instead.
+    const providerSendState = yield* turnRetractions.claimProviderSend({
+      threadId: event.payload.threadId,
+      messageId: event.payload.messageId,
+      claimedAt: event.payload.createdAt,
+    });
+    if (providerSendState === "cancelled") {
+      return;
+    }
+
     yield* providerService
       .sendTurn(sendTurnRequest.value)
       .pipe(Effect.catchCause(recoverTurnStartFailure), Effect.forkScoped);
@@ -1190,6 +1235,22 @@ const make = Effect.gen(function* () {
     const thread = yield* resolveThread(event.payload.threadId);
     if (!thread) {
       return;
+    }
+    if (event.payload.retraction !== undefined) {
+      const sendCancelled = yield* turnRetractions.cancelPendingProviderSend({
+        threadId: event.payload.threadId,
+        messageId: event.payload.retraction.messageId,
+      });
+      if (sendCancelled) {
+        return;
+      }
+
+      const retraction = yield* turnRetractions.getByRequestId({
+        requestId: event.payload.retraction.requestId,
+      });
+      if (Option.isSome(retraction) && retraction.value.providerSendState !== "claimed") {
+        return;
+      }
     }
     const hasSession = thread.session && thread.session.status !== "stopped";
     if (!hasSession) {
@@ -1450,4 +1511,6 @@ const make = Effect.gen(function* () {
   } satisfies ProviderCommandReactorShape;
 });
 
-export const ProviderCommandReactorLive = Layer.effect(ProviderCommandReactor, make);
+export const ProviderCommandReactorLive = Layer.effect(ProviderCommandReactor, make).pipe(
+  Layer.provide(ProjectionTurnRetractionRepositoryLive),
+);

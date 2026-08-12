@@ -9,6 +9,7 @@
 import {
   CommandId,
   IsoDateTime,
+  ManagedWorktreeProvenance,
   ModelSelection,
   NonNegativeInt,
   ProjectId,
@@ -33,6 +34,7 @@ export const ProjectionThread = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   branch: Schema.NullOr(Schema.String),
   worktreePath: Schema.NullOr(Schema.String),
+  managedWorktree: Schema.NullOr(ManagedWorktreeProvenance),
   latestTurnId: Schema.NullOr(TurnId),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -68,6 +70,12 @@ export const ListProjectionThreadsByProjectInput = Schema.Struct({
 });
 export type ListProjectionThreadsByProjectInput = typeof ListProjectionThreadsByProjectInput.Type;
 
+export const HasOtherLiveWorktreeReferenceInput = Schema.Struct({
+  threadId: ThreadId,
+  worktreePath: Schema.String,
+});
+export type HasOtherLiveWorktreeReferenceInput = typeof HasOtherLiveWorktreeReferenceInput.Type;
+
 /**
  * ProjectionThreadRepositoryShape - Service API for projected thread records.
  */
@@ -94,6 +102,11 @@ export interface ProjectionThreadRepositoryShape {
   readonly listByProjectId: (
     input: ListProjectionThreadsByProjectInput,
   ) => Effect.Effect<ReadonlyArray<ProjectionThread>, ProjectionRepositoryError>;
+
+  /** Whether another non-deleted thread currently references this exact worktree path. */
+  readonly hasOtherLiveWorktreeReference: (
+    input: HasOtherLiveWorktreeReferenceInput,
+  ) => Effect.Effect<boolean, ProjectionRepositoryError>;
 
   /**
    * Soft-delete a projected thread row by id.

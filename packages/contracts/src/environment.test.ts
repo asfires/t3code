@@ -26,4 +26,14 @@ describe("ExecutionEnvironmentDescriptor", () => {
       }).capabilities.pullRequests,
     ).toBe(true);
   });
+
+  it("version-gates durable turn retraction", () => {
+    expect(decodeDescriptor(descriptor).capabilities.threadTurnRetraction).toBeUndefined();
+    expect(
+      decodeDescriptor({
+        ...descriptor,
+        capabilities: { ...descriptor.capabilities, threadTurnRetraction: true },
+      }).capabilities.threadTurnRetraction,
+    ).toBe(true);
+  });
 });

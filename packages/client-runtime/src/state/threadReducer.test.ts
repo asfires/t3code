@@ -905,6 +905,210 @@ describe("applyThreadDetailEvent", () => {
         expect(result.thread.latestTurn?.turnId).toBe("turn-1");
       }
     });
+
+    it("removes an unbound user message beyond the target turn count", () => {
+      const threadWithRunningUser: OrchestrationThread = {
+        ...baseThread,
+        messages: [
+          {
+            id: MessageId.make("msg-user-1"),
+            role: "user",
+            text: "First",
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-04-01T01:00:00.000Z",
+            updatedAt: "2026-04-01T01:00:00.000Z",
+          },
+          {
+            id: MessageId.make("msg-assistant-1"),
+            role: "assistant",
+            text: "Response 1",
+            turnId: TurnId.make("turn-1"),
+            streaming: false,
+            createdAt: "2026-04-01T02:00:00.000Z",
+            updatedAt: "2026-04-01T02:00:00.000Z",
+          },
+          {
+            id: MessageId.make("msg-user-running"),
+            role: "user",
+            text: "Pop me",
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-04-01T03:00:00.000Z",
+            updatedAt: "2026-04-01T03:00:00.000Z",
+          },
+        ],
+        checkpoints: [
+          {
+            turnId: TurnId.make("turn-1"),
+            checkpointTurnCount: 1,
+            checkpointRef: CheckpointRef.make("ref-1"),
+            status: "ready",
+            files: [],
+            assistantMessageId: MessageId.make("msg-assistant-1"),
+            completedAt: "2026-04-01T02:00:00.000Z",
+          },
+        ],
+      };
+
+      const result = applyThreadDetailEvent(threadWithRunningUser, {
+        ...baseEventFields,
+        sequence: 15,
+        occurredAt: "2026-04-01T04:00:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.reverted",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          turnCount: 1,
+        },
+      });
+
+      expect(result.kind).toBe("updated");
+      if (result.kind === "updated") {
+        expect(result.thread.messages.map((message) => message.id)).toEqual([
+          "msg-user-1",
+          "msg-assistant-1",
+        ]);
+      }
+    });
+  });
+
+  describe("retraction projection", () => {
+    it("tracks requested and completed retractions incrementally", () => {
+      const runningThread: OrchestrationThread = {
+        ...baseThread,
+        latestTurn: {
+          turnId: TurnId.make("turn-retracted"),
+          state: "running",
+          requestedAt: "2026-04-01T14:00:00.000Z",
+          startedAt: "2026-04-01T14:00:01.000Z",
+          completedAt: null,
+          assistantMessageId: null,
+        },
+      };
+      const interruptBase = {
+        ...baseEventFields,
+        sequence: 16,
+        occurredAt: "2026-04-01T14:00:02.000Z",
+        aggregateKind: "thread" as const,
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.turn-interrupt-requested" as const,
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          turnId: TurnId.make("turn-retracted"),
+          createdAt: "2026-04-01T14:00:02.000Z",
+        },
+      };
+      const requested = applyThreadDetailEvent(runningThread, {
+        ...interruptBase,
+        payload: {
+          ...interruptBase.payload,
+          retraction: {
+            requestId: CommandId.make("cmd-retract"),
+            messageId: MessageId.make("message-retracted"),
+            targetTurnId: TurnId.make("turn-retracted"),
+            baselineTurnCount: 0,
+            firstUserMessage: false,
+          },
+        },
+      });
+      expect(requested.kind).toBe("updated");
+      if (requested.kind !== "updated") return;
+      expect(requested.thread.turnRetraction).toMatchObject({
+        requestId: "cmd-retract",
+        messageId: "message-retracted",
+        targetTurnId: "turn-retracted",
+        baselineTurnCount: 0,
+        providerSendClaimed: false,
+        providerSendState: "unclaimed",
+        firstUserMessage: false,
+        status: "requested",
+        completedAt: null,
+        failedAt: null,
+      });
+
+      const completedAt = "2026-04-01T14:00:03.000Z";
+      const completed = applyThreadDetailEvent(requested.thread, {
+        ...baseEventFields,
+        sequence: 17,
+        occurredAt: completedAt,
+        aggregateKind: "thread" as const,
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.reverted" as const,
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          turnCount: 0,
+          retraction: {
+            requestId: CommandId.make("cmd-retract"),
+            messageId: MessageId.make("message-retracted"),
+            turnId: TurnId.make("turn-retracted"),
+            firstUserMessage: false,
+            completedAt,
+          },
+        },
+      });
+      expect(completed.kind).toBe("updated");
+      if (completed.kind === "updated") {
+        expect(completed.thread.turnRetraction).toMatchObject({
+          requestId: "cmd-retract",
+          status: "completed",
+          completedAt,
+          failedAt: null,
+        });
+      }
+    });
+
+    it("marks a correlated terminal retraction failure incrementally", () => {
+      const pendingThread: OrchestrationThread = {
+        ...baseThread,
+        turnRetraction: {
+          requestId: CommandId.make("cmd-retract"),
+          messageId: MessageId.make("message-retracted"),
+          baselineTurnCount: 0,
+          baselineCheckpointRef: CheckpointRef.make("baseline-ref"),
+          targetTurnId: TurnId.make("turn-retracted"),
+          providerSendClaimed: true,
+          providerSendState: "claimed",
+          firstUserMessage: false,
+          requestedAt: "2026-04-01T14:00:02.000Z",
+          status: "requested",
+          completedAt: null,
+          failedAt: null,
+        },
+      };
+      const failedAt = "2026-04-01T14:00:04.000Z";
+      const failed = applyThreadDetailEvent(pendingThread, {
+        ...baseEventFields,
+        sequence: 18,
+        occurredAt: failedAt,
+        aggregateKind: "thread" as const,
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.activity-appended" as const,
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          activity: {
+            id: EventId.make("failure-activity"),
+            tone: "error" as const,
+            kind: "turn.retract.failed",
+            summary: "Message retract failed",
+            payload: { requestId: CommandId.make("cmd-retract"), detail: "rollback failed" },
+            turnId: TurnId.make("turn-retracted"),
+            createdAt: failedAt,
+          },
+        },
+      });
+
+      expect(failed.kind).toBe("updated");
+      if (failed.kind === "updated") {
+        expect(failed.thread.turnRetraction).toMatchObject({
+          requestId: "cmd-retract",
+          status: "failed",
+          completedAt: null,
+          failedAt,
+        });
+      }
+    });
   });
 
   describe("no-op events", () => {
