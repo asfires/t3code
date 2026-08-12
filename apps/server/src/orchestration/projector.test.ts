@@ -749,6 +749,7 @@ describe("orchestration projector", () => {
       [
         { role: "user", text: "First edit" },
         { role: "assistant", text: "Updated README to v2.\n" },
+        { role: "user", text: "Second edit" },
       ],
     );
     expect(
@@ -758,7 +759,320 @@ describe("orchestration projector", () => {
     expect(thread?.latestTurn?.turnId).toBe("turn-1");
   });
 
-  it("does not fallback-retain messages tied to removed turn IDs", async () => {
+  it("retains checkpointless history across sequential reverts", async () => {
+    const createdAt = "2026-02-24T10:00:00.000Z";
+    const afterCreate = await Effect.runPromise(
+      projectEvent(
+        createEmptyReadModel(createdAt),
+        makeEvent({
+          sequence: 1,
+          type: "thread.created",
+          aggregateKind: "thread",
+          aggregateId: "thread-denylist",
+          occurredAt: createdAt,
+          commandId: "cmd-denylist-create",
+          payload: {
+            threadId: "thread-denylist",
+            projectId: "project-1",
+            title: "denylist",
+            modelSelection: {
+              provider: ProviderDriverKind.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt,
+            updatedAt: createdAt,
+          },
+        }),
+      ),
+    );
+
+    const beforeFirstRevert: ReadonlyArray<OrchestrationEvent> = [
+      makeEvent({
+        sequence: 2,
+        type: "thread.message-sent",
+        aggregateKind: "thread",
+        aggregateId: "thread-denylist",
+        occurredAt: "2026-02-24T10:00:01.000Z",
+        commandId: "cmd-early-user",
+        payload: {
+          threadId: "thread-denylist",
+          messageId: "message-early-user",
+          role: "user",
+          text: "checkpointless head",
+          turnId: "turn-early-checkpointless",
+          streaming: false,
+          createdAt: "2026-02-24T10:00:01.000Z",
+          updatedAt: "2026-02-24T10:00:01.000Z",
+        },
+      }),
+      makeEvent({
+        sequence: 3,
+        type: "thread.message-sent",
+        aggregateKind: "thread",
+        aggregateId: "thread-denylist",
+        occurredAt: "2026-02-24T10:00:02.000Z",
+        commandId: "cmd-early-assistant",
+        payload: {
+          threadId: "thread-denylist",
+          messageId: "message-early-assistant",
+          role: "assistant",
+          text: "checkpointless response",
+          turnId: "turn-early-checkpointless",
+          streaming: false,
+          createdAt: "2026-02-24T10:00:02.000Z",
+          updatedAt: "2026-02-24T10:00:02.000Z",
+        },
+      }),
+      makeEvent({
+        sequence: 4,
+        type: "thread.activity-appended",
+        aggregateKind: "thread",
+        aggregateId: "thread-denylist",
+        occurredAt: "2026-02-24T10:00:03.000Z",
+        commandId: "cmd-early-activity",
+        payload: {
+          threadId: "thread-denylist",
+          activity: {
+            id: "activity-early",
+            tone: "tool",
+            kind: "tool.completed",
+            summary: "checkpointless activity",
+            payload: {},
+            turnId: "turn-early-checkpointless",
+            createdAt: "2026-02-24T10:00:03.000Z",
+          },
+        },
+      }),
+      makeEvent({
+        sequence: 5,
+        type: "thread.proposed-plan-upserted",
+        aggregateKind: "thread",
+        aggregateId: "thread-denylist",
+        occurredAt: "2026-02-24T10:00:04.000Z",
+        commandId: "cmd-early-plan",
+        payload: {
+          threadId: "thread-denylist",
+          proposedPlan: {
+            id: "plan-early",
+            turnId: "turn-early-checkpointless",
+            planMarkdown: "Keep the head",
+            implementedAt: null,
+            implementationThreadId: null,
+            createdAt: "2026-02-24T10:00:04.000Z",
+            updatedAt: "2026-02-24T10:00:04.000Z",
+          },
+        },
+      }),
+      makeEvent({
+        sequence: 6,
+        type: "thread.turn-diff-completed",
+        aggregateKind: "thread",
+        aggregateId: "thread-denylist",
+        occurredAt: "2026-02-24T10:00:05.000Z",
+        commandId: "cmd-kept-checkpoint",
+        payload: {
+          threadId: "thread-denylist",
+          turnId: "turn-kept",
+          checkpointTurnCount: 1,
+          checkpointRef: "refs/t3/checkpoints/thread-denylist/turn/1",
+          status: "ready",
+          files: [],
+          assistantMessageId: "message-kept",
+          completedAt: "2026-02-24T10:00:05.000Z",
+        },
+      }),
+      makeEvent({
+        sequence: 7,
+        type: "thread.message-sent",
+        aggregateKind: "thread",
+        aggregateId: "thread-denylist",
+        occurredAt: "2026-02-24T10:00:06.000Z",
+        commandId: "cmd-kept-message",
+        payload: {
+          threadId: "thread-denylist",
+          messageId: "message-kept",
+          role: "assistant",
+          text: "kept checkpoint",
+          turnId: "turn-kept",
+          streaming: false,
+          createdAt: "2026-02-24T10:00:06.000Z",
+          updatedAt: "2026-02-24T10:00:06.000Z",
+        },
+      }),
+      makeEvent({
+        sequence: 8,
+        type: "thread.turn-diff-completed",
+        aggregateKind: "thread",
+        aggregateId: "thread-denylist",
+        occurredAt: "2026-02-24T10:00:07.000Z",
+        commandId: "cmd-removed-checkpoint",
+        payload: {
+          threadId: "thread-denylist",
+          turnId: "turn-removed",
+          checkpointTurnCount: 2,
+          checkpointRef: "refs/t3/checkpoints/thread-denylist/turn/2",
+          status: "ready",
+          files: [],
+          assistantMessageId: "message-removed",
+          completedAt: "2026-02-24T10:00:07.000Z",
+        },
+      }),
+      makeEvent({
+        sequence: 9,
+        type: "thread.message-sent",
+        aggregateKind: "thread",
+        aggregateId: "thread-denylist",
+        occurredAt: "2026-02-24T10:00:08.000Z",
+        commandId: "cmd-removed-message",
+        payload: {
+          threadId: "thread-denylist",
+          messageId: "message-removed",
+          role: "assistant",
+          text: "remove this turn",
+          turnId: "turn-removed",
+          streaming: false,
+          createdAt: "2026-02-24T10:00:08.000Z",
+          updatedAt: "2026-02-24T10:00:08.000Z",
+        },
+      }),
+      makeEvent({
+        sequence: 10,
+        type: "thread.activity-appended",
+        aggregateKind: "thread",
+        aggregateId: "thread-denylist",
+        occurredAt: "2026-02-24T10:00:09.000Z",
+        commandId: "cmd-removed-activity",
+        payload: {
+          threadId: "thread-denylist",
+          activity: {
+            id: "activity-removed",
+            tone: "tool",
+            kind: "tool.completed",
+            summary: "removed activity",
+            payload: {},
+            turnId: "turn-removed",
+            createdAt: "2026-02-24T10:00:09.000Z",
+          },
+        },
+      }),
+      makeEvent({
+        sequence: 11,
+        type: "thread.proposed-plan-upserted",
+        aggregateKind: "thread",
+        aggregateId: "thread-denylist",
+        occurredAt: "2026-02-24T10:00:10.000Z",
+        commandId: "cmd-removed-plan",
+        payload: {
+          threadId: "thread-denylist",
+          proposedPlan: {
+            id: "plan-removed",
+            turnId: "turn-removed",
+            planMarkdown: "Remove this plan",
+            implementedAt: null,
+            implementationThreadId: null,
+            createdAt: "2026-02-24T10:00:10.000Z",
+            updatedAt: "2026-02-24T10:00:10.000Z",
+          },
+        },
+      }),
+      makeEvent({
+        sequence: 12,
+        type: "thread.reverted",
+        aggregateKind: "thread",
+        aggregateId: "thread-denylist",
+        occurredAt: "2026-02-24T10:00:11.000Z",
+        commandId: "cmd-first-revert",
+        payload: {
+          threadId: "thread-denylist",
+          turnCount: 1,
+        },
+      }),
+    ];
+    const afterFirstRevert = await beforeFirstRevert.reduce<
+      Promise<ReturnType<typeof createEmptyReadModel>>
+    >(
+      (statePromise, event) =>
+        statePromise.then((state) => Effect.runPromise(projectEvent(state, event))),
+      Promise.resolve(afterCreate),
+    );
+
+    expect(afterFirstRevert.threads[0]?.messages.map((message) => message.id)).toEqual([
+      "message-early-user",
+      "message-early-assistant",
+      "message-kept",
+    ]);
+    expect(afterFirstRevert.threads[0]?.activities.map((activity) => activity.id)).toEqual([
+      "activity-early",
+    ]);
+    expect(afterFirstRevert.threads[0]?.proposedPlans.map((plan) => plan.id)).toEqual([
+      "plan-early",
+    ]);
+
+    const afterRetractedMessage = await Effect.runPromise(
+      projectEvent(
+        afterFirstRevert,
+        makeEvent({
+          sequence: 13,
+          type: "thread.message-sent",
+          aggregateKind: "thread",
+          aggregateId: "thread-denylist",
+          occurredAt: "2026-02-24T10:00:12.000Z",
+          commandId: "cmd-retracted-message",
+          payload: {
+            threadId: "thread-denylist",
+            messageId: "message-retracted",
+            role: "user",
+            text: "retract me",
+            turnId: "turn-retracted",
+            streaming: false,
+            createdAt: "2026-02-24T10:00:12.000Z",
+            updatedAt: "2026-02-24T10:00:12.000Z",
+          },
+        }),
+      ),
+    );
+    const afterSecondRevert = await Effect.runPromise(
+      projectEvent(
+        afterRetractedMessage,
+        makeEvent({
+          sequence: 14,
+          type: "thread.reverted",
+          aggregateKind: "thread",
+          aggregateId: "thread-denylist",
+          occurredAt: "2026-02-24T10:00:13.000Z",
+          commandId: "cmd-second-revert",
+          payload: {
+            threadId: "thread-denylist",
+            turnCount: 1,
+            retraction: {
+              requestId: "request-second-revert",
+              messageId: "message-retracted",
+              turnId: "turn-retracted",
+              firstUserMessage: false,
+              completedAt: "2026-02-24T10:00:13.000Z",
+            },
+          },
+        }),
+      ),
+    );
+
+    expect(afterSecondRevert.threads[0]?.messages.map((message) => message.id)).toEqual([
+      "message-early-user",
+      "message-early-assistant",
+      "message-kept",
+    ]);
+    expect(afterSecondRevert.threads[0]?.activities.map((activity) => activity.id)).toEqual([
+      "activity-early",
+    ]);
+    expect(afterSecondRevert.threads[0]?.proposedPlans.map((plan) => plan.id)).toEqual([
+      "plan-early",
+    ]);
+  });
+
+  it("removes messages tied to post-baseline checkpoint turns", async () => {
     const createdAt = "2026-02-26T12:00:00.000Z";
     const model = createEmptyReadModel(createdAt);
 
@@ -911,7 +1225,7 @@ describe("orchestration projector", () => {
     ).toEqual([{ id: "assistant-keep", role: "assistant", turnId: "turn-1" }]);
   });
 
-  it("excludes retracted messages while preserving fallback retention on long threads", async () => {
+  it("excludes retracted messages while preserving long thread history", async () => {
     const createdAt = "2026-03-01T09:00:00.000Z";
     const afterCreate = await Effect.runPromise(
       projectEvent(

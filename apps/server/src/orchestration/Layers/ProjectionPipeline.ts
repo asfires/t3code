@@ -59,6 +59,7 @@ import {
   toSafeThreadAttachmentSegment,
 } from "../../attachmentStore.ts";
 import { checkpointRefForThreadTurn } from "../../checkpointing/Utils.ts";
+import { collectRevertedTurnIds } from "../RevertRetention.ts";
 
 export const ORCHESTRATION_PROJECTOR_NAMES = {
   projects: "projection.projects",
@@ -215,131 +216,33 @@ function deriveHasActionableProposedPlan(input: {
 
 function retainProjectionMessagesAfterRevert(
   messages: ReadonlyArray<ProjectionThreadMessage>,
-  turns: ReadonlyArray<ProjectionTurn>,
-  turnCount: number,
+  revertedTurnIds: ReadonlySet<string>,
   excludedMessageIds: ReadonlySet<string>,
 ): ReadonlyArray<ProjectionThreadMessage> {
-  const retainedMessageIds = new Set<string>();
-  const retainedTurnIds = new Set<string>();
-  const keptTurns = turns.filter(
-    (turn) =>
-      turn.turnId !== null &&
-      turn.checkpointTurnCount !== null &&
-      turn.checkpointTurnCount <= turnCount,
+  return messages.filter(
+    (message) =>
+      !excludedMessageIds.has(message.messageId) &&
+      (message.role === "system" ||
+        message.turnId === null ||
+        !revertedTurnIds.has(message.turnId)),
   );
-  for (const turn of keptTurns) {
-    if (turn.turnId !== null) {
-      retainedTurnIds.add(turn.turnId);
-    }
-    if (turn.pendingMessageId !== null && !excludedMessageIds.has(turn.pendingMessageId)) {
-      retainedMessageIds.add(turn.pendingMessageId);
-    }
-    if (turn.assistantMessageId !== null && !excludedMessageIds.has(turn.assistantMessageId)) {
-      retainedMessageIds.add(turn.assistantMessageId);
-    }
-  }
-
-  for (const message of messages) {
-    if (excludedMessageIds.has(message.messageId)) {
-      continue;
-    }
-    if (message.role === "system") {
-      retainedMessageIds.add(message.messageId);
-      continue;
-    }
-    if (message.turnId !== null && retainedTurnIds.has(message.turnId)) {
-      retainedMessageIds.add(message.messageId);
-    }
-  }
-
-  const retainedUserCount = messages.filter(
-    (message) => message.role === "user" && retainedMessageIds.has(message.messageId),
-  ).length;
-  const missingUserCount = Math.max(0, turnCount - retainedUserCount);
-  if (missingUserCount > 0) {
-    const fallbackUserMessages = messages
-      .filter(
-        (message) =>
-          message.role === "user" &&
-          !excludedMessageIds.has(message.messageId) &&
-          !retainedMessageIds.has(message.messageId) &&
-          (message.turnId === null || retainedTurnIds.has(message.turnId)),
-      )
-      .toSorted(
-        (left, right) =>
-          left.createdAt.localeCompare(right.createdAt) ||
-          left.messageId.localeCompare(right.messageId),
-      )
-      .slice(0, missingUserCount);
-    for (const message of fallbackUserMessages) {
-      retainedMessageIds.add(message.messageId);
-    }
-  }
-
-  const retainedAssistantCount = messages.filter(
-    (message) => message.role === "assistant" && retainedMessageIds.has(message.messageId),
-  ).length;
-  const missingAssistantCount = Math.max(0, turnCount - retainedAssistantCount);
-  if (missingAssistantCount > 0) {
-    const fallbackAssistantMessages = messages
-      .filter(
-        (message) =>
-          message.role === "assistant" &&
-          !excludedMessageIds.has(message.messageId) &&
-          !retainedMessageIds.has(message.messageId) &&
-          (message.turnId === null || retainedTurnIds.has(message.turnId)),
-      )
-      .toSorted(
-        (left, right) =>
-          left.createdAt.localeCompare(right.createdAt) ||
-          left.messageId.localeCompare(right.messageId),
-      )
-      .slice(0, missingAssistantCount);
-    for (const message of fallbackAssistantMessages) {
-      retainedMessageIds.add(message.messageId);
-    }
-  }
-
-  return messages.filter((message) => retainedMessageIds.has(message.messageId));
 }
 
 function retainProjectionActivitiesAfterRevert(
   activities: ReadonlyArray<ProjectionThreadActivity>,
-  turns: ReadonlyArray<ProjectionTurn>,
-  turnCount: number,
+  revertedTurnIds: ReadonlySet<string>,
 ): ReadonlyArray<ProjectionThreadActivity> {
-  const retainedTurnIds = new Set<string>(
-    turns
-      .filter(
-        (turn) =>
-          turn.turnId !== null &&
-          turn.checkpointTurnCount !== null &&
-          turn.checkpointTurnCount <= turnCount,
-      )
-      .flatMap((turn) => (turn.turnId === null ? [] : [turn.turnId])),
-  );
   return activities.filter(
-    (activity) => activity.turnId === null || retainedTurnIds.has(activity.turnId),
+    (activity) => activity.turnId === null || !revertedTurnIds.has(activity.turnId),
   );
 }
 
 function retainProjectionProposedPlansAfterRevert(
   proposedPlans: ReadonlyArray<ProjectionThreadProposedPlan>,
-  turns: ReadonlyArray<ProjectionTurn>,
-  turnCount: number,
+  revertedTurnIds: ReadonlySet<string>,
 ): ReadonlyArray<ProjectionThreadProposedPlan> {
-  const retainedTurnIds = new Set<string>(
-    turns
-      .filter(
-        (turn) =>
-          turn.turnId !== null &&
-          turn.checkpointTurnCount !== null &&
-          turn.checkpointTurnCount <= turnCount,
-      )
-      .flatMap((turn) => (turn.turnId === null ? [] : [turn.turnId])),
-  );
   return proposedPlans.filter(
-    (proposedPlan) => proposedPlan.turnId === null || retainedTurnIds.has(proposedPlan.turnId),
+    (proposedPlan) => proposedPlan.turnId === null || !revertedTurnIds.has(proposedPlan.turnId),
   );
 }
 
@@ -501,6 +404,25 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const serverConfig = yield* ServerConfig;
+
+    const getRevertedTurnIds = Effect.fn("getRevertedTurnIds")(function* (input: {
+      readonly threadId: ThreadId;
+      readonly baselineTurnCount: number;
+      readonly retractionTurnId: string | null;
+    }) {
+      const [turns, thread, session] = yield* Effect.all([
+        projectionTurnRepository.listByThreadId({ threadId: input.threadId }),
+        projectionThreadRepository.getById({ threadId: input.threadId }),
+        projectionThreadSessionRepository.getByThreadId({ threadId: input.threadId }),
+      ]);
+      return collectRevertedTurnIds({
+        turns,
+        baselineTurnCount: input.baselineTurnCount,
+        retractionTurnId: input.retractionTurnId,
+        latestTurnId: Option.isSome(thread) ? thread.value.latestTurnId : null,
+        activeTurnId: Option.isSome(session) ? session.value.activeTurnId : null,
+      });
+    });
 
     const isCompletedRetractedTurn = Effect.fn("isCompletedRetractedTurn")(function* (
       threadId: ThreadId,
@@ -1066,8 +988,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             return;
           }
 
-          const existingTurns = yield* projectionTurnRepository.listByThreadId({
+          const revertedTurnIds = yield* getRevertedTurnIds({
             threadId: event.payload.threadId,
+            baselineTurnCount: event.payload.turnCount,
+            retractionTurnId: event.payload.retraction?.turnId ?? null,
           });
           const excludedMessageIds =
             event.payload.retraction === undefined
@@ -1075,8 +999,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               : new Set([event.payload.retraction.messageId]);
           const keptRows = retainProjectionMessagesAfterRevert(
             existingRows,
-            existingTurns,
-            event.payload.turnCount,
+            revertedTurnIds,
             excludedMessageIds,
           );
           if (keptRows.length === existingRows.length) {
@@ -1135,14 +1058,12 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             return;
           }
 
-          const existingTurns = yield* projectionTurnRepository.listByThreadId({
+          const revertedTurnIds = yield* getRevertedTurnIds({
             threadId: event.payload.threadId,
+            baselineTurnCount: event.payload.turnCount,
+            retractionTurnId: event.payload.retraction?.turnId ?? null,
           });
-          const keptRows = retainProjectionProposedPlansAfterRevert(
-            existingRows,
-            existingTurns,
-            event.payload.turnCount,
-          );
+          const keptRows = retainProjectionProposedPlansAfterRevert(existingRows, revertedTurnIds);
           if (keptRows.length === existingRows.length) {
             return;
           }
@@ -1188,14 +1109,12 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           if (existingRows.length === 0) {
             return;
           }
-          const existingTurns = yield* projectionTurnRepository.listByThreadId({
+          const revertedTurnIds = yield* getRevertedTurnIds({
             threadId: event.payload.threadId,
+            baselineTurnCount: event.payload.turnCount,
+            retractionTurnId: event.payload.retraction?.turnId ?? null,
           });
-          const keptRows = retainProjectionActivitiesAfterRevert(
-            existingRows,
-            existingTurns,
-            event.payload.turnCount,
-          );
+          const keptRows = retainProjectionActivitiesAfterRevert(existingRows, revertedTurnIds);
           if (keptRows.length === existingRows.length) {
             return;
           }
@@ -1799,9 +1718,95 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       },
     ];
 
+    const reconcileAttachmentFiles = Effect.fn("reconcileAttachmentFiles")(function* () {
+      const entries = yield* fileSystem
+        .readDirectory(serverConfig.attachmentsDir, { recursive: false })
+        .pipe(Effect.orElseSucceed(() => [] as Array<string>));
+      const entriesByThreadSegment = new Map<
+        string,
+        Array<{ readonly relativePath: string; readonly absolutePath: string }>
+      >();
+
+      yield* Effect.forEach(
+        entries,
+        Effect.fn("collectAttachmentFileForReconciliation")(function* (entry) {
+          const relativePath = entry.replace(/^[/\\]+/, "").replace(/\\/g, "/");
+          if (relativePath.length === 0 || relativePath.includes("/")) {
+            return;
+          }
+          const attachmentId = parseAttachmentIdFromRelativePath(relativePath);
+          if (!attachmentId) {
+            return;
+          }
+          const threadSegment = parseThreadSegmentFromAttachmentId(attachmentId);
+          if (!threadSegment) {
+            return;
+          }
+          const absolutePath = path.join(serverConfig.attachmentsDir, relativePath);
+          const fileInfo = yield* fileSystem
+            .stat(absolutePath)
+            .pipe(Effect.orElseSucceed(() => null));
+          if (!fileInfo || fileInfo.type !== "File") {
+            return;
+          }
+          const segmentEntries = entriesByThreadSegment.get(threadSegment) ?? [];
+          segmentEntries.push({ relativePath, absolutePath });
+          entriesByThreadSegment.set(threadSegment, segmentEntries);
+        }),
+        { concurrency: 1 },
+      );
+
+      const liveThreadRows = yield* sql<{ readonly threadId: string }>`
+        SELECT thread_id AS "threadId"
+        FROM projection_threads
+        WHERE deleted_at IS NULL
+      `;
+      const liveThreadIdsBySegment = new Map<string, Array<ThreadId>>();
+      for (const row of liveThreadRows) {
+        const threadSegment = toSafeThreadAttachmentSegment(row.threadId);
+        if (!threadSegment) {
+          continue;
+        }
+        const threadIds = liveThreadIdsBySegment.get(threadSegment) ?? [];
+        threadIds.push(ThreadId.make(row.threadId));
+        liveThreadIdsBySegment.set(threadSegment, threadIds);
+      }
+
+      yield* Effect.forEach(
+        entriesByThreadSegment.entries(),
+        Effect.fn("reconcileThreadAttachmentFiles")(function* ([threadSegment, segmentEntries]) {
+          const liveThreadIds = liveThreadIdsBySegment.get(threadSegment) ?? [];
+          const keptRelativePaths = new Set<string>();
+          yield* Effect.forEach(
+            liveThreadIds,
+            Effect.fn("collectProjectedThreadAttachmentPaths")(function* (threadId) {
+              const messages = yield* projectionThreadMessageRepository.listByThreadId({
+                threadId,
+              });
+              for (const relativePath of collectThreadAttachmentRelativePaths(threadId, messages)) {
+                keptRelativePaths.add(relativePath);
+              }
+            }),
+            { concurrency: 1 },
+          );
+
+          yield* Effect.forEach(
+            segmentEntries,
+            ({ relativePath, absolutePath }) =>
+              liveThreadIds.length === 0 || !keptRelativePaths.has(relativePath)
+                ? fileSystem.remove(absolutePath, { force: true })
+                : Effect.void,
+            { concurrency: 1 },
+          );
+        }),
+        { concurrency: 1 },
+      );
+    });
+
     const runProjectorForEvent = Effect.fn("runProjectorForEvent")(function* (
       projector: ProjectorDefinition,
       event: OrchestrationEvent,
+      mode: "bootstrap" | "live",
     ) {
       const attachmentSideEffects: AttachmentSideEffects = {
         deletedThreadIds: new Set<string>(),
@@ -1820,36 +1825,53 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         ),
       );
 
-      yield* runAttachmentSideEffects(attachmentSideEffects).pipe(
-        Effect.catch((cause) =>
-          Effect.logWarning("failed to apply projected attachment side-effects", {
-            projector: projector.name,
-            sequence: event.sequence,
-            eventType: event.type,
-            cause,
-          }),
+      if (mode === "live") {
+        yield* runAttachmentSideEffects(attachmentSideEffects).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("failed to apply projected attachment side-effects", {
+              projector: projector.name,
+              sequence: event.sequence,
+              eventType: event.type,
+              cause,
+            }),
+          ),
+        );
+      }
+    });
+
+    const bootstrapProjectors = Effect.gen(function* () {
+      const projectorStates = yield* Effect.forEach(projectors, (projector) =>
+        projectionStateRepository.getByProjector({
+          projector: projector.name,
+        }),
+      );
+      const lastAppliedSequenceByProjector = new Map(
+        projectors.map((projector, index) => {
+          const state = projectorStates[index];
+          return [
+            projector.name,
+            state !== undefined && Option.isSome(state) ? state.value.lastAppliedSequence : 0,
+          ] as const;
+        }),
+      );
+      const firstSequence = Math.min(...lastAppliedSequenceByProjector.values());
+
+      // Match live event-major ordering so a revert sees turn/session evidence
+      // before later projectors apply that same event's trims.
+      yield* Stream.runForEach(eventStore.readFromSequence(firstSequence), (event) =>
+        Effect.forEach(
+          projectors,
+          (projector) =>
+            event.sequence > (lastAppliedSequenceByProjector.get(projector.name) ?? 0)
+              ? runProjectorForEvent(projector, event, "bootstrap")
+              : Effect.void,
+          { concurrency: 1 },
         ),
       );
     });
 
-    const bootstrapProjector = (projector: ProjectorDefinition) =>
-      projectionStateRepository
-        .getByProjector({
-          projector: projector.name,
-        })
-        .pipe(
-          Effect.flatMap((stateRow) =>
-            Stream.runForEach(
-              eventStore.readFromSequence(
-                Option.isSome(stateRow) ? stateRow.value.lastAppliedSequence : 0,
-              ),
-              (event) => runProjectorForEvent(projector, event),
-            ),
-          ),
-        );
-
     const projectEvent: OrchestrationProjectionPipelineShape["projectEvent"] = (event) =>
-      Effect.forEach(projectors, (projector) => runProjectorForEvent(projector, event), {
+      Effect.forEach(projectors, (projector) => runProjectorForEvent(projector, event, "live"), {
         concurrency: 1,
       }).pipe(
         Effect.provideService(FileSystem.FileSystem, fileSystem),
@@ -1861,11 +1883,14 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         ),
       );
 
-    const bootstrap: OrchestrationProjectionPipelineShape["bootstrap"] = Effect.forEach(
-      projectors,
-      bootstrapProjector,
-      { concurrency: 1 },
-    ).pipe(
+    const bootstrap: OrchestrationProjectionPipelineShape["bootstrap"] = bootstrapProjectors.pipe(
+      Effect.andThen(
+        reconcileAttachmentFiles().pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("failed to reconcile projected attachment files", { cause }),
+          ),
+        ),
+      ),
       Effect.provideService(FileSystem.FileSystem, fileSystem),
       Effect.provideService(Path.Path, path),
       Effect.provideService(ServerConfig, serverConfig),

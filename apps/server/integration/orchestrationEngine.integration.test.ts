@@ -851,6 +851,7 @@ it.live("reverts to an earlier checkpoint and trims checkpoint projections + git
         [
           { role: "user", text: "First edit" },
           { role: "assistant", text: "Updated README to v2.\n" },
+          { role: "user", text: "Second edit" },
         ],
       );
       assert.equal(
