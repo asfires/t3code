@@ -60,6 +60,29 @@ describe("ThreadBackgroundLiveness", () => {
     expect(liveness.getThreadBackgroundLiveness(threadId)).toBeNull();
   });
 
+  it("lets adapters promote a background shell to agent liveness", () => {
+    const liveness = ThreadBackgroundLiveness.make();
+    const threadId = "t-live-external-agent";
+    liveness.recordTaskLiveness({
+      threadId,
+      taskId: "codex-1",
+      taskType: "local_bash",
+      agentKind: "agent",
+      status: undefined,
+      kind: "started",
+    });
+    expect(liveness.getThreadBackgroundLiveness(threadId)).toBe("working");
+    liveness.recordTaskLiveness({
+      threadId,
+      taskId: "codex-1",
+      taskType: "local_bash",
+      agentKind: "agent",
+      status: "completed",
+      kind: "completed",
+    });
+    expect(liveness.getThreadBackgroundLiveness(threadId)).toBeNull();
+  });
+
   it("nested agents (agentId + agent taskType) still count toward liveness", () => {
     const liveness = ThreadBackgroundLiveness.make();
     const threadId = "t-live-nested";

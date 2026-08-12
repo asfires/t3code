@@ -317,15 +317,21 @@ function requestKindFromCanonicalRequestType(
  * client folds survive activity retention; absent fields stay absent.
  */
 function taskLinkageActivityFields(payload: Record<string, unknown>): Record<string, unknown> {
+  const explicitAgentKind =
+    payload.agentKind === "agent" || payload.agentKind === "background"
+      ? payload.agentKind
+      : undefined;
   const fields: Record<string, unknown> = {
     // Server-stamped classification: persisted rows are self-describing, so
     // clients trust the stamp instead of re-deriving agent-vs-background
     // from taskType denylists and marker heuristics (legacy rows without a
     // stamp keep the client fallback).
-    agentKind: classifyTaskAgentKind({
-      taskType: typeof payload.taskType === "string" ? payload.taskType : undefined,
-      agentId: typeof payload.agentId === "string" ? payload.agentId : undefined,
-    }),
+    agentKind:
+      explicitAgentKind ??
+      classifyTaskAgentKind({
+        taskType: typeof payload.taskType === "string" ? payload.taskType : undefined,
+        agentId: typeof payload.agentId === "string" ? payload.agentId : undefined,
+      }),
   };
   for (const key of [
     "taskType",
@@ -823,6 +829,7 @@ export function runtimeEventToActivities(
             ...(event.payload.parentToolUseId
               ? { parentToolUseId: event.payload.parentToolUseId }
               : {}),
+            ...(event.payload.timelineBypass ? { timelineBypass: true } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -849,6 +856,7 @@ export function runtimeEventToActivities(
             ...(event.payload.parentToolUseId
               ? { parentToolUseId: event.payload.parentToolUseId }
               : {}),
+            ...(event.payload.timelineBypass ? { timelineBypass: true } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -874,6 +882,7 @@ export function runtimeEventToActivities(
             ...(event.payload.parentToolUseId
               ? { parentToolUseId: event.payload.parentToolUseId }
               : {}),
+            ...(event.payload.timelineBypass ? { timelineBypass: true } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -1992,6 +2001,7 @@ const make = Effect.gen(function* () {
             taskType?: string;
             status?: string;
             agentId?: string;
+            agentKind?: "agent" | "background";
           };
           threadBackgroundLiveness.recordTaskLiveness({
             threadId: thread.id,
@@ -1999,6 +2009,7 @@ const make = Effect.gen(function* () {
             taskType: payload.taskType,
             status: payload.status,
             agentId: payload.agentId,
+            agentKind: payload.agentKind,
             kind:
               event.type === "task.started"
                 ? "started"

@@ -1906,6 +1906,163 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("promotes background codex exec tasks without promoting ordinary Bash tasks", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const relevantEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "item.started" || event.type.startsWith("task.")),
+        Stream.take(6),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "Run checks, then have Codex review the result",
+        attachments: [],
+      });
+
+      harness.query.emit({
+        type: "stream_event",
+        session_id: "sdk-session-external-agent",
+        uuid: "ordinary-bash-tool",
+        parent_tool_use_id: null,
+        event: {
+          type: "content_block_start",
+          index: 0,
+          content_block: {
+            type: "tool_use",
+            id: "tool-ordinary-bash",
+            name: "Bash",
+            input: {
+              command: "vp test run src/example.test.ts",
+              run_in_background: true,
+            },
+          },
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: "ordinary-bash",
+        description: "Run focused tests",
+        task_type: "local_bash",
+        tool_use_id: "tool-ordinary-bash",
+        uuid: "ordinary-bash-task",
+        session_id: "sdk-session-external-agent",
+      } as unknown as SDKMessage);
+
+      harness.query.emit({
+        type: "stream_event",
+        session_id: "sdk-session-external-agent",
+        uuid: "codex-bash-tool",
+        parent_tool_use_id: null,
+        event: {
+          type: "content_block_start",
+          index: 1,
+          content_block: {
+            type: "tool_use",
+            id: "tool-codex",
+            name: "Bash",
+            input: {
+              command:
+                'command codex exec --yolo -C /repo -m gpt-5.6-sol -c model_reasoning_effort="high" -',
+              run_in_background: true,
+            },
+          },
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: "codex-review",
+        description: "Review before merge",
+        task_type: "local_bash",
+        tool_use_id: "tool-codex",
+        uuid: "codex-task-started",
+        session_id: "sdk-session-external-agent",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "task_progress",
+        task_id: "codex-review",
+        description: "Reviewing the changes",
+        uuid: "codex-task-progress",
+        session_id: "sdk-session-external-agent",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "task_notification",
+        task_id: "codex-review",
+        status: "completed",
+        summary: "Review complete",
+        uuid: "codex-task-completed",
+        session_id: "sdk-session-external-agent",
+      } as unknown as SDKMessage);
+
+      const events = Array.from(yield* Fiber.join(relevantEventsFiber));
+      const ordinaryLauncher = events.find(
+        (event) => event.type === "item.started" && String(event.itemId) === "tool-ordinary-bash",
+      );
+      assert.equal(ordinaryLauncher?.type, "item.started");
+      if (ordinaryLauncher?.type === "item.started") {
+        assert.equal(ordinaryLauncher.payload.timelineBypass, undefined);
+      }
+      const ordinaryTask = events.find(
+        (event) =>
+          event.type === "task.started" && String(event.payload.taskId) === "ordinary-bash",
+      );
+      assert.equal(ordinaryTask?.type, "task.started");
+      if (ordinaryTask?.type === "task.started") {
+        assert.equal(ordinaryTask.payload.agentKind, undefined);
+      }
+
+      const codexLauncher = events.find(
+        (event) => event.type === "item.started" && String(event.itemId) === "tool-codex",
+      );
+      assert.equal(codexLauncher?.type, "item.started");
+      if (codexLauncher?.type === "item.started") {
+        assert.equal(codexLauncher.payload.timelineBypass, true);
+      }
+      const codexStarted = events.find(
+        (event) => event.type === "task.started" && String(event.payload.taskId) === "codex-review",
+      );
+      const codexProgress = events.find(
+        (event) =>
+          event.type === "task.progress" && String(event.payload.taskId) === "codex-review",
+      );
+      const codexCompleted = events.find(
+        (event) =>
+          event.type === "task.completed" && String(event.payload.taskId) === "codex-review",
+      );
+      for (const event of [codexStarted, codexProgress, codexCompleted]) {
+        assert.isDefined(event);
+        if (
+          event?.type !== "task.started" &&
+          event?.type !== "task.progress" &&
+          event?.type !== "task.completed"
+        ) {
+          continue;
+        }
+        assert.equal(event.payload.agentKind, "agent");
+        assert.equal(event.payload.taskType, "local_bash");
+        assert.equal(event.payload.role, "codex");
+        assert.equal(event.payload.model, "gpt-5.6-sol");
+        assert.equal(event.payload.effort, "high");
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("closes the session when the Claude stream aborts after a turn starts", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

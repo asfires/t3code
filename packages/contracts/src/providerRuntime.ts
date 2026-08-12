@@ -417,6 +417,8 @@ export const ItemLifecyclePayload = Schema.Struct({
    */
   agentId: Schema.optional(TrimmedNonEmptyStringSchema),
   parentToolUseId: Schema.optional(TrimmedNonEmptyStringSchema),
+  /** Provider-recognized launcher/chatter that belongs off the parent timeline. */
+  timelineBypass: Schema.optional(Schema.Boolean),
 });
 export type ItemLifecyclePayload = typeof ItemLifecyclePayload.Type;
 

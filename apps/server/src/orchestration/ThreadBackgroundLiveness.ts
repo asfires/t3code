@@ -15,7 +15,7 @@
  *
  * @module ThreadBackgroundLivenessService
  */
-import { INERT_TASK_TYPES, MONITOR_TASK_TYPES } from "@t3tools/contracts";
+import { classifyTaskAgentKind, INERT_TASK_TYPES } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -27,11 +27,10 @@ interface ThreadLivenessState {
   readonly monitors: Set<string>;
 }
 
-// Classification sets are the shared contracts copies (MONITOR_TASK_TYPES:
-// watch loops — monitor tasks plus background shells, which in practice are
-// PR babysitting/log tails since pacing sleeps complete inside the turn;
-// INERT_TASK_TYPES: plan-mode bookkeeping) so this registry, ingestion's
-// agentKind stamp, and the client fold can never drift apart.
+// Classification comes from the shared contracts helper so this registry,
+// ingestion's agentKind stamp, and the client fold can never drift apart.
+// INERT_TASK_TYPES remains useful here because those tasks should disappear
+// from liveness entirely unless an adapter explicitly promotes one to agent.
 
 const TERMINAL_STATUSES: ReadonlySet<string> = new Set([
   "completed",
@@ -59,6 +58,7 @@ export class ThreadBackgroundLivenessService extends Context.Service<
       readonly status: string | undefined;
       readonly kind: "started" | "progress" | "updated" | "completed";
       readonly agentId?: string | undefined;
+      readonly agentKind?: "agent" | "background" | undefined;
     }) => void;
 
     /** Session death orphans all of a thread's background work. */
@@ -104,17 +104,20 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
   return {
     recordTaskLiveness: (input) => {
       const taskType = input.taskType;
-      if (taskType !== undefined && INERT_TASK_TYPES.has(taskType)) {
+      const agentKind =
+        input.agentKind ??
+        classifyTaskAgentKind({
+          taskType,
+          agentId: input.agentId,
+        });
+      if (agentKind !== "agent" && taskType !== undefined && INERT_TASK_TYPES.has(taskType)) {
         drop(input.threadId, input.taskId);
         return;
       }
       // A subagent's internal non-agent work (its own shells/monitors) is
       // covered by the owning agent's liveness. Nested agents fall through:
       // they can outlive their parent (review finding).
-      if (
-        input.agentId !== undefined &&
-        (taskType === undefined || MONITOR_TASK_TYPES.has(taskType))
-      ) {
+      if (input.agentId !== undefined && agentKind === "background") {
         drop(input.threadId, input.taskId);
         return;
       }
@@ -132,8 +135,7 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
 
       drop(input.threadId, input.taskId);
       const state = stateFor(input.threadId);
-      const bucket =
-        taskType !== undefined && MONITOR_TASK_TYPES.has(taskType) ? state.monitors : state.agents;
+      const bucket = agentKind === "agent" ? state.agents : state.monitors;
       bucket.add(input.taskId);
     },
 

@@ -20,7 +20,7 @@ import {
   type SDKUserMessage,
   type ModelUsage,
 } from "@anthropic-ai/claude-agent-sdk";
-import { parseCliArgs } from "@t3tools/shared/cliArgs";
+import { parseCliArgs, tokenizeCliArgs } from "@t3tools/shared/cliArgs";
 import {
   ApprovalRequestId,
   type CanonicalItemType,
@@ -177,6 +177,13 @@ interface ToolInFlight {
   /** Owning agent when this tool ran inside a subagent (see attribution note). */
   readonly agentId?: string;
   readonly parentToolUseId?: string;
+  readonly externalAgentLaunch?: ClaudeExternalAgentLaunch;
+}
+
+interface ClaudeExternalAgentLaunch {
+  readonly role: "codex";
+  readonly model?: string;
+  readonly effort?: string;
 }
 
 interface ClaudeTaskState {
@@ -206,6 +213,7 @@ interface ClaudeTaskAgentState {
    * assistant snapshots (authoritative API model). */
   model: string | undefined;
   effort: string | undefined;
+  agentKind: "agent" | "background" | undefined;
 }
 
 interface ClaudeSessionContext {
@@ -229,6 +237,7 @@ interface ClaudeSessionContext {
   readonly inFlightTools: Map<number, ToolInFlight>;
   readonly claudeTasks: Map<string, ClaudeTaskState>;
   readonly taskAgents: Map<string, ClaudeTaskAgentState>;
+  readonly externalAgentLaunches: Map<string, ClaudeExternalAgentLaunch>;
   /**
    * Last emitted workflow-member fingerprint per member slot. A coordinator
    * task_progress repeats the FULL member array every tick; without a
@@ -705,6 +714,100 @@ function classifyToolItemType(toolName: string): CanonicalItemType {
   return "dynamic_tool_call";
 }
 
+function executableName(token: string | undefined): string | undefined {
+  return token?.split(/[\\/]/).findLast((segment) => segment.length > 0);
+}
+
+function unquoteCliValue(value: string): string {
+  const trimmed = value.trim();
+  const first = trimmed.at(0);
+  const last = trimmed.at(-1);
+  return trimmed.length >= 2 && first === last && (first === '"' || first === "'")
+    ? trimmed.slice(1, -1)
+    : trimmed;
+}
+
+function codexExecArgs(tokens: ReadonlyArray<string>): ReadonlyArray<string> | undefined {
+  let cursor = tokens[0] === "command" ? 1 : 0;
+  if (executableName(tokens[cursor]) === "codex" && tokens[cursor + 1] === "exec") {
+    return tokens.slice(cursor + 2);
+  }
+
+  // `codex-first` uses this fallback when the direct executable is not on PATH.
+  if (executableName(tokens[cursor]) !== "fnm" || tokens[cursor + 1] !== "exec") {
+    return undefined;
+  }
+  const commandSeparator = tokens.indexOf("--", cursor + 2);
+  cursor = commandSeparator + 1;
+  if (
+    commandSeparator === -1 ||
+    executableName(tokens[cursor]) !== "codex" ||
+    tokens[cursor + 1] !== "exec"
+  ) {
+    return undefined;
+  }
+  return tokens.slice(cursor + 2);
+}
+
+function codexLaunchMetadata(args: ReadonlyArray<string>): Omit<ClaudeExternalAgentLaunch, "role"> {
+  let model: string | undefined;
+  let effort: string | undefined;
+  for (let index = 0; index < args.length; index++) {
+    const token = args[index];
+    if (token === undefined) continue;
+    if ((token === "-m" || token === "--model") && args[index + 1]) {
+      model = args[index + 1];
+      index++;
+      continue;
+    }
+    if (token.startsWith("--model=")) {
+      model = token.slice("--model=".length);
+      continue;
+    }
+
+    const config =
+      (token === "-c" || token === "--config") && args[index + 1]
+        ? args[++index]
+        : token.startsWith("--config=")
+          ? token.slice("--config=".length)
+          : undefined;
+    if (!config) continue;
+    const separator = config.indexOf("=");
+    if (separator === -1 || config.slice(0, separator).trim() !== "model_reasoning_effort") {
+      continue;
+    }
+    const parsedEffort = unquoteCliValue(config.slice(separator + 1));
+    if (parsedEffort.length > 0) effort = parsedEffort;
+  }
+  return {
+    ...(model ? { model } : {}),
+    ...(effort ? { effort } : {}),
+  };
+}
+
+/** Recognizes an autonomous Codex CLI run, independent of the skill or prompt that requested it. */
+function externalAgentLaunchForTool(
+  toolName: string,
+  input: Record<string, unknown>,
+): ClaudeExternalAgentLaunch | undefined {
+  if (classifyToolItemType(toolName) !== "command_execution" || input.run_in_background !== true) {
+    return undefined;
+  }
+  const commandValue = input.command ?? input.cmd;
+  if (typeof commandValue !== "string") {
+    return undefined;
+  }
+  const tokens = tokenizeCliArgs(commandValue.replace(/\\\r?\n/g, " "));
+  const args = codexExecArgs(tokens);
+  if (!args) {
+    return undefined;
+  }
+  return {
+    role: "codex",
+    ...codexLaunchMetadata(args),
+  };
+}
+
 function isReadOnlyToolName(toolName: string): boolean {
   const normalized = toolName.toLowerCase();
   return (
@@ -994,6 +1097,7 @@ function taskLinkageFor(
     return {};
   }
   return {
+    ...(agent.agentKind ? { agentKind: agent.agentKind } : {}),
     ...(agent.taskType ? { taskType: agent.taskType } : {}),
     ...(agent.owningAgentId ? { agentId: agent.owningAgentId } : {}),
     ...(agent.description ? { title: agent.description } : {}),
@@ -2473,12 +2577,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         const partialInputJson = tool.partialInputJson + event.delta.partial_json;
         const parsedInput = tryParseJsonRecord(partialInputJson);
         const detail = parsedInput ? summarizeToolRequest(tool.toolName, parsedInput) : tool.detail;
+        const externalAgentLaunch = parsedInput
+          ? (externalAgentLaunchForTool(tool.toolName, parsedInput) ?? tool.externalAgentLaunch)
+          : tool.externalAgentLaunch;
         let nextTool: ToolInFlight = {
           ...tool,
           partialInputJson,
           ...(parsedInput ? { input: parsedInput } : {}),
           ...(detail ? { detail } : {}),
+          ...(externalAgentLaunch ? { externalAgentLaunch } : {}),
         };
+        if (externalAgentLaunch) {
+          context.externalAgentLaunches.set(tool.itemId, externalAgentLaunch);
+        }
 
         const nextFingerprint =
           parsedInput && Object.keys(parsedInput).length > 0
@@ -2520,6 +2631,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             ...(nextTool.detail ? { detail: nextTool.detail } : {}),
             ...(nextTool.agentId ? { agentId: nextTool.agentId } : {}),
             ...(nextTool.parentToolUseId ? { parentToolUseId: nextTool.parentToolUseId } : {}),
+            ...(nextTool.externalAgentLaunch ? { timelineBypass: true } : {}),
             data: {
               toolName: nextTool.toolName,
               input: nextTool.input,
@@ -2588,6 +2700,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const detail = summarizeToolRequest(toolName, toolInput);
       const inputFingerprint =
         Object.keys(toolInput).length > 0 ? toolInputFingerprint(toolInput) : undefined;
+      const externalAgentLaunch = externalAgentLaunchForTool(toolName, toolInput);
 
       // Attribute tools that ran inside a subagent to their owning agent so
       // clients can re-home them out of the main timeline (quiet-timeline
@@ -2608,8 +2721,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(inputFingerprint ? { lastEmittedInputFingerprint: inputFingerprint } : {}),
         ...(owningAgentId ? { agentId: owningAgentId } : {}),
         ...(parentToolUseId ? { parentToolUseId } : {}),
+        ...(externalAgentLaunch ? { externalAgentLaunch } : {}),
       };
       context.inFlightTools.set(index, tool);
+      if (externalAgentLaunch) {
+        context.externalAgentLaunches.set(itemId, externalAgentLaunch);
+      }
 
       const stamp = yield* makeEventStamp();
       yield* offerRuntimeEvent({
@@ -2627,6 +2744,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ...(tool.detail ? { detail: tool.detail } : {}),
           ...(tool.agentId ? { agentId: tool.agentId } : {}),
           ...(tool.parentToolUseId ? { parentToolUseId: tool.parentToolUseId } : {}),
+          ...(tool.externalAgentLaunch ? { timelineBypass: true } : {}),
           data: {
             toolName: tool.toolName,
             input: toolInput,
@@ -2707,6 +2825,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ...(tool.detail ? { detail: tool.detail } : {}),
           ...(tool.agentId ? { agentId: tool.agentId } : {}),
           ...(tool.parentToolUseId ? { parentToolUseId: tool.parentToolUseId } : {}),
+          ...(tool.externalAgentLaunch ? { timelineBypass: true } : {}),
           data: toolData,
         },
         providerRefs: nativeProviderRefs(context, {
@@ -2761,6 +2880,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ...(tool.detail ? { detail: tool.detail } : {}),
           ...(tool.agentId ? { agentId: tool.agentId } : {}),
           ...(tool.parentToolUseId ? { parentToolUseId: tool.parentToolUseId } : {}),
+          ...(tool.externalAgentLaunch ? { timelineBypass: true } : {}),
           data: toolData,
         },
         providerRefs: nativeProviderRefs(context, {
@@ -2806,6 +2926,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             owningAgentId: existing?.owningAgentId,
             model: existing?.model,
             effort: existing?.effort,
+            agentKind: existing?.agentKind,
           });
         }
       }
@@ -2819,6 +2940,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           rawMethod: "claude/user",
           rawPayload: message,
         });
+      }
+
+      if (toolResult.isError && tool.externalAgentLaunch) {
+        context.externalAgentLaunches.delete(tool.itemId);
       }
 
       context.inFlightTools.delete(index);
@@ -3158,27 +3283,38 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             )
           : undefined;
         const owningAgentId = launchingTool?.agentId;
-        // Model/effort: the Agent tool's input carries explicit overrides;
-        // absent ones inherit the session's selection (SDK behavior).
-        // Subagent assistant snapshots later refine model with the
-        // authoritative API id. AgentInput.effort may be a named level or an
-        // integer.
+        const externalAgentLaunch = message.tool_use_id
+          ? (launchingTool?.externalAgentLaunch ??
+            context.externalAgentLaunches.get(message.tool_use_id))
+          : undefined;
+        if (message.tool_use_id && externalAgentLaunch) {
+          context.externalAgentLaunches.delete(message.tool_use_id);
+        }
+        // Native Agent tools inherit the Claude session when they omit an
+        // override. External Codex tasks only advertise values explicitly
+        // present in their CLI command; inheriting Claude's selection would
+        // mislabel them. Native snapshots can later refine their API model.
         const launchInput = launchingTool?.input;
-        const model =
-          trimmedString(launchInput?.model) ?? trimmedString(context.session.model ?? undefined);
+        const model = externalAgentLaunch
+          ? externalAgentLaunch.model
+          : (trimmedString(launchInput?.model) ??
+            trimmedString(context.session.model ?? undefined));
         const rawLaunchEffort = launchInput?.effort;
-        const effort =
-          trimmedString(rawLaunchEffort) ??
-          (typeof rawLaunchEffort === "number" && Number.isFinite(rawLaunchEffort)
-            ? String(rawLaunchEffort)
-            : context.currentEffort);
+        const effort = externalAgentLaunch
+          ? externalAgentLaunch.effort
+          : (trimmedString(rawLaunchEffort) ??
+            (typeof rawLaunchEffort === "number" && Number.isFinite(rawLaunchEffort)
+              ? String(rawLaunchEffort)
+              : context.currentEffort));
+        const subagentType = externalAgentLaunch?.role ?? message.subagent_type;
+        const agentKind = externalAgentLaunch ? ("agent" as const) : undefined;
         // Remember the agent identity so every later task.* payload for this
         // taskId is self-describing (identity must survive activity retention).
         context.taskAgents.set(message.task_id, {
           taskId: message.task_id,
           toolUseId: message.tool_use_id,
           description: message.description,
-          subagentType: message.subagent_type,
+          subagentType,
           taskType: message.task_type,
           workflowName: message.workflow_name,
           skipTranscript: message.skip_transcript === true,
@@ -3186,6 +3322,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           owningAgentId,
           model,
           effort,
+          agentKind,
         });
         context.liveTaskIds.add(message.task_id);
         yield* offerRuntimeEvent({
@@ -3195,9 +3332,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             taskId: RuntimeTaskId.make(message.task_id),
             description: message.description,
             ...(message.task_type ? { taskType: message.task_type } : {}),
+            ...(agentKind ? { agentKind } : {}),
             ...(owningAgentId ? { agentId: owningAgentId } : {}),
             ...(message.description ? { title: message.description } : {}),
-            ...(message.subagent_type ? { role: message.subagent_type } : {}),
+            ...(subagentType ? { role: subagentType } : {}),
             ...(model ? { model } : {}),
             ...(effort ? { effort } : {}),
             ...(message.tool_use_id ? { toolUseId: message.tool_use_id } : {}),
@@ -3780,6 +3918,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const inFlightTools = new Map<number, ToolInFlight>();
       const claudeTasks = new Map<string, ClaudeTaskState>();
       const taskAgents = new Map<string, ClaudeTaskAgentState>();
+      const externalAgentLaunches = new Map<string, ClaudeExternalAgentLaunch>();
       const workflowMemberFingerprints = new Map<string, string>();
       const liveTaskIds = new Set<string>();
 
@@ -4235,6 +4374,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         inFlightTools,
         claudeTasks,
         taskAgents,
+        externalAgentLaunches,
         workflowMemberFingerprints,
         liveTaskIds,
         turnState: undefined,

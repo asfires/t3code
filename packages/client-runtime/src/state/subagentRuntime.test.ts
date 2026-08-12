@@ -586,6 +586,35 @@ describe("background task exclusion", () => {
     expect(agents.map((agent) => agent.id)).toEqual(["agent-1"]);
   });
 
+  it("includes an explicitly promoted external agent even when its SDK task is a shell", () => {
+    const agents = fold([
+      activity("task.started", {
+        taskId: "codex-1",
+        taskType: "local_bash",
+        agentKind: "agent",
+        title: "Review before merge",
+        role: "codex",
+        model: "gpt-5.6-sol",
+        effort: "high",
+      }),
+      activity("task.completed", {
+        taskId: "codex-1",
+        taskType: "local_bash",
+        agentKind: "agent",
+        status: "completed",
+      }),
+    ]);
+    expect(agents).toHaveLength(1);
+    expect(agents[0]).toMatchObject({
+      id: "codex-1",
+      title: "Review before merge",
+      role: "codex",
+      model: "gpt-5.6-sol",
+      effort: "high",
+      status: "completed",
+    });
+  });
+
   it("rows without a taskType stay in the roster (workflow members, Codex children)", () => {
     const agents = fold([
       activity("task.progress", { taskId: "wf-1:wf:0", status: "running", parentAgentId: "wf-1" }),
