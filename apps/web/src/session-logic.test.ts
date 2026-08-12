@@ -1943,6 +1943,33 @@ describe("deriveWorkLogEntries quiet-timeline guarantee", () => {
     expect(entries[0]!.agentSpawn?.agentTaskIds).toEqual(["child-1", "child-2"]);
   });
 
+  it("shows a promoted Claude-launched Codex task as an agent CTA without its Bash row", () => {
+    const entries = deriveWorkLogEntries([
+      makeActivity({
+        kind: "tool.started",
+        summary: "Bash started",
+        tone: "tool",
+        payload: { itemType: "command_execution", timelineBypass: true },
+        turnId: "turn-codex",
+      }),
+      makeActivity({
+        kind: "task.started",
+        summary: "Task started",
+        tone: "info",
+        payload: {
+          taskId: "codex-1",
+          taskType: "local_bash",
+          agentKind: "agent",
+          title: "Review before merge",
+          role: "codex",
+        },
+        turnId: "turn-codex",
+      }),
+    ]);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.agentSpawn?.agentTaskIds).toEqual(["codex-1"]);
+  });
+
   it("timelineBypass non-agent rows (background shells) stay suppressed", () => {
     const entries = deriveWorkLogEntries([
       makeActivity({

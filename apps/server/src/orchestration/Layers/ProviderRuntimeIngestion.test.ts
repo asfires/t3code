@@ -9,6 +9,8 @@ import {
   ProviderRuntimeEvent,
   ProviderSession,
   ProviderInstanceId,
+  RuntimeItemId,
+  RuntimeTaskId,
 } from "@t3tools/contracts";
 import {
   ApprovalRequestId,
@@ -71,6 +73,49 @@ const asThreadId = (value: string): ThreadId => ThreadId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
 
 describe("runtimeEventToActivities", () => {
+  it("preserves explicit external-agent and launcher classification", () => {
+    const createdAt = "2026-08-12T00:00:00.000Z";
+    const [taskActivity] = runtimeEventToActivities({
+      type: "task.started",
+      eventId: asEventId("evt-external-agent"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-1"),
+      payload: {
+        taskId: RuntimeTaskId.make("codex-1"),
+        description: "Review before merge",
+        taskType: "local_bash",
+        agentKind: "agent",
+        role: "codex",
+      },
+    });
+    expect(taskActivity?.payload).toMatchObject({
+      taskId: "codex-1",
+      taskType: "local_bash",
+      agentKind: "agent",
+      role: "codex",
+    });
+
+    const [launcherActivity] = runtimeEventToActivities({
+      type: "item.started",
+      eventId: asEventId("evt-external-agent-launcher"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-1"),
+      itemId: RuntimeItemId.make("tool-codex-1"),
+      payload: {
+        itemType: "command_execution",
+        timelineBypass: true,
+      },
+    });
+    expect(launcherActivity?.payload).toMatchObject({
+      itemType: "command_execution",
+      timelineBypass: true,
+    });
+  });
+
   it("persists prompt suggestions as hidden turn-scoped composer metadata", () => {
     const activities = runtimeEventToActivities({
       type: "thread.metadata.updated",

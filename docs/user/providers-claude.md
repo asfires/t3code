@@ -4,6 +4,18 @@ After Claude finishes a turn, it may suggest a likely follow-up in the empty mes
 Press Tab to copy that suggestion into the composer; T3 Code does not send it until you submit it.
 Prompt suggestions are on by default and can be changed for each Claude provider in Settings.
 
+## Codex Agents Launched By Claude
+
+When Claude starts `codex exec` as a background Bash command, T3 Code presents that task in the
+Agents view and groups launches into the same agent summary shown for Claude's own subagents.
+Ordinary background commands still appear as Monitoring.
+
+Recognition is based on the command Claude actually launches, not on a particular skill or phrase.
+A skill can teach Claude when and how to delegate to Codex, but T3 Code does not require one. When
+the command includes an explicit Codex model or reasoning effort, the Agents view displays it.
+Claude's task lifecycle supplies status and progress; Codex token and tool counts are not shown
+unless that lifecycle reports them.
+
 This guide is for people who want to use more than one Claude setup in T3 Code. For Codex, see
 [Codex](./providers-codex.md). For first-time setup, see [Install T3 Code](./install.md).
 
