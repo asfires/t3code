@@ -4765,9 +4765,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     },
   );
 
-  const rollbackThreadTo: NonNullable<ClaudeAdapterShape["rollbackThreadTo"]> = Effect.fn(
-    "rollbackThreadTo",
-  )(function* (threadId, retainedTurnCount) {
+  const validateRollbackBoundary = Effect.fn("validateClaudeRollbackBoundary")(function* (
+    threadId: ThreadId,
+    retainedTurnCount: number,
+  ) {
     const context = yield* requireSession(threadId);
     if (!Number.isInteger(retainedTurnCount) || retainedTurnCount < 0) {
       return yield* new ProviderAdapterValidationError({
@@ -4784,6 +4785,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         issue: `Provider history has ${lifetimeTurnCount} turns, below retained boundary ${retainedTurnCount}.`,
       });
     }
+  });
+
+  const validateRollbackThreadTo: NonNullable<ClaudeAdapterShape["validateRollbackThreadTo"]> =
+    validateRollbackBoundary;
+
+  const rollbackThreadTo: NonNullable<ClaudeAdapterShape["rollbackThreadTo"]> = Effect.fn(
+    "rollbackThreadTo",
+  )(function* (threadId, retainedTurnCount) {
+    yield* validateRollbackBoundary(threadId, retainedTurnCount);
+    const context = yield* requireSession(threadId);
+    const lifetimeTurnCount = context.sessionBaseTurnCount + context.turns.length;
     const delta = lifetimeTurnCount - retainedTurnCount;
     const sessionLocalTurnCount = context.turns.length;
     const nextLength = sessionLocalTurnCount - Math.min(delta, sessionLocalTurnCount);
@@ -4896,6 +4908,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     interruptTurn,
     readThread,
     rollbackThread,
+    validateRollbackThreadTo,
     rollbackThreadTo,
     respondToRequest,
     respondToUserInput,

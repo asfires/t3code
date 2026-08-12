@@ -30,7 +30,11 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
-import { ProviderAdapterRequestError, ProviderValidationError } from "../../provider/Errors.ts";
+import {
+  ProviderAdapterRequestError,
+  ProviderAdapterValidationError,
+  ProviderValidationError,
+} from "../../provider/Errors.ts";
 import {
   ProviderService,
   type ProviderServiceShape,
@@ -80,6 +84,7 @@ type MutableState = {
   failRestoreAfterEffect: boolean;
   failCompletionAfterCommit: boolean;
   terminalRollbackFailure: boolean;
+  unavailableRetainedBoundary: boolean;
   interruptAcknowledgementHangs: boolean;
   readonly order: string[];
   readonly interruptedTurnIds: Array<TurnId | undefined>;
@@ -119,6 +124,7 @@ function makeState(providerSendState: ProjectionTurnRetraction["providerSendStat
     failRestoreAfterEffect: false,
     failCompletionAfterCommit: false,
     terminalRollbackFailure: false,
+    unavailableRetainedBoundary: false,
     interruptAcknowledgementHangs: false,
     order: [],
     interruptedTurnIds: [],
@@ -333,6 +339,16 @@ async function startHarness(
         },
       }),
     rollbackConversation: () => unsupported(),
+    validateRollbackConversationTo: ({ retainedTurnCount }) =>
+      state.unavailableRetainedBoundary
+        ? Effect.fail(
+            new ProviderAdapterValidationError({
+              provider: "claudeAgent",
+              operation: "rollbackThreadTo",
+              issue: `Provider history has 3 turns, below retained boundary ${retainedTurnCount}.`,
+            }),
+          )
+        : Effect.void,
     rollbackConversationTo: ({ retainedTurnCount, targetTurnId }) =>
       Effect.gen(function* () {
         state.order.push("rollback");
@@ -731,6 +747,36 @@ it("marks terminal provider rollback failure with the correlated activity shape"
       },
     },
   });
+  await stopHarness(harness);
+});
+
+it("silently rejects an unavailable retained boundary before interrupting the turn", async () => {
+  const state = makeState("claimed");
+  state.unavailableRetainedBoundary = true;
+  const harness = await startHarness(state);
+
+  expect(state.interruptedTurnIds).toEqual([]);
+  expect(state.order).toEqual([]);
+  expect(state.sessionStatus).toBe("running");
+  expect(state.row.status).toBe("failed");
+  expect(
+    state.dispatched.find(
+      (command) =>
+        command.type === "thread.activity.append" &&
+        command.activity.kind === "turn.retract.failed",
+    ),
+  ).toMatchObject({
+    type: "thread.activity.append",
+    activity: {
+      payload: {
+        requestId: REQUEST_ID,
+        stage: "provider-rollback",
+        retryable: false,
+        silent: true,
+      },
+    },
+  });
+
   await stopHarness(harness);
 });
 

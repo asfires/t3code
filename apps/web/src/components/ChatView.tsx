@@ -263,7 +263,7 @@ import {
 } from "./chat/chatEscapeTrigger";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { shouldRenderEmptyThreadHero } from "./chat/emptyThreadHero";
-import { findCorrelatedRetractionFailure } from "./chat/lastUserMessageRecovery";
+import { findCorrelatedRetractionFailureInfo } from "./chat/lastUserMessageRecovery";
 import {
   deriveEffectiveSessionPresentation,
   usePendingRetractionForThread,
@@ -1540,13 +1540,14 @@ function ChatViewContent(props: ChatViewProps) {
   // depend on which route is mounted.
   const isServerThread = activeServerThread !== null;
   const activeThread = activeServerThread ?? localDraftThread;
-  const retractionFailureDetail =
+  const retractionFailure =
     activeServerThread?.turnRetraction?.status === "failed"
-      ? findCorrelatedRetractionFailure(
+      ? findCorrelatedRetractionFailureInfo(
           activeServerThread.activities,
           activeServerThread.turnRetraction.requestId,
         )
       : null;
+  const retractionFailureDetail = retractionFailure?.silent ? null : retractionFailure?.detail;
   const threadError = isServerThread
     ? (localServerError ??
       retractionFailureDetail ??

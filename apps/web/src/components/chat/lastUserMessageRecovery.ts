@@ -11,11 +11,13 @@ import type {
   TurnId,
 } from "@t3tools/contracts";
 import { PROVIDER_SEND_TURN_MAX_ATTACHMENTS } from "@t3tools/contracts";
+import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
 import {
   type ComposerImageAttachment,
+  type ComposerThreadDraftState,
   type DraftId,
   type DraftThreadEnvMode,
   type PersistedComposerImageAttachment,
@@ -26,6 +28,41 @@ import { cloneComposerImageForRetry, readFileAsDataUrl } from "../ChatView.logic
 import { mergePoppedPrompt } from "./lastUserMessagePop";
 
 const RETRACTION_RECOVERY_STORAGE_KEY = "t3code:thread-retraction-recoveries:v1";
+
+const optimisticComposerSnapshots = new Map<
+  string,
+  { readonly threadKey: string; readonly draft: ComposerThreadDraftState | null }
+>();
+
+function cloneComposerDraft(
+  draft: ComposerThreadDraftState | null,
+): ComposerThreadDraftState | null {
+  return draft
+    ? {
+        ...draft,
+        images: [...draft.images],
+        nonPersistedImageIds: [...draft.nonPersistedImageIds],
+        persistedAttachments: [...draft.persistedAttachments],
+        terminalContexts: [...draft.terminalContexts],
+        elementContexts: [...draft.elementContexts],
+        previewAnnotations: [...draft.previewAnnotations],
+        reviewComments: [...draft.reviewComments],
+        modelSelectionByProvider: { ...draft.modelSelectionByProvider },
+      }
+    : null;
+}
+
+export function rememberOptimisticRetractionComposer(input: {
+  requestId: CommandId;
+  sourceThreadRef: ScopedThreadRef;
+}): void {
+  optimisticComposerSnapshots.set(input.requestId, {
+    threadKey: scopedThreadKey(input.sourceThreadRef),
+    draft: cloneComposerDraft(
+      useComposerDraftStore.getState().getComposerDraft(input.sourceThreadRef),
+    ),
+  });
+}
 
 export interface PendingRetractionRecovery {
   requestId: CommandId;
@@ -296,6 +333,7 @@ export function discardRetractionRecovery(input: {
   if (!input.preserveDraft) {
     useComposerDraftStore.getState().clearDraftThread(recovery.draftId);
   }
+  optimisticComposerSnapshots.delete(input.requestId);
   useRetractionRecoveryStore.getState().forget(input.requestId);
   return true;
 }
@@ -306,17 +344,60 @@ export interface AppliedRetractionRecovery {
   unrestoredImageNames: string[];
 }
 
-export function findCorrelatedRetractionFailure(
+export function restoreOptimisticRetractionComposer(
+  requestId: CommandId,
+): AppliedRetractionRecovery | null {
+  const snapshot = optimisticComposerSnapshots.get(requestId);
+  if (!snapshot) return null;
+  optimisticComposerSnapshots.delete(requestId);
+  useComposerDraftStore.setState((state) => {
+    if (snapshot.draft) {
+      return {
+        draftsByThreadKey: {
+          ...state.draftsByThreadKey,
+          [snapshot.threadKey]: cloneComposerDraft(snapshot.draft)!,
+        },
+      };
+    }
+    const { [snapshot.threadKey]: _removed, ...draftsByThreadKey } = state.draftsByThreadKey;
+    return { draftsByThreadKey };
+  });
+  return {
+    prompt: snapshot.draft?.prompt ?? "",
+    images: snapshot.draft?.images ?? [],
+    unrestoredImageNames: [],
+  };
+}
+
+export interface CorrelatedRetractionFailure {
+  detail: string;
+  silent: boolean;
+}
+
+export function findCorrelatedRetractionFailureInfo(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
   requestId: CommandId,
-): string | null {
+): CorrelatedRetractionFailure | null {
   const activity = activities.findLast((entry) => {
     if (entry.kind !== "turn.retract.failed" || typeof entry.payload !== "object") return false;
     return (entry.payload as { requestId?: unknown } | null)?.requestId === requestId;
   });
   if (!activity) return null;
-  const detail = (activity.payload as { detail?: unknown } | null)?.detail;
-  return typeof detail === "string" && detail.trim().length > 0 ? detail : activity.summary;
+  const payload = activity.payload as { detail?: unknown; silent?: unknown } | null;
+  return {
+    detail:
+      typeof payload?.detail === "string" && payload.detail.trim().length > 0
+        ? payload.detail
+        : activity.summary,
+    silent: payload?.silent === true,
+  };
+}
+
+export function findCorrelatedRetractionFailure(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+  requestId: CommandId,
+): string | null {
+  return findCorrelatedRetractionFailureInfo(activities, requestId)?.detail ?? null;
 }
 
 export function restoreRetractionRecoveryToThread(input: {
@@ -372,6 +453,7 @@ export function restoreRetractionRecoveryToThread(input: {
   store.setRuntimeMode(input.sourceThreadRef, recoveredDraft.runtimeMode);
   store.setInteractionMode(input.sourceThreadRef, recoveredDraft.interactionMode);
   store.clearDraftThread(recovery.draftId);
+  optimisticComposerSnapshots.delete(input.requestId);
   useRetractionRecoveryStore.getState().forget(input.requestId);
 
   return {
@@ -460,6 +542,7 @@ export function surfaceRetractionRecoveryDraft(input: {
     hidden: false,
   });
   if (!input.retainRecovery) {
+    optimisticComposerSnapshots.delete(input.requestId);
     useRetractionRecoveryStore.getState().forget(input.requestId);
   }
   if (input.navigate) {

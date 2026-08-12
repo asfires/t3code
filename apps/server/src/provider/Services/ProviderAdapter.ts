@@ -127,6 +127,17 @@ export interface ProviderAdapterShape<TError> {
   ) => Effect.Effect<ProviderThreadSnapshot, TError>;
 
   /**
+   * Validate an absolute rollback boundary without changing provider state.
+   * Adapters that track history relative to an opaque resume cursor use this
+   * to reject an unavailable boundary before a live turn is interrupted.
+   */
+  readonly validateRollbackThreadTo?: (
+    threadId: ThreadId,
+    retainedTurnCount: number,
+    targetTurnId?: TurnId,
+  ) => Effect.Effect<void, TError>;
+
+  /**
    * Stop all sessions owned by this adapter.
    */
   readonly stopAll: () => Effect.Effect<void, TError>;

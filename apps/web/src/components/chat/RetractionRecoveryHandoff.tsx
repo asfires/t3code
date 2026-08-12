@@ -16,11 +16,12 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
 import {
   type FirstMessageRetractionCompletion,
   discardRetractionRecovery,
-  findCorrelatedRetractionFailure,
+  findCorrelatedRetractionFailureInfo,
   handoffCompletedFirstMessageRetraction,
   handoffCompletedMidThreadRetraction,
   type PendingRetractionRecovery,
   restoreRetractionRecoveryToThread,
+  restoreOptimisticRetractionComposer,
   surfaceRetractionRecoveryDraft,
   useRetractionRecoveryStore,
 } from "./lastUserMessageRecovery";
@@ -36,6 +37,7 @@ type RetractionProjection = Pick<
 export type RetractionRecoverySignal =
   | { kind: "completed"; completion: FirstMessageRetractionCompletion }
   | { kind: "failed"; detail: string; sourceThreadExists: boolean }
+  | { kind: "ignored" }
   | { kind: "source-thread-gone" }
   | { kind: "stale" }
   | null;
@@ -90,7 +92,7 @@ export function resolveRetractionRecoverySignal(input: {
   sourceThreadInShell: boolean;
   nowMs: number;
 }): RetractionRecoverySignal {
-  const activityFailure = findCorrelatedRetractionFailure(
+  const activityFailure = findCorrelatedRetractionFailureInfo(
     input.activities,
     input.recovery.requestId,
   );
@@ -100,10 +102,13 @@ export function resolveRetractionRecoverySignal(input: {
   const sourceThreadExists =
     input.threadStatus !== "deleted" &&
     (input.shellSnapshotReady ? input.sourceThreadInShell : input.threadDetailExists);
+  if (activityFailure?.silent) {
+    return { kind: "ignored" };
+  }
   if (projectedFailure || activityFailure !== null) {
     return {
       kind: "failed",
-      detail: activityFailure ?? "The server could not retract this message.",
+      detail: activityFailure?.detail ?? "The server could not retract this message.",
       sourceThreadExists,
     };
   }
@@ -142,6 +147,11 @@ export function applyRetractionRecoverySignal(input: {
   }) => unknown;
 }): "draft-surfaced" | "thread-restored" | null {
   const optimisticDestination = input.recovery.optimisticDestination;
+  if (input.signal.kind === "ignored") {
+    restoreOptimisticRetractionComposer(input.recovery.requestId);
+    discardRetractionRecovery({ requestId: input.recovery.requestId });
+    return "thread-restored";
+  }
   if (optimisticDestination && input.signal.kind !== "stale") {
     if (
       input.signal.kind === "completed" &&
