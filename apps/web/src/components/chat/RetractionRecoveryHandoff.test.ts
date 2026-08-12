@@ -16,6 +16,8 @@ import {
   resolveRetractionRecoverySignal,
 } from "./RetractionRecoveryHandoff";
 import {
+  applyOptimisticRetractionRecoveryToThread,
+  rememberOptimisticRetractionComposer,
   snapshotLastUserMessageRecovery,
   useRetractionRecoveryStore,
 } from "./lastUserMessageRecovery";
@@ -212,6 +214,70 @@ describe("retraction recovery handoff", () => {
     expect(navigate).not.toHaveBeenCalled();
     expect(useComposerDraftStore.getState().getComposerDraft(sourceThreadRef)?.prompt).toBe(
       "preserve this message",
+    );
+    expect(useComposerDraftStore.getState().getDraftSession(draftId)).toBeNull();
+  });
+
+  it("silently restores the pre-Esc composer for an ignored boundary rejection", async () => {
+    useComposerDraftStore.getState().setPrompt(sourceThreadRef, "existing draft");
+    rememberOptimisticRetractionComposer({ requestId, sourceThreadRef });
+    const recovery = await seedRecovery();
+    useRetractionRecoveryStore.getState().setOptimisticDestination(requestId, "thread");
+    applyOptimisticRetractionRecoveryToThread({
+      sourceThreadRef,
+      bundle: {
+        prompt: "preserve this message",
+        images: [],
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5.6",
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        envMode: "worktree",
+        baseBranch: "main",
+        startFromOrigin: true,
+      },
+    });
+    expect(useComposerDraftStore.getState().getComposerDraft(sourceThreadRef)?.prompt).toBe(
+      "existing draft\n\npreserve this message",
+    );
+
+    const signal = resolveRetractionRecoverySignal({
+      recovery,
+      liveCompletion: null,
+      projectedRetraction: {
+        requestId,
+        messageId,
+        targetTurnId: null,
+        firstUserMessage: false,
+        status: "failed",
+        completedAt: null,
+      },
+      activities: [
+        {
+          id: "ignored-failure" as never,
+          tone: "error",
+          kind: "turn.retract.failed",
+          summary: "Message retract failed",
+          payload: { requestId, detail: "boundary unavailable", silent: true },
+          turnId: null,
+          createdAt: "2026-08-11T12:00:00.100Z",
+        },
+      ],
+      threadStatus: "live",
+      threadDetailExists: true,
+      shellSnapshotReady: true,
+      sourceThreadInShell: true,
+      nowMs: Date.parse(createdAt) + 100,
+    });
+
+    expect(signal).toEqual({ kind: "ignored" });
+    expect(signal && applyRetractionRecoverySignal({ recovery, signal, navigate: vi.fn() })).toBe(
+      "thread-restored",
+    );
+    expect(useComposerDraftStore.getState().getComposerDraft(sourceThreadRef)?.prompt).toBe(
+      "existing draft",
     );
     expect(useComposerDraftStore.getState().getDraftSession(draftId)).toBeNull();
   });

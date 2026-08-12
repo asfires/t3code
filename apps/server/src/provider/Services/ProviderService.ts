@@ -116,6 +116,13 @@ export interface ProviderServiceShape {
     readonly targetTurnId?: TurnId;
   }) => Effect.Effect<void, ProviderServiceError>;
 
+  /** Validate an absolute rollback boundary without mutating provider state. */
+  readonly validateRollbackConversationTo?: (input: {
+    readonly threadId: ThreadId;
+    readonly retainedTurnCount: number;
+    readonly targetTurnId?: TurnId;
+  }) => Effect.Effect<void, ProviderServiceError>;
+
   /**
    * Canonical provider runtime event stream.
    *

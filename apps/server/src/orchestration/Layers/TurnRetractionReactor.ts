@@ -58,6 +58,7 @@ type StageFailure = {
   readonly stage: RetractionStage;
   readonly retryable: boolean;
   readonly detail: string;
+  readonly silent?: boolean;
 };
 
 const terminalProviderErrorSchemas = [
@@ -74,6 +75,12 @@ const isTerminalProviderError = (error: unknown): boolean =>
 
 const failureDetail = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
+
+const isProviderAdapterValidationError = Schema.is(ProviderAdapterValidationError);
+const isUnavailableRetainedBoundary = (error: unknown): boolean =>
+  isProviderAdapterValidationError(error) &&
+  error.operation === "rollbackThreadTo" &&
+  /^Provider history has \d+ turns, below retained boundary \d+\.$/.test(error.issue);
 
 export class TurnRetractionRetryTicks extends Context.Reference<Stream.Stream<void>>(
   "t3/orchestration/Layers/TurnRetractionReactor/TurnRetractionRetryTicks",
@@ -193,6 +200,7 @@ export const makeTurnRetractionReactor = Effect.gen(function* () {
           stage: failure.stage,
           retryable: failure.retryable,
           detail: failure.detail,
+          ...(failure.silent ? { silent: true } : {}),
         },
         turnId: row.targetTurnId,
         createdAt,
@@ -462,6 +470,23 @@ export const makeTurnRetractionReactor = Effect.gen(function* () {
         return;
       }
 
+      if (providerService.validateRollbackConversationTo) {
+        yield* providerService
+          .validateRollbackConversationTo({
+            threadId: row.threadId,
+            retainedTurnCount: row.baselineTurnCount,
+            targetTurnId,
+          })
+          .pipe(
+            Effect.mapError((error) => ({
+              stage: "provider-rollback" as const,
+              retryable: !isTerminalProviderError(error),
+              detail: failureDetail(error),
+              ...(isUnavailableRetainedBoundary(error) ? { silent: true } : {}),
+            })),
+          );
+      }
+
       const nowMillis = DateTime.toEpochMillis(yield* DateTime.now);
       const priorAttempt = readInterruptAttempt(row.requestId, targetTurnId);
       const retryCadenceMillis = Duration.toMillis(interruptRetryCadence);
@@ -531,6 +556,7 @@ export const makeTurnRetractionReactor = Effect.gen(function* () {
           stage: "provider-rollback" as const,
           retryable: !isTerminalProviderError(error),
           detail: failureDetail(error),
+          ...(isUnavailableRetainedBoundary(error) ? { silent: true } : {}),
         })),
       );
     yield* restoreFilesystem(row, false);

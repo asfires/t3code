@@ -1140,6 +1140,28 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     );
   });
 
+  const validateRollbackConversationTo: NonNullable<
+    ProviderServiceMethod<"validateRollbackConversationTo">
+  > = Effect.fn("validateRollbackConversationTo")(function* (rawInput) {
+    const input = yield* decodeInputOrValidationError({
+      operation: "ProviderService.validateRollbackConversationTo",
+      schema: ProviderRollbackConversationToInput,
+      payload: rawInput,
+    });
+    const routed = yield* resolveRoutableSession({
+      threadId: input.threadId,
+      operation: "ProviderService.validateRollbackConversationTo",
+      allowRecovery: true,
+    });
+    if (routed.adapter.validateRollbackThreadTo !== undefined) {
+      yield* routed.adapter.validateRollbackThreadTo(
+        routed.threadId,
+        input.retainedTurnCount,
+        input.targetTurnId,
+      );
+    }
+  });
+
   const runStopAll = Effect.fn("runStopAll")(function* () {
     const threadIds = yield* directory.listThreadIds();
     const currentAdapters = yield* getAdapterEntries;
@@ -1211,6 +1233,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     getCapabilities,
     getInstanceInfo,
     rollbackConversation,
+    validateRollbackConversationTo,
     rollbackConversationTo,
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (ProviderRuntimeIngestion, CheckpointReactor, etc.) each

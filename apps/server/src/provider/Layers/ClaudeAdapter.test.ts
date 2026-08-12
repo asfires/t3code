@@ -3921,6 +3921,14 @@ describe("ClaudeAdapterLive", () => {
       const repeated = yield* adapter.rollbackThreadTo(session.threadId, 1);
       assert.equal(repeated.turns.length, 1);
 
+      assert.isDefined(adapter.validateRollbackThreadTo);
+      const validation = yield* adapter.validateRollbackThreadTo!(session.threadId, 2).pipe(
+        Effect.result,
+      );
+      assert.equal(validation._tag, "Failure");
+      const afterValidation = yield* adapter.readThread(session.threadId);
+      assert.equal(afterValidation.turns.length, 1);
+
       const shorterThanTarget = yield* adapter
         .rollbackThreadTo(session.threadId, 2)
         .pipe(Effect.result);

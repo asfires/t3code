@@ -771,6 +771,30 @@ describe("deriveWorkLogEntries", () => {
     expect(entries.map((entry) => entry.id)).toEqual(["task-progress", "task-complete"]);
   });
 
+  it("omits silent turn-retraction failures but keeps ordinary failures", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "silent-retraction-failure",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "turn.retract.failed",
+        summary: "Message retract failed",
+        tone: "error",
+        payload: { silent: true },
+      }),
+      makeActivity({
+        id: "visible-retraction-failure",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "turn.retract.failed",
+        summary: "Message retract failed",
+        tone: "error",
+      }),
+    ];
+
+    expect(deriveWorkLogEntries(activities).map((entry) => entry.id)).toEqual([
+      "visible-retraction-failure",
+    ]);
+  });
+
   it("uses payload summary as label for task entries when available", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

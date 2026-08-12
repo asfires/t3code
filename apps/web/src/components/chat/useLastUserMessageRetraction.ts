@@ -31,10 +31,12 @@ import {
   appendImagesToOptimisticRetractionRecovery,
   applyOptimisticRetractionRecoveryToThread,
   discardRetractionRecovery,
-  findCorrelatedRetractionFailure,
+  findCorrelatedRetractionFailureInfo,
   handoffCompletedMidThreadRetraction,
   type PendingRetractionRecovery,
   restoreRetractionRecoveryToThread,
+  restoreOptimisticRetractionComposer,
+  rememberOptimisticRetractionComposer,
   snapshotLastUserMessageRecovery,
   surfaceRetractionRecoveryDraft,
   useRetractionRecoveryStore,
@@ -142,6 +144,19 @@ export function useLastUserMessageRetraction(input: {
     [applyRestoredComposer, onOptimisticRetractionFailed, setThreadError],
   );
 
+  const ignorePendingRetraction = useCallback(
+    (recovery: PendingRetractionRecovery) => {
+      const restored = restoreOptimisticRetractionComposer(recovery.requestId);
+      discardRetractionRecovery({ requestId: recovery.requestId });
+      if (restored) applyRestoredComposer(restored);
+      onOptimisticRetractionFailed({
+        requestId: recovery.requestId,
+        messageId: recovery.messageId,
+      });
+    },
+    [applyRestoredComposer, onOptimisticRetractionFailed],
+  );
+
   const dispatchesRef = useRef(new Set<string>());
   const recoveryPreparationRef = useRef(false);
   const dispatchPendingRetraction = useCallback(
@@ -222,7 +237,7 @@ export function useLastUserMessageRetraction(input: {
 
   useEffect(() => {
     if (!pendingRecovery || !activeThread) return;
-    const activityFailure = findCorrelatedRetractionFailure(
+    const activityFailure = findCorrelatedRetractionFailureInfo(
       activeThread.activities,
       pendingRecovery.requestId,
     );
@@ -230,11 +245,15 @@ export function useLastUserMessageRetraction(input: {
       activeThread.turnRetraction?.status === "failed" &&
       activeThread.turnRetraction.requestId === pendingRecovery.requestId;
     if (!projectedFailure && activityFailure === null) return;
+    if (activityFailure?.silent) {
+      ignorePendingRetraction(pendingRecovery);
+      return;
+    }
     failPendingRetraction(
       pendingRecovery,
-      activityFailure ?? "The server could not retract this message.",
+      activityFailure?.detail ?? "The server could not retract this message.",
     );
-  }, [activeThread, failPendingRetraction, pendingRecovery]);
+  }, [activeThread, failPendingRetraction, ignorePendingRetraction, pendingRecovery]);
 
   return useCallback(async () => {
     if (
@@ -265,6 +284,7 @@ export function useLastUserMessageRetraction(input: {
       startFromOrigin,
     };
     const draftId = newDraftId();
+    rememberOptimisticRetractionComposer({ requestId, sourceThreadRef });
     const snapshotPromise = beginOptimisticRetraction({
       restoreComposer: () => {
         const restored = applyOptimisticRetractionRecoveryToThread({
