@@ -1858,7 +1858,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
 
       // Match live event-major ordering so a revert sees turn/session evidence
       // before later projectors apply that same event's trims.
-      yield* Stream.runForEach(eventStore.readFromSequence(firstSequence), (event) =>
+      // The full backlog, not the default 1k page: a projection rebuild (migration
+      // 045) resets the cursor to 0 and needs every event replayed.
+      yield* Stream.runForEach(
+        eventStore.readFromSequence(firstSequence, Number.MAX_SAFE_INTEGER),
+        (event) =>
         Effect.forEach(
           projectors,
           (projector) =>
