@@ -31,6 +31,9 @@ npx t3@latest service uninstall
 
 Updating restarts T3 Code briefly. Let active agent work and terminal commands finish first.
 If a remote update is already in progress, wait for it to finish before retrying a local update.
+An open web app reconnects and reloads itself after the server restarts so it uses the server's
+current frontend. Brief connection interruptions that do not restart the server do not reload the
+page.
 
 The systemd unit runs a small stable launcher. Exact T3 Code versions are installed separately, so
 a failed remote candidate can return to the previous version without rewriting the unit. The

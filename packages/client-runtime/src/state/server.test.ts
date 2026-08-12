@@ -2,6 +2,7 @@ import {
   EnvironmentId,
   type ServerConfig,
   type ServerConfigStreamEvent,
+  type ServerLifecycleReadyPayload,
   type ServerLifecycleWelcomePayload,
   WS_METHODS,
 } from "@t3tools/contracts";
@@ -35,6 +36,7 @@ import {
   isLegacyUpdateHandoffLoss,
   matchesServerUpdateReadyEvent,
   nudgeReconnectDuringUpdateRestart,
+  projectServerReady,
   projectServerWelcome,
   resolveServerConfigValue,
   resolveServerUpdateProgressResult,
@@ -299,6 +301,26 @@ describe("server state projection", () => {
 
     expect(Option.getOrThrow(afterReady)).toBe(welcome);
     expect(emitted).toEqual([]);
+  });
+
+  it("projects ready events from the lifecycle stream", () => {
+    const ready = {
+      at: "2026-08-12T12:00:00.000Z",
+      environment: {} as ServerLifecycleReadyPayload["environment"],
+    } as ServerLifecycleReadyPayload;
+    const [afterWelcome, welcomeEmitted] = projectServerReady(Option.none(), {
+      type: "welcome",
+      payload: {},
+    });
+    const [afterReady, readyEmitted] = projectServerReady(afterWelcome, {
+      type: "ready",
+      payload: ready,
+    });
+
+    expect(Option.isNone(afterWelcome)).toBe(true);
+    expect(welcomeEmitted).toEqual([]);
+    expect(Option.getOrThrow(afterReady)).toBe(ready);
+    expect(readyEmitted).toEqual([ready]);
   });
 
   it("prefers an active session config over cache until a live event arrives", () => {
