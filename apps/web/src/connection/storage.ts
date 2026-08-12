@@ -58,8 +58,12 @@ const StoredShellSnapshotJson = Schema.fromJsonString(StoredShellSnapshot);
 // v4 invalidates snapshots cached before the wire projection retained tool
 // output fields (result/aggregatedOutput); a warm cache resumes via
 // `afterSequence` and would otherwise show stripped payloads forever.
+// v5 invalidates snapshots cached before server migration 044 deleted
+// orphaned retracted messages out-of-band: the deletion emits no events, so
+// a warm cache resuming via `afterSequence` would render the ghost messages
+// forever. Any server-side row surgery needs a bump here to reach clients.
 const StoredThreadSnapshot = Schema.Struct({
-  schemaVersion: Schema.Literal(4),
+  schemaVersion: Schema.Literal(5),
   environmentId: EnvironmentId,
   threadId: ThreadId,
   snapshot: OrchestrationThreadDetailSnapshot,
@@ -567,7 +571,7 @@ export const connectionStorageLayer = Layer.effectContext(
       saveThread: (environmentId, snapshot) =>
         Effect.gen(function* () {
           const encoded = yield* encodeStoredThreadSnapshot({
-            schemaVersion: 4,
+            schemaVersion: 5,
             environmentId,
             threadId: snapshot.thread.id,
             snapshot,
