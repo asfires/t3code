@@ -68,6 +68,11 @@ function commandToAggregateRef(command: OrchestrationCommand): {
         aggregateKind: "project",
         aggregateId: command.projectId,
       };
+    case "project.merge":
+      return {
+        aggregateKind: "project",
+        aggregateId: command.sourceProjectId,
+      };
     default:
       return {
         aggregateKind: "thread",

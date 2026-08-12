@@ -302,6 +302,64 @@ describe("OrchestrationEngine", () => {
     await system.dispose();
   });
 
+  it("atomically merges projects and persists the moved thread project", async () => {
+    const createdAt = now();
+    const system = await createOrchestrationSystem();
+    const { engine } = system;
+
+    for (const [projectId, title, workspaceRoot] of [
+      [asProjectId("project-move-source"), "Source", "/tmp/project-move/apps/server"],
+      [asProjectId("project-move-target"), "Target", "/tmp/project-move"],
+    ] as const) {
+      await system.run(
+        engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make(`cmd-${projectId}-create`),
+          projectId,
+          title,
+          workspaceRoot,
+          createdAt,
+        }),
+      );
+    }
+    await system.run(
+      engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-thread-project-move-create"),
+        threadId: ThreadId.make("thread-project-move"),
+        projectId: asProjectId("project-move-source"),
+        title: "Move me",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        branch: null,
+        worktreePath: null,
+        createdAt,
+      }),
+    );
+
+    const moved = await system.run(
+      engine.dispatch({
+        type: "project.merge",
+        commandId: CommandId.make("cmd-project-merge"),
+        sourceProjectId: asProjectId("project-move-source"),
+        targetProjectId: asProjectId("project-move-target"),
+        createdAt,
+      }),
+    );
+    expect(moved.sequence).toBe(5);
+    const readModel = await system.readModel();
+    expect(readModel.threads[0]?.projectId).toBe("project-move-target");
+    expect(
+      readModel.projects.find((project) => project.id === "project-move-source")?.deletedAt,
+    ).not.toBeNull();
+
+    await system.dispose();
+  });
+
   it("archives and unarchives threads through orchestration commands", async () => {
     const system = await createOrchestrationSystem();
     const { engine } = system;

@@ -20,6 +20,7 @@ import {
   ThreadDeletedPayload,
   ThreadInteractionModeSetPayload,
   ThreadMetaUpdatedPayload,
+  ThreadProjectSetPayload,
   ThreadProposedPlanUpsertedPayload,
   ThreadRuntimeModeSetPayload,
   ThreadSettledPayload,
@@ -74,6 +75,17 @@ function updateThread(
   patch: ThreadPatch,
 ): OrchestrationThread[] {
   return threads.map((thread) => (thread.id === threadId ? { ...thread, ...patch } : thread));
+}
+
+function moveThreadProjection(
+  threads: ReadonlyArray<OrchestrationThread>,
+  threadId: ThreadId,
+  projectId: OrchestrationThread["projectId"],
+  updatedAt: OrchestrationThread["updatedAt"],
+): OrchestrationThread[] {
+  return threads.map((thread) =>
+    thread.id === threadId ? { ...thread, projectId, updatedAt } : thread,
+  );
 }
 
 function decodeForEvent<A>(
@@ -469,6 +481,19 @@ export function projectEvent(
             runtimeMode: payload.runtimeMode,
             updatedAt: payload.updatedAt,
           }),
+        })),
+      );
+
+    case "thread.project-set":
+      return decodeForEvent(ThreadProjectSetPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: moveThreadProjection(
+            nextBase.threads,
+            payload.threadId,
+            payload.projectId,
+            payload.updatedAt,
+          ),
         })),
       );
 

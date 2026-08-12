@@ -15,14 +15,23 @@ import {
   requireActiveProjectWorkspaceRootAbsent,
   requireProject,
   requireProjectAbsent,
+  requireProjectNotDeleted,
   requireThread,
   requireThreadArchived,
   requireThreadAbsent,
   requireThreadNotArchived,
+  requireThreadNotDeleted,
 } from "./commandInvariants.ts";
+import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 import { projectEvent } from "./projector.ts";
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+
+function areRelatedWorkspaceRoots(leftRoot: string, rightRoot: string): boolean {
+  const left = normalizeProjectPathForComparison(leftRoot).replaceAll("\\", "/");
+  const right = normalizeProjectPathForComparison(rightRoot).replaceAll("\\", "/");
+  return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
+}
 
 // Session adoption takes seconds; a user message still unadopted after this
 // window is a failed/stale start, not pending work. Mirrors the client's
@@ -347,6 +356,51 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           deletedAt: occurredAt,
         },
       };
+    }
+
+    case "project.merge": {
+      const sourceProject = yield* requireProjectNotDeleted({
+        readModel,
+        command,
+        projectId: command.sourceProjectId,
+      });
+      yield* requireProjectNotDeleted({
+        readModel,
+        command,
+        projectId: command.targetProjectId,
+      });
+      if (command.sourceProjectId === command.targetProjectId) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Project '${command.sourceProjectId}' cannot be merged into itself.`,
+        });
+      }
+
+      const activeThreads = listThreadsByProjectId(readModel, sourceProject.id).filter(
+        (thread) => thread.deletedAt === null,
+      );
+      return yield* decideCommandSequence({
+        readModel,
+        commands: [
+          ...activeThreads.map(
+            (thread): Extract<OrchestrationCommand, { type: "thread.project.set" }> => ({
+              type: "thread.project.set",
+              commandId: command.commandId,
+              threadId: thread.id,
+              projectId: command.targetProjectId,
+              ...(command.allowUnrelatedRoots !== undefined
+                ? { allowUnrelatedRoots: command.allowUnrelatedRoots }
+                : {}),
+              createdAt: command.createdAt,
+            }),
+          ),
+          {
+            type: "project.delete",
+            commandId: command.commandId,
+            projectId: command.sourceProjectId,
+          },
+        ],
+      });
     }
 
     case "thread.create": {
@@ -884,6 +938,49 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           threadId: command.threadId,
           runtimeMode: command.runtimeMode,
           updatedAt: occurredAt,
+        },
+      };
+    }
+
+    case "thread.project.set": {
+      const thread = yield* requireThreadNotDeleted({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const currentProject = yield* requireProjectNotDeleted({
+        readModel,
+        command,
+        projectId: thread.projectId,
+      });
+      const targetProject = yield* requireProjectNotDeleted({
+        readModel,
+        command,
+        projectId: command.projectId,
+      });
+      if (
+        command.allowUnrelatedRoots !== true &&
+        !areRelatedWorkspaceRoots(currentProject.workspaceRoot, targetProject.workspaceRoot)
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' cannot move between unrelated workspace roots '${currentProject.workspaceRoot}' and '${targetProject.workspaceRoot}' without allowUnrelatedRoots=true.`,
+        });
+      }
+      const projectUnchanged = thread.projectId === command.projectId;
+      const occurredAt = command.createdAt;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.project-set",
+        payload: {
+          threadId: command.threadId,
+          projectId: command.projectId,
+          updatedAt: projectUnchanged ? thread.updatedAt : occurredAt,
         },
       };
     }

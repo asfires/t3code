@@ -34,6 +34,8 @@ import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import * as ProviderSessionReaper from "./provider/Services/ProviderSessionReaper.ts";
+import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
+import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import { forkParked } from "./serverActivation.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
 import {
@@ -186,15 +188,29 @@ export const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
   const projectionReadModelQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
   const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
   const path = yield* Path.Path;
+  const repositoryIdentityResolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
+  const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
 
   let bootstrapProjectId: ProjectId | undefined;
   let bootstrapThreadId: ThreadId | undefined;
 
   if (serverConfig.autoBootstrapProjectFromCwd) {
     yield* Effect.gen(function* () {
-      const existingProject = yield* projectionReadModelQuery.getActiveProjectByWorkspaceRoot(
+      let existingProject = yield* projectionReadModelQuery.getActiveProjectByWorkspaceRoot(
         serverConfig.cwd,
       );
+      if (Option.isNone(existingProject)) {
+        const repositoryIdentity = yield* repositoryIdentityResolver.resolve(serverConfig.cwd);
+        const repositoryRoot = repositoryIdentity?.rootPath?.trim();
+        if (repositoryRoot) {
+          const normalizedRepositoryRoot =
+            yield* workspacePaths.normalizeWorkspaceRoot(repositoryRoot);
+          existingProject =
+            yield* projectionReadModelQuery.getActiveProjectByWorkspaceRoot(
+              normalizedRepositoryRoot,
+            );
+        }
+      }
       let nextProjectId: ProjectId;
       let nextProjectDefaultModelSelection: ModelSelection;
 
