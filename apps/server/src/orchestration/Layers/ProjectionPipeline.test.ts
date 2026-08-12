@@ -1332,6 +1332,283 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-atta
   },
 );
 
+it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-bootstrap-attachments-")))(
+  "OrchestrationProjectionPipeline attachment bootstrap reconciliation",
+  (it) => {
+    it.effect("reconciles files once from the final replayed projection", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const { attachmentsDir } = yield* ServerConfig;
+        const now = "2026-01-02T00:00:00.000Z";
+        const liveThreadId = ThreadId.make("bootstrap-attachment-live");
+        const deletedThreadId = ThreadId.make("bootstrap-attachment-deleted");
+        const oldAttachmentId = "bootstrap-attachment-live-00000000-0000-4000-8000-000000000001";
+        const checkpointlessAttachmentId =
+          "bootstrap-attachment-live-00000000-0000-4000-8000-000000000006";
+        const laterAttachmentId = "bootstrap-attachment-live-00000000-0000-4000-8000-000000000002";
+        const orphanAttachmentId = "bootstrap-attachment-live-00000000-0000-4000-8000-000000000003";
+        const deletedAttachmentId =
+          "bootstrap-attachment-deleted-00000000-0000-4000-8000-000000000004";
+
+        yield* eventStore.append({
+          type: "thread.created",
+          eventId: EventId.make("evt-bootstrap-attachments-1"),
+          aggregateKind: "thread",
+          aggregateId: liveThreadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-bootstrap-attachments-1"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-bootstrap-attachments-1"),
+          metadata: {},
+          payload: {
+            threadId: liveThreadId,
+            projectId: ProjectId.make("project-bootstrap-attachments"),
+            title: "Live attachments",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        yield* eventStore.append({
+          type: "thread.message-sent",
+          eventId: EventId.make("evt-bootstrap-attachments-checkpointless"),
+          aggregateKind: "thread",
+          aggregateId: liveThreadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-bootstrap-attachments-checkpointless"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-bootstrap-attachments-checkpointless"),
+          metadata: {},
+          payload: {
+            threadId: liveThreadId,
+            messageId: MessageId.make("message-bootstrap-checkpointless"),
+            role: "assistant",
+            text: "checkpointless history",
+            attachments: [
+              {
+                type: "image",
+                id: checkpointlessAttachmentId,
+                name: "checkpointless.png",
+                mimeType: "image/png",
+                sizeBytes: 4,
+              },
+            ],
+            turnId: TurnId.make("turn-bootstrap-checkpointless"),
+            streaming: false,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        yield* eventStore.append({
+          type: "thread.turn-diff-completed",
+          eventId: EventId.make("evt-bootstrap-attachments-2"),
+          aggregateKind: "thread",
+          aggregateId: liveThreadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-bootstrap-attachments-2"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-bootstrap-attachments-2"),
+          metadata: {},
+          payload: {
+            threadId: liveThreadId,
+            turnId: TurnId.make("turn-bootstrap-old"),
+            checkpointTurnCount: 1,
+            checkpointRef: CheckpointRef.make(
+              "refs/t3/checkpoints/bootstrap-attachment-live/turn/1",
+            ),
+            status: "ready",
+            files: [],
+            assistantMessageId: MessageId.make("message-bootstrap-old"),
+            completedAt: now,
+          },
+        });
+        yield* eventStore.append({
+          type: "thread.message-sent",
+          eventId: EventId.make("evt-bootstrap-attachments-3"),
+          aggregateKind: "thread",
+          aggregateId: liveThreadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-bootstrap-attachments-3"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-bootstrap-attachments-3"),
+          metadata: {},
+          payload: {
+            threadId: liveThreadId,
+            messageId: MessageId.make("message-bootstrap-old"),
+            role: "assistant",
+            text: "removed by the historical revert",
+            attachments: [
+              {
+                type: "image",
+                id: oldAttachmentId,
+                name: "old.png",
+                mimeType: "image/png",
+                sizeBytes: 3,
+              },
+            ],
+            turnId: TurnId.make("turn-bootstrap-old"),
+            streaming: false,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        yield* eventStore.append({
+          type: "thread.reverted",
+          eventId: EventId.make("evt-bootstrap-attachments-4"),
+          aggregateKind: "thread",
+          aggregateId: liveThreadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-bootstrap-attachments-4"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-bootstrap-attachments-4"),
+          metadata: {},
+          payload: {
+            threadId: liveThreadId,
+            turnCount: 0,
+          },
+        });
+        yield* eventStore.append({
+          type: "thread.message-sent",
+          eventId: EventId.make("evt-bootstrap-attachments-5"),
+          aggregateKind: "thread",
+          aggregateId: liveThreadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-bootstrap-attachments-5"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-bootstrap-attachments-5"),
+          metadata: {},
+          payload: {
+            threadId: liveThreadId,
+            messageId: MessageId.make("message-bootstrap-later"),
+            role: "user",
+            text: "sent after the revert",
+            attachments: [
+              {
+                type: "image",
+                id: laterAttachmentId,
+                name: "later.png",
+                mimeType: "image/png",
+                sizeBytes: 5,
+              },
+            ],
+            turnId: null,
+            streaming: false,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        yield* eventStore.append({
+          type: "thread.created",
+          eventId: EventId.make("evt-bootstrap-attachments-6"),
+          aggregateKind: "thread",
+          aggregateId: deletedThreadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-bootstrap-attachments-6"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-bootstrap-attachments-6"),
+          metadata: {},
+          payload: {
+            threadId: deletedThreadId,
+            projectId: ProjectId.make("project-bootstrap-attachments"),
+            title: "Deleted attachments",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        yield* eventStore.append({
+          type: "thread.message-sent",
+          eventId: EventId.make("evt-bootstrap-attachments-7"),
+          aggregateKind: "thread",
+          aggregateId: deletedThreadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-bootstrap-attachments-7"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-bootstrap-attachments-7"),
+          metadata: {},
+          payload: {
+            threadId: deletedThreadId,
+            messageId: MessageId.make("message-bootstrap-deleted"),
+            role: "user",
+            text: "deleted thread",
+            attachments: [
+              {
+                type: "image",
+                id: deletedAttachmentId,
+                name: "deleted.png",
+                mimeType: "image/png",
+                sizeBytes: 7,
+              },
+            ],
+            turnId: null,
+            streaming: false,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        yield* eventStore.append({
+          type: "thread.deleted",
+          eventId: EventId.make("evt-bootstrap-attachments-8"),
+          aggregateKind: "thread",
+          aggregateId: deletedThreadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-bootstrap-attachments-8"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-bootstrap-attachments-8"),
+          metadata: {},
+          payload: {
+            threadId: deletedThreadId,
+            deletedAt: now,
+          },
+        });
+
+        const oldPath = path.join(attachmentsDir, `${oldAttachmentId}.png`);
+        const checkpointlessPath = path.join(attachmentsDir, `${checkpointlessAttachmentId}.png`);
+        const laterPath = path.join(attachmentsDir, `${laterAttachmentId}.png`);
+        const orphanPath = path.join(attachmentsDir, `${orphanAttachmentId}.png`);
+        const deletedPath = path.join(attachmentsDir, `${deletedAttachmentId}.png`);
+        const invalidPath = path.join(attachmentsDir, "not-an-attachment.txt");
+        const attachmentLikeDirectory = path.join(
+          attachmentsDir,
+          "bootstrap-attachment-live-00000000-0000-4000-8000-000000000005.png",
+        );
+        yield* fileSystem.makeDirectory(attachmentsDir, { recursive: true });
+        yield* Effect.forEach(
+          [oldPath, checkpointlessPath, laterPath, orphanPath, deletedPath, invalidPath],
+          (filePath) => fileSystem.writeFileString(filePath, "test"),
+          { concurrency: 1 },
+        );
+        yield* fileSystem.makeDirectory(attachmentLikeDirectory);
+
+        yield* projectionPipeline.bootstrap;
+
+        assert.isFalse(yield* exists(oldPath));
+        assert.isTrue(yield* exists(checkpointlessPath));
+        assert.isTrue(yield* exists(laterPath));
+        assert.isFalse(yield* exists(orphanPath));
+        assert.isFalse(yield* exists(deletedPath));
+        assert.isTrue(yield* exists(invalidPath));
+        assert.isTrue(yield* exists(attachmentLikeDirectory));
+      }),
+    );
+  },
+);
+
 it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
   it.effect("resumes from projector last_applied_sequence without replaying older events", () =>
     Effect.gen(function* () {
@@ -2428,7 +2705,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
     }),
   );
 
-  it.effect("does not fallback-retain messages whose turnId is removed by revert", () =>
+  it.effect("removes messages tied to post-baseline checkpoint turns", () =>
     Effect.gen(function* () {
       const projectionPipeline = yield* OrchestrationProjectionPipeline;
       const eventStore = yield* OrchestrationEventStore;
@@ -2634,7 +2911,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
     }),
   );
 
-  it.effect("excludes a retracted message from SQLite fallback retention", () =>
+  it.effect("excludes a completed retraction message from SQLite projection", () =>
     Effect.gen(function* () {
       const projectionPipeline = yield* OrchestrationProjectionPipeline;
       const eventStore = yield* OrchestrationEventStore;

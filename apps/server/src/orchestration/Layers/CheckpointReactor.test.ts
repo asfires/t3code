@@ -1265,7 +1265,7 @@ describe("CheckpointReactor", () => {
     );
 
     await waitForEvent(harness.engine, (event) => event.type === "thread.reverted");
-    const thread = await waitForThread(harness.readModel, (entry) => entry.messages.length === 0);
+    const thread = await waitForThread(harness.readModel, (entry) => entry.messages.length === 1);
 
     expect(thread.checkpoints).toHaveLength(0);
     expect(harness.provider.rollbackConversation).toHaveBeenCalledTimes(1);
