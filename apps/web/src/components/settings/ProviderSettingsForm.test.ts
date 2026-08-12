@@ -37,6 +37,21 @@ describe("ProviderSettingsForm helpers", () => {
     });
   });
 
+  it("shows Claude prompt suggestions as an on-by-default switch", () => {
+    const claude = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("claudeAgent")];
+    expect(claude).toBeDefined();
+
+    const promptSuggestions = deriveProviderSettingsFields(claude!).find(
+      (field) => field.key === "promptSuggestions",
+    );
+
+    expect(promptSuggestions).toMatchObject({
+      label: "Prompt suggestions",
+      control: "switch",
+      defaultBooleanValue: true,
+    });
+  });
+
   it("preserves unknown config keys while omitting empty configurable fields", () => {
     const opencode = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("opencode")];
     expect(opencode).toBeDefined();

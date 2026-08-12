@@ -355,6 +355,7 @@ describe("ClaudeAdapterLive", () => {
       assert.deepEqual(createInput?.options.settingSources, ["user", "project", "local"]);
       assert.equal(createInput?.options.permissionMode, "bypassPermissions");
       assert.equal(createInput?.options.allowDangerouslySkipPermissions, true);
+      assert.equal(createInput?.options.promptSuggestions, true);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -374,6 +375,24 @@ describe("ClaudeAdapterLive", () => {
       const createInput = harness.getLastCreateQueryInput();
       assert.equal(createInput?.options.permissionMode, "auto");
       assert.equal(createInput?.options.allowDangerouslySkipPermissions, undefined);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("disables prompt suggestions from Claude provider settings", () => {
+    const harness = makeHarness({ claudeConfig: { promptSuggestions: false } });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const createInput = harness.getLastCreateQueryInput();
+      assert.equal(createInput?.options.promptSuggestions, false);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -972,6 +991,59 @@ describe("ClaudeAdapterLive", () => {
         assert.equal(String(turnCompleted.turnId), String(turn.turnId));
         assert.equal(turnCompleted.payload.state, "completed");
       }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("emits prompt suggestions for the completed turn", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => runtimeEvents.push(event)),
+      ).pipe(Effect.forkChild);
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "hello",
+        attachments: [],
+      });
+
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: "sdk-session-suggestion",
+        uuid: "result-suggestion",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "prompt_suggestion",
+        suggestion: "  run the tests  ",
+        session_id: "sdk-session-suggestion",
+        uuid: "prompt-suggestion",
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+
+      const suggestionEvent = runtimeEvents.find(
+        (event) =>
+          event.type === "thread.metadata.updated" && event.payload.suggestedPrompt !== undefined,
+      );
+      assert.equal(suggestionEvent?.type, "thread.metadata.updated");
+      if (suggestionEvent?.type === "thread.metadata.updated") {
+        assert.equal(String(suggestionEvent.turnId), String(turn.turnId));
+        assert.equal(suggestionEvent.payload.suggestedPrompt, "run the tests");
+      }
+      runtimeEventsFiber.interruptUnsafe();
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -2157,9 +2229,10 @@ describe("ClaudeAdapterLive", () => {
         runtimeMode: "full-access",
       });
 
-      // Undeclared wire-only roster snapshot + every typed UX-internal
-      // subtype and top-level type consumed silently: none may surface as
-      // unknown-subtype warnings.
+      // Undeclared wire-only roster snapshot + typed UX-internal messages
+      // must not surface as unknown-subtype warnings. A prompt suggestion
+      // before the first turn is intentionally ignored because it has no
+      // turn to attach to.
       for (const message of [
         {
           type: "system",

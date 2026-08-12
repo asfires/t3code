@@ -18,6 +18,20 @@ export function shouldSubmitComposerOnEnter(input: {
   return !input.isMobileViewport && !input.shiftKey;
 }
 
+export function shouldAcceptPromptSuggestionOnTab(input: {
+  key: string;
+  shiftKey: boolean;
+  prompt: string;
+  suggestedPrompt: string | null;
+}): boolean {
+  return (
+    input.key === "Tab" &&
+    !input.shiftKey &&
+    input.prompt.length === 0 &&
+    input.suggestedPrompt !== null
+  );
+}
+
 const isInlineTokenSegment = (
   segment:
     | { type: "text"; text: string }

@@ -190,6 +190,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         homePath: "",
         customModels: ["claude-custom"],
         launchArgs: "",
+        promptSuggestions: true,
       });
       assert.deepEqual(
         next.textGenerationModelSelection,
@@ -522,6 +523,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         homePath: "",
         customModels: [],
         launchArgs: "",
+        promptSuggestions: true,
       });
       assert.deepEqual(next.providers.opencode, {
         enabled: true,

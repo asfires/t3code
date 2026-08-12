@@ -368,6 +368,28 @@ export function runtimeEventToActivities(
       : {};
   })();
   switch (event.type) {
+    case "thread.metadata.updated": {
+      if (!event.payload.suggestedPrompt) {
+        return [];
+      }
+      return [
+        {
+          id: event.eventId,
+          createdAt: event.createdAt,
+          tone: "info",
+          kind: "prompt-suggestion.updated",
+          summary: "Prompt suggestion updated",
+          payload: {
+            suggestedPrompt: event.payload.suggestedPrompt,
+            // Composer state only; never render this metadata in the work log.
+            timelineBypass: true,
+          },
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
     case "request.opened": {
       if (event.payload.requestType === "tool_user_input") {
         return [];

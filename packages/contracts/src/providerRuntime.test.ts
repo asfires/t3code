@@ -49,6 +49,26 @@ describe("ProviderRuntimeEvent", () => {
     expect(parsed.payload.plan[1]?.status).toBe("inProgress");
   });
 
+  it("decodes provider prompt suggestions as thread metadata", () => {
+    const parsed = decodeRuntimeEvent({
+      type: "thread.metadata.updated",
+      eventId: "event-suggestion-1",
+      provider: "claudeAgent",
+      createdAt: "2026-08-11T00:00:00.000Z",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      payload: {
+        suggestedPrompt: "run the tests",
+      },
+    });
+
+    expect(parsed.type).toBe("thread.metadata.updated");
+    if (parsed.type !== "thread.metadata.updated") {
+      throw new Error("expected thread.metadata.updated");
+    }
+    expect(parsed.payload.suggestedPrompt).toBe("run the tests");
+  });
+
   it("decodes proposed-plan completion events", () => {
     const parsed = decodeRuntimeEvent({
       type: "turn.proposed.completed",
