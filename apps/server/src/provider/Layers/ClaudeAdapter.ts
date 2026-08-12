@@ -3512,9 +3512,30 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       case "rate_limit_event":
         yield* handleSdkTelemetryMessage(context, message);
         return;
-      // Composer prompt suggestions have no T3 surface; consumed deliberately.
-      case "prompt_suggestion":
+      case "prompt_suggestion": {
+        const suggestion = message.suggestion.trim();
+        const turnId = context.turnState?.turnId ?? context.turns.at(-1)?.id;
+        if (!suggestion || !turnId) {
+          return;
+        }
+        const stamp = yield* makeEventStamp();
+        yield* offerRuntimeEvent({
+          type: "thread.metadata.updated",
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          createdAt: stamp.createdAt,
+          threadId: context.session.threadId,
+          turnId,
+          payload: { suggestedPrompt: suggestion },
+          providerRefs: nativeProviderRefs(context),
+          raw: {
+            source: "claude.sdk.message",
+            method: "claude/prompt_suggestion",
+            payload: message,
+          },
+        });
         return;
+      }
       default: {
         // Exhaustiveness guard (see handleSystemMessage): new SDK top-level
         // message types fail typecheck here instead of warning at runtime.
@@ -4119,6 +4140,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(existingResumeSessionId ? { resume: existingResumeSessionId } : {}),
         ...(newSessionId ? { sessionId: newSessionId } : {}),
         includePartialMessages: true,
+        promptSuggestions: claudeSettings.promptSuggestions,
         canUseTool,
         env: claudeEnvironment,
         additionalDirectories,

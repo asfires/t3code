@@ -39,6 +39,7 @@ import {
   detectComposerTrigger,
   expandCollapsedComposerCursor,
   replaceTextRange,
+  shouldAcceptPromptSuggestionOnTab,
   shouldSubmitComposerOnEnter,
 } from "../../composer-logic";
 import { deriveComposerSendState, readFileAsDataUrl } from "../ChatView.logic";
@@ -226,6 +227,7 @@ import { formatProviderSkillDisplayName } from "../../providerSkillPresentation"
 import { searchProviderSkills } from "../../providerSkillSearch";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import type { ReviewCommentContext } from "../../reviewCommentContext";
+import { deriveLatestPromptSuggestion } from "../../lib/promptSuggestion";
 
 const runtimeModeConfig: Record<
   RuntimeMode,
@@ -928,6 +930,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     }
     return formatProviderDisplayName(activeThreadModelSelection.instanceId);
   }, [providerStatuses, activeThreadModelSelection]);
+  const latestPromptSuggestion = useMemo(
+    () =>
+      selectedProvider === "claudeAgent" && phase === "ready"
+        ? deriveLatestPromptSuggestion(activeThreadActivities ?? [], activeThread?.latestTurn)
+        : null,
+    [activeThread?.latestTurn, activeThreadActivities, phase, selectedProvider],
+  );
 
   // ------------------------------------------------------------------
   // Composer-local state
@@ -1890,6 +1899,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         onSelectComposerItem(selectedItem);
         return true;
       }
+    }
+    if (
+      shouldAcceptPromptSuggestionOnTab({
+        key,
+        shiftKey: event.shiftKey,
+        prompt,
+        suggestedPrompt: latestPromptSuggestion,
+      })
+    ) {
+      return applyPromptReplacement(0, 0, latestPromptSuggestion ?? "");
     }
     if (
       key === "Enter" &&
@@ -3051,7 +3070,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                             ? "Enable a provider in Settings to send a message"
                             : phase === "disconnected"
                               ? "Ask for follow-up changes or attach images"
-                              : "Ask anything, @tag files/folders, $use skills, or / for commands"
+                              : (latestPromptSuggestion ??
+                                "Ask anything, @tag files/folders, $use skills, or / for commands")
                 }
                 disabled={isConnecting || isComposerApprovalState || projectSelectionRequired}
               />

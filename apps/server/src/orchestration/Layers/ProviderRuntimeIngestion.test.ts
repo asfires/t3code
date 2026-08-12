@@ -47,7 +47,10 @@ import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
-import { ProviderRuntimeIngestionLive } from "./ProviderRuntimeIngestion.ts";
+import {
+  ProviderRuntimeIngestionLive,
+  runtimeEventToActivities,
+} from "./ProviderRuntimeIngestion.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -65,6 +68,35 @@ const asEventId = (value: string): EventId => EventId.make(value);
 const asMessageId = (value: string): MessageId => MessageId.make(value);
 const asThreadId = (value: string): ThreadId => ThreadId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
+
+describe("runtimeEventToActivities", () => {
+  it("persists prompt suggestions as hidden turn-scoped composer metadata", () => {
+    const activities = runtimeEventToActivities({
+      type: "thread.metadata.updated",
+      eventId: asEventId("evt-prompt-suggestion"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: "2026-08-11T00:00:00.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-1"),
+      payload: { suggestedPrompt: "run the tests" },
+    });
+
+    expect(activities).toEqual([
+      {
+        id: asEventId("evt-prompt-suggestion"),
+        createdAt: "2026-08-11T00:00:00.000Z",
+        tone: "info",
+        kind: "prompt-suggestion.updated",
+        summary: "Prompt suggestion updated",
+        payload: {
+          suggestedPrompt: "run the tests",
+          timelineBypass: true,
+        },
+        turnId: asTurnId("turn-1"),
+      },
+    ]);
+  });
+});
 
 type LegacyProviderRuntimeEvent = {
   readonly type: string;

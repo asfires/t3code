@@ -8,6 +8,7 @@ import {
   isCollapsedCursorAdjacentToInlineToken,
   parseStandaloneComposerSlashCommand,
   replaceTextRange,
+  shouldAcceptPromptSuggestionOnTab,
   shouldSubmitComposerOnEnter,
 } from "./composer-logic";
 import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "./lib/terminalContext";
@@ -23,6 +24,38 @@ describe("shouldSubmitComposerOnEnter", () => {
 
   it("inserts a newline for Shift+Enter", () => {
     expect(shouldSubmitComposerOnEnter({ isMobileViewport: false, shiftKey: true })).toBe(false);
+  });
+});
+
+describe("shouldAcceptPromptSuggestionOnTab", () => {
+  it("accepts a suggestion with plain Tab in an empty composer", () => {
+    expect(
+      shouldAcceptPromptSuggestionOnTab({
+        key: "Tab",
+        shiftKey: false,
+        prompt: "",
+        suggestedPrompt: "run the tests",
+      }),
+    ).toBe(true);
+  });
+
+  it("does not replace user input or handle Shift+Tab", () => {
+    expect(
+      shouldAcceptPromptSuggestionOnTab({
+        key: "Tab",
+        shiftKey: false,
+        prompt: "already typing",
+        suggestedPrompt: "run the tests",
+      }),
+    ).toBe(false);
+    expect(
+      shouldAcceptPromptSuggestionOnTab({
+        key: "Tab",
+        shiftKey: true,
+        prompt: "",
+        suggestedPrompt: "run the tests",
+      }),
+    ).toBe(false);
   });
 });
 
