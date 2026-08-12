@@ -217,6 +217,7 @@ function retainProjectionMessagesAfterRevert(
   messages: ReadonlyArray<ProjectionThreadMessage>,
   turns: ReadonlyArray<ProjectionTurn>,
   turnCount: number,
+  excludedMessageIds: ReadonlySet<string>,
 ): ReadonlyArray<ProjectionThreadMessage> {
   const retainedMessageIds = new Set<string>();
   const retainedTurnIds = new Set<string>();
@@ -230,15 +231,18 @@ function retainProjectionMessagesAfterRevert(
     if (turn.turnId !== null) {
       retainedTurnIds.add(turn.turnId);
     }
-    if (turn.pendingMessageId !== null) {
+    if (turn.pendingMessageId !== null && !excludedMessageIds.has(turn.pendingMessageId)) {
       retainedMessageIds.add(turn.pendingMessageId);
     }
-    if (turn.assistantMessageId !== null) {
+    if (turn.assistantMessageId !== null && !excludedMessageIds.has(turn.assistantMessageId)) {
       retainedMessageIds.add(turn.assistantMessageId);
     }
   }
 
   for (const message of messages) {
+    if (excludedMessageIds.has(message.messageId)) {
+      continue;
+    }
     if (message.role === "system") {
       retainedMessageIds.add(message.messageId);
       continue;
@@ -257,6 +261,7 @@ function retainProjectionMessagesAfterRevert(
       .filter(
         (message) =>
           message.role === "user" &&
+          !excludedMessageIds.has(message.messageId) &&
           !retainedMessageIds.has(message.messageId) &&
           (message.turnId === null || retainedTurnIds.has(message.turnId)),
       )
@@ -280,6 +285,7 @@ function retainProjectionMessagesAfterRevert(
       .filter(
         (message) =>
           message.role === "assistant" &&
+          !excludedMessageIds.has(message.messageId) &&
           !retainedMessageIds.has(message.messageId) &&
           (message.turnId === null || retainedTurnIds.has(message.turnId)),
       )
@@ -1063,10 +1069,15 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           const existingTurns = yield* projectionTurnRepository.listByThreadId({
             threadId: event.payload.threadId,
           });
+          const excludedMessageIds =
+            event.payload.retraction === undefined
+              ? new Set<string>()
+              : new Set([event.payload.retraction.messageId]);
           const keptRows = retainProjectionMessagesAfterRevert(
             existingRows,
             existingTurns,
             event.payload.turnCount,
+            excludedMessageIds,
           );
           if (keptRows.length === existingRows.length) {
             return;

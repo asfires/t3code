@@ -2633,6 +2633,61 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
       ]);
     }),
   );
+
+  it.effect("excludes a retracted message from SQLite fallback retention", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread-retraction-message-exclusion");
+
+      yield* sql`
+        INSERT INTO projection_thread_messages (
+          message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at
+        ) VALUES
+          (
+            'message-retracted', ${threadId}, NULL, 'user', 'retracted', 0,
+            '2026-03-01T10:00:00.000Z', '2026-03-01T10:00:00.000Z'
+          ),
+          (
+            'message-legitimate', ${threadId}, NULL, 'user', 'legitimate', 0,
+            '2026-03-01T10:00:01.000Z', '2026-03-01T10:00:01.000Z'
+          )
+      `;
+
+      const savedEvent = yield* eventStore.append({
+        type: "thread.reverted",
+        eventId: EventId.make("evt-retraction-message-exclusion"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-03-01T10:00:02.000Z",
+        commandId: CommandId.make("cmd-retraction-message-exclusion"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-retraction-message-exclusion"),
+        metadata: {},
+        payload: {
+          threadId,
+          turnCount: 1,
+          retraction: {
+            requestId: CommandId.make("request-retraction-message-exclusion"),
+            messageId: MessageId.make("message-retracted"),
+            turnId: null,
+            firstUserMessage: false,
+            completedAt: "2026-03-01T10:00:02.000Z",
+          },
+        },
+      });
+      yield* projectionPipeline.projectEvent(savedEvent);
+
+      const messageRows = yield* sql<{ readonly messageId: string }>`
+        SELECT message_id AS "messageId"
+        FROM projection_thread_messages
+        WHERE thread_id = ${threadId}
+        ORDER BY message_id
+      `;
+      assert.deepEqual(messageRows, [{ messageId: "message-legitimate" }]);
+    }),
+  );
 });
 
 it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-"))(

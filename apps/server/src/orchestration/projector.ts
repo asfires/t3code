@@ -119,9 +119,13 @@ function retainThreadMessagesAfterRevert(
   messages: ReadonlyArray<OrchestrationMessage>,
   retainedTurnIds: ReadonlySet<string>,
   turnCount: number,
+  excludedMessageIds: ReadonlySet<string>,
 ): ReadonlyArray<OrchestrationMessage> {
   const retainedMessageIds = new Set<string>();
   for (const message of messages) {
+    if (excludedMessageIds.has(message.id)) {
+      continue;
+    }
     if (message.role === "system") {
       retainedMessageIds.add(message.id);
       continue;
@@ -140,6 +144,7 @@ function retainThreadMessagesAfterRevert(
       .filter(
         (message) =>
           message.role === "user" &&
+          !excludedMessageIds.has(message.id) &&
           !retainedMessageIds.has(message.id) &&
           (message.turnId === null || retainedTurnIds.has(message.turnId)),
       )
@@ -162,6 +167,7 @@ function retainThreadMessagesAfterRevert(
       .filter(
         (message) =>
           message.role === "assistant" &&
+          !excludedMessageIds.has(message.id) &&
           !retainedMessageIds.has(message.id) &&
           (message.turnId === null || retainedTurnIds.has(message.turnId)),
       )
@@ -823,10 +829,15 @@ export function projectEvent(
             .toSorted((left, right) => left.checkpointTurnCount - right.checkpointTurnCount)
             .slice(-MAX_THREAD_CHECKPOINTS);
           const retainedTurnIds = new Set(checkpoints.map((checkpoint) => checkpoint.turnId));
+          const excludedMessageIds =
+            payload.retraction === undefined
+              ? new Set<string>()
+              : new Set([payload.retraction.messageId]);
           const messages = retainThreadMessagesAfterRevert(
             thread.messages,
             retainedTurnIds,
             payload.turnCount,
+            excludedMessageIds,
           ).slice(-MAX_THREAD_MESSAGES);
           const proposedPlans = retainThreadProposedPlansAfterRevert(
             thread.proposedPlans,

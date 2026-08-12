@@ -911,6 +911,170 @@ describe("orchestration projector", () => {
     ).toEqual([{ id: "assistant-keep", role: "assistant", turnId: "turn-1" }]);
   });
 
+  it("excludes retracted messages while preserving fallback retention on long threads", async () => {
+    const createdAt = "2026-03-01T09:00:00.000Z";
+    const afterCreate = await Effect.runPromise(
+      projectEvent(
+        createEmptyReadModel(createdAt),
+        makeEvent({
+          sequence: 1,
+          type: "thread.created",
+          aggregateKind: "thread",
+          aggregateId: "thread-long-retraction",
+          occurredAt: createdAt,
+          commandId: "cmd-create-long-retraction",
+          payload: {
+            threadId: "thread-long-retraction",
+            projectId: "project-1",
+            title: "long retraction",
+            modelSelection: {
+              provider: ProviderDriverKind.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt,
+            updatedAt: createdAt,
+          },
+        }),
+      ),
+    );
+
+    const checkpointEvents: ReadonlyArray<OrchestrationEvent> = Array.from(
+      { length: 501 },
+      (_, index) =>
+        makeEvent({
+          sequence: index + 2,
+          type: "thread.turn-diff-completed",
+          aggregateKind: "thread",
+          aggregateId: "thread-long-retraction",
+          occurredAt: "2026-03-01T09:00:01.000Z",
+          commandId: `cmd-checkpoint-${index}`,
+          payload: {
+            threadId: "thread-long-retraction",
+            turnId: `turn-${index}`,
+            checkpointTurnCount: index + 1,
+            checkpointRef: `refs/t3/checkpoints/thread-long-retraction/turn/${index + 1}`,
+            status: "ready",
+            files: [],
+            assistantMessageId: null,
+            completedAt: "2026-03-01T09:00:01.000Z",
+          },
+        }),
+    );
+    const afterCheckpoints = await checkpointEvents.reduce<
+      Promise<ReturnType<typeof createEmptyReadModel>>
+    >(
+      (statePromise, event) =>
+        statePromise.then((state) => Effect.runPromise(projectEvent(state, event))),
+      Promise.resolve(afterCreate),
+    );
+
+    const legitimateMessageEvents: ReadonlyArray<OrchestrationEvent> = Array.from(
+      { length: 501 },
+      (_, index) =>
+        makeEvent({
+          sequence: index + 503,
+          type: "thread.message-sent",
+          aggregateKind: "thread",
+          aggregateId: "thread-long-retraction",
+          occurredAt: "2026-03-01T09:00:02.000Z",
+          commandId: `cmd-message-${index}`,
+          payload: {
+            threadId: "thread-long-retraction",
+            messageId: `legitimate-user-${String(index).padStart(3, "0")}`,
+            role: "user",
+            text: `legitimate ${index}`,
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-03-01T09:00:02.000Z",
+            updatedAt: "2026-03-01T09:00:02.000Z",
+          },
+        }),
+    );
+    const longThreadState = await legitimateMessageEvents.reduce<
+      Promise<ReturnType<typeof createEmptyReadModel>>
+    >(
+      (statePromise, event) =>
+        statePromise.then((state) => Effect.runPromise(projectEvent(state, event))),
+      Promise.resolve(afterCheckpoints),
+    );
+
+    const ordinaryRevert = await Effect.runPromise(
+      projectEvent(
+        longThreadState,
+        makeEvent({
+          sequence: 1_004,
+          type: "thread.reverted",
+          aggregateKind: "thread",
+          aggregateId: "thread-long-retraction",
+          occurredAt: "2026-03-01T09:00:03.000Z",
+          commandId: "cmd-ordinary-revert",
+          payload: {
+            threadId: "thread-long-retraction",
+            turnCount: 501,
+          },
+        }),
+      ),
+    );
+    expect(ordinaryRevert.threads[0]?.messages).toHaveLength(501);
+
+    const withRetractedMessage = await Effect.runPromise(
+      projectEvent(
+        longThreadState,
+        makeEvent({
+          sequence: 1_004,
+          type: "thread.message-sent",
+          aggregateKind: "thread",
+          aggregateId: "thread-long-retraction",
+          occurredAt: "2026-03-01T09:00:03.000Z",
+          commandId: "cmd-retracted-message",
+          payload: {
+            threadId: "thread-long-retraction",
+            messageId: "000-retracted-user",
+            role: "user",
+            text: "retracted",
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-03-01T09:00:01.500Z",
+            updatedAt: "2026-03-01T09:00:01.500Z",
+          },
+        }),
+      ),
+    );
+    const retractionRevert = await Effect.runPromise(
+      projectEvent(
+        withRetractedMessage,
+        makeEvent({
+          sequence: 1_005,
+          type: "thread.reverted",
+          aggregateKind: "thread",
+          aggregateId: "thread-long-retraction",
+          occurredAt: "2026-03-01T09:00:04.000Z",
+          commandId: "cmd-retraction-revert",
+          payload: {
+            threadId: "thread-long-retraction",
+            turnCount: 501,
+            retraction: {
+              requestId: "request-retraction",
+              messageId: "000-retracted-user",
+              turnId: "turn-500",
+              firstUserMessage: false,
+              completedAt: "2026-03-01T09:00:04.000Z",
+            },
+          },
+        }),
+      ),
+    );
+
+    expect(retractionRevert.threads[0]?.messages).toHaveLength(501);
+    expect(retractionRevert.threads[0]?.messages.map((message) => message.id)).not.toContain(
+      "000-retracted-user",
+    );
+    expect(retractionRevert.threads[0]?.messages.at(-1)?.id).toBe("legitimate-user-500");
+  });
+
   it("caps message and checkpoint retention for long-lived threads", async () => {
     const createdAt = "2026-03-01T10:00:00.000Z";
     const model = createEmptyReadModel(createdAt);

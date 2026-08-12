@@ -56,6 +56,7 @@ import Migration0040 from "./Migrations/040_ProjectionProjectFaviconPath.ts";
 import Migration0041 from "./Migrations/041_ProjectionTurnRetractions.ts";
 import Migration0042 from "./Migrations/042_ProjectionTurnDispatchOwnership.ts";
 import Migration0043 from "./Migrations/043_ProjectionManagedWorktrees.ts";
+import Migration0044 from "./Migrations/044_CleanupCompletedRetractionMessages.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -111,6 +112,7 @@ export const migrationEntries = [
   [41, "ProjectionTurnRetractions", Migration0041],
   [42, "ProjectionTurnDispatchOwnership", Migration0042],
   [43, "ProjectionManagedWorktrees", Migration0043],
+  [44, "CleanupCompletedRetractionMessages", Migration0044],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
