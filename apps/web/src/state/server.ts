@@ -3,6 +3,7 @@ import {
   type EditorId,
   type ServerConfig,
   type ServerConfigStreamEvent,
+  type ServerLifecycleReadyPayload,
   type ServerLifecycleWelcomePayload,
   type ServerProvider,
   type ServerSettings,
@@ -29,6 +30,7 @@ export const environmentServerConfigsAtom = createEnvironmentServerConfigsAtom({
 interface PrimaryServerState {
   readonly config: ServerConfig | null;
   readonly latestEvent: ServerConfigStreamEvent | null;
+  readonly ready: ServerLifecycleReadyPayload | null;
   readonly welcome: ServerLifecycleWelcomePayload | null;
 }
 
@@ -37,6 +39,7 @@ export const EMPTY_SERVER_PROVIDERS: ReadonlyArray<ServerProvider> = [];
 const EMPTY_PRIMARY_SERVER_STATE: PrimaryServerState = {
   config: null,
   latestEvent: null,
+  ready: null,
   welcome: null,
 };
 
@@ -51,10 +54,12 @@ export const primaryServerStateAtom = Atom.make((get): PrimaryServerState => {
     AsyncResult.value(get(serverEnvironment.configProjection(target))),
   );
   const welcome = Option.getOrNull(AsyncResult.value(get(serverEnvironment.welcome(target))));
+  const ready = Option.getOrNull(AsyncResult.value(get(serverEnvironment.ready(target))));
 
   return {
     config: get(serverEnvironment.configValueAtom(environmentId)),
     latestEvent: configProjection?.latestEvent ?? null,
+    ready,
     welcome,
   };
 }).pipe(Atom.withLabel("web-primary-server-state"));
@@ -70,6 +75,10 @@ export const primaryServerConfigEventAtom = Atom.make(
 export const primaryServerWelcomeAtom = Atom.make(
   (get): ServerLifecycleWelcomePayload | null => get(primaryServerStateAtom).welcome,
 ).pipe(Atom.withLabel("web-primary-server-welcome"));
+
+export const primaryServerReadyAtom = Atom.make(
+  (get): ServerLifecycleReadyPayload | null => get(primaryServerStateAtom).ready,
+).pipe(Atom.withLabel("web-primary-server-ready"));
 
 export const primaryServerSettingsAtom = Atom.make(
   (get): ServerSettings => get(primaryServerConfigAtom)?.settings ?? DEFAULT_SERVER_SETTINGS,
