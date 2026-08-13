@@ -910,8 +910,14 @@ routing.layer("ProviderServiceLive routing", (it) => {
       assert.equal(Option.isSome(persisted), true);
       if (Option.isSome(persisted)) {
         assert.deepEqual(persisted.value.resumeCursor, rolledBackCursor);
+        const runtimePayload = persisted.value.runtimePayload;
         assert.equal(
-          persisted.value.runtimePayload.lastRuntimeEvent,
+          runtimePayload !== null &&
+            typeof runtimePayload === "object" &&
+            !Array.isArray(runtimePayload) &&
+            "lastRuntimeEvent" in runtimePayload
+            ? runtimePayload.lastRuntimeEvent
+            : undefined,
           "provider.rollbackConversationTo",
         );
       }
