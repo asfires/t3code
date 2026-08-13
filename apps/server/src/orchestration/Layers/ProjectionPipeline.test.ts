@@ -10,11 +10,12 @@ import {
   ProviderInstanceId,
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, it } from "@effect/vitest";
+import { assert, it, vi } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
@@ -1604,6 +1605,102 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-bootstrap-attac
         assert.isFalse(yield* exists(deletedPath));
         assert.isTrue(yield* exists(invalidPath));
         assert.isTrue(yield* exists(attachmentLikeDirectory));
+      }),
+    );
+  },
+);
+
+it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-bootstrap-incomplete-")))(
+  "OrchestrationProjectionPipeline attachment bootstrap reconciliation",
+  (it) => {
+    it.effect("preserves attachment files when replay stops before the event log head", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const { attachmentsDir } = yield* ServerConfig;
+        const now = "2026-01-03T00:00:00.000Z";
+        const threadId = ThreadId.make("bootstrap-incomplete-thread");
+        const attachmentId = "bootstrap-incomplete-thread-00000000-0000-4000-8000-000000000001";
+        const attachmentPath = path.join(attachmentsDir, `${attachmentId}.png`);
+
+        yield* eventStore.append({
+          type: "thread.created",
+          eventId: EventId.make("evt-bootstrap-incomplete-1"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-bootstrap-incomplete-1"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-bootstrap-incomplete-1"),
+          metadata: {},
+          payload: {
+            threadId,
+            projectId: ProjectId.make("project-bootstrap-incomplete"),
+            title: "Incomplete replay",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        yield* eventStore.append({
+          type: "thread.message-sent",
+          eventId: EventId.make("evt-bootstrap-incomplete-2"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-bootstrap-incomplete-2"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-bootstrap-incomplete-2"),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId: MessageId.make("message-bootstrap-incomplete"),
+            role: "user",
+            text: "not replayed",
+            attachments: [
+              {
+                type: "image",
+                id: attachmentId,
+                name: "preserve.png",
+                mimeType: "image/png",
+                sizeBytes: 4,
+              },
+            ],
+            turnId: null,
+            streaming: false,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        yield* fileSystem.makeDirectory(attachmentsDir, { recursive: true });
+        yield* fileSystem.writeFileString(attachmentPath, "keep");
+
+        const readFromSequence = eventStore.readFromSequence.bind(eventStore);
+        const replaySpy = vi
+          .spyOn(eventStore, "readFromSequence")
+          .mockImplementation((sequenceExclusive, limit) =>
+            readFromSequence(sequenceExclusive, limit).pipe(Stream.take(1)),
+          );
+        yield* projectionPipeline.bootstrap.pipe(
+          Effect.ensuring(Effect.sync(() => replaySpy.mockRestore())),
+        );
+
+        const projectedMessages = yield* sql<{ readonly count: number }>`
+          SELECT COUNT(*) AS "count"
+          FROM projection_thread_messages
+          WHERE message_id = 'message-bootstrap-incomplete'
+        `;
+        assert.equal(projectedMessages[0]?.count ?? 0, 0);
+        assert.isTrue(yield* exists(attachmentPath));
       }),
     );
   },
