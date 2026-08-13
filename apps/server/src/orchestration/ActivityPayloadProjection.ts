@@ -18,6 +18,35 @@ function asTrimmedString(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+const UNAVAILABLE_RETAINED_BOUNDARY_DETAIL =
+  /^Provider adapter validation failed \([^)]+\) in rollbackThreadTo: Provider history has \d+ turns, below retained boundary \d+\.$/;
+
+function normalizeLegacyRetractionFailure(
+  activity: OrchestrationThreadActivity,
+): OrchestrationThreadActivity {
+  const payload = asRecord(activity.payload);
+  if (
+    activity.kind !== "turn.retract.failed" ||
+    !payload ||
+    typeof payload.detail !== "string" ||
+    !UNAVAILABLE_RETAINED_BOUNDARY_DETAIL.test(payload.detail)
+  ) {
+    return activity;
+  }
+
+  // Boundary failures emitted before stale Esc retractions became silent are
+  // immutable event history. Normalize them at the wire boundary so every
+  // projection rebuild keeps the compatibility behavior without rewriting
+  // the event store or the persisted activity payload.
+  return {
+    ...activity,
+    payload: {
+      ...payload,
+      silent: true,
+    },
+  };
+}
+
 export const MAX_PROJECTED_TOOL_RESULT_CHARS = 50_000;
 
 const PROJECTED_TOOL_RESULT_TRUNCATION_MARKER = "…[truncated]";
@@ -326,15 +355,16 @@ function projectMcpToolCallData(data: Record<string, unknown>): Record<string, u
 export function projectActivityPayload(
   activity: OrchestrationThreadActivity,
 ): OrchestrationThreadActivity {
-  const payload = asRecord(activity.payload);
+  const normalizedActivity = normalizeLegacyRetractionFailure(activity);
+  const payload = asRecord(normalizedActivity.payload);
   const data = asRecord(payload?.data);
   if (!payload || !data) {
-    return activity;
+    return normalizedActivity;
   }
 
   if (payload.itemType === "mcp_tool_call") {
     return {
-      ...activity,
+      ...normalizedActivity,
       payload: {
         ...payload,
         data: projectMcpToolCallData(data),
@@ -370,7 +400,7 @@ export function projectActivityPayload(
   }
 
   return {
-    ...activity,
+    ...normalizedActivity,
     payload: {
       ...payload,
       data: projectedData,
