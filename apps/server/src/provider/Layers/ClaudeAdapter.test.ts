@@ -20,6 +20,7 @@ import {
   type RuntimeMode,
   ThreadId,
   ProviderInstanceId,
+  TurnId,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import { assert, describe, it } from "@effect/vitest";
@@ -4018,6 +4019,183 @@ describe("ClaudeAdapterLive", () => {
         resumeSessionAt: "assistant-before-restart",
         turnCount: 4,
       });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("rolls a concrete target across a stale logical turn boundary", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const resumeSessionId = "550e8400-e29b-41d4-a716-446655440000";
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        resumeCursor: {
+          threadId: THREAD_ID,
+          resume: resumeSessionId,
+          resumeSessionAt: "assistant-before-restart",
+          turnCount: 12,
+        },
+      });
+
+      const retainedTurn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "retained",
+        attachments: [],
+      });
+      const retainedCompletedFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "turn.completed",
+      ).pipe(Stream.runHead, Effect.forkChild);
+      harness.query.emit({
+        type: "assistant",
+        session_id: resumeSessionId,
+        uuid: "assistant-retained",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-retained",
+          content: [{ type: "text", text: "retained response" }],
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: resumeSessionId,
+        uuid: "result-retained",
+      } as unknown as SDKMessage);
+      yield* Fiber.join(retainedCompletedFiber);
+
+      const targetTurn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "target",
+        attachments: [],
+      });
+
+      assert.isDefined(adapter.validateRollbackThreadTo);
+      assert.isDefined(adapter.rollbackThreadTo);
+      if (!adapter.validateRollbackThreadTo || !adapter.rollbackThreadTo) return;
+
+      // The target identity is authoritative even though the persisted T3
+      // boundary is ahead of this older Claude cursor.
+      yield* adapter.validateRollbackThreadTo(session.threadId, 22, targetTurn.turnId);
+
+      const completedFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "turn.completed",
+      ).pipe(Stream.runHead, Effect.forkChild);
+      harness.query.emit({
+        type: "assistant",
+        session_id: resumeSessionId,
+        uuid: "assistant-target",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-target",
+          content: [{ type: "text", text: "target response" }],
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: resumeSessionId,
+        uuid: "result-target",
+      } as unknown as SDKMessage);
+      yield* Fiber.join(completedFiber);
+
+      const rolledBack = yield* adapter.rollbackThreadTo(session.threadId, 22, targetTurn.turnId);
+      assert.deepEqual(
+        rolledBack.turns.map((turn) => turn.id),
+        [retainedTurn.turnId],
+      );
+      assert.deepEqual((yield* adapter.listSessions())[0]?.resumeCursor, {
+        threadId: THREAD_ID,
+        resume: resumeSessionId,
+        resumeSessionAt: "assistant-retained",
+        turnCount: 22,
+      });
+
+      // Models a crash after provider rollback but before the reactor records
+      // completion: retrying the same concrete target is harmless.
+      const repeated = yield* adapter.rollbackThreadTo(session.threadId, 22, targetTurn.turnId);
+      assert.deepEqual(
+        repeated.turns.map((turn) => turn.id),
+        [retainedTurn.turnId],
+      );
+      assert.equal(
+        ((yield* adapter.listSessions())[0]?.resumeCursor as { turnCount?: number } | undefined)
+          ?.turnCount,
+        22,
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("rejects a rollback target that differs from the active Claude turn", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "active",
+        attachments: [],
+      });
+
+      assert.isDefined(adapter.validateRollbackThreadTo);
+      if (!adapter.validateRollbackThreadTo) return;
+      const validation = yield* adapter
+        .validateRollbackThreadTo(session.threadId, 0, TurnId.make("foreign-turn"))
+        .pipe(Effect.result);
+      assert.equal(validation._tag, "Failure");
+      if (validation._tag === "Failure") {
+        assert.equal(validation.failure._tag, "ProviderAdapterValidationError");
+        assert.match(validation.failure.message, /does not match rollback target/);
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("rejects an absent target until its stale boundary is rebased", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        resumeCursor: {
+          threadId: THREAD_ID,
+          resume: "550e8400-e29b-41d4-a716-446655440000",
+          resumeSessionAt: "assistant-stale",
+          turnCount: 12,
+        },
+      });
+
+      assert.isDefined(adapter.validateRollbackThreadTo);
+      if (!adapter.validateRollbackThreadTo) return;
+      const validation = yield* adapter
+        .validateRollbackThreadTo(session.threadId, 22, TurnId.make("missing-target"))
+        .pipe(Effect.result);
+      assert.equal(validation._tag, "Failure");
+      if (validation._tag === "Failure") {
+        assert.equal(validation.failure._tag, "ProviderAdapterValidationError");
+        assert.match(validation.failure.message, /12 turns, below retained boundary 22/);
+      }
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

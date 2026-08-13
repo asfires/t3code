@@ -78,7 +78,7 @@ type MutableState = {
   sessionStatus: OrchestrationSessionStatus | null;
   activeTurnId: TurnId | null;
   historyTurnCount: number;
-  rollbackTargetTurnId: TurnId | undefined;
+  readonly rollbackTargetTurnIds: Array<TurnId | undefined>;
   filesystemRestored: boolean;
   failRollbackAfterEffect: boolean;
   failRestoreAfterEffect: boolean;
@@ -118,7 +118,7 @@ function makeState(providerSendState: ProjectionTurnRetraction["providerSendStat
     sessionStatus: providerSendState === "claimed" ? "running" : null,
     activeTurnId: providerSendState === "claimed" ? TURN_ID : null,
     historyTurnCount: 2,
-    rollbackTargetTurnId: undefined,
+    rollbackTargetTurnIds: [],
     filesystemRestored: false,
     failRollbackAfterEffect: false,
     failRestoreAfterEffect: false,
@@ -352,7 +352,7 @@ async function startHarness(
     rollbackConversationTo: ({ retainedTurnCount, targetTurnId }) =>
       Effect.gen(function* () {
         state.order.push("rollback");
-        state.rollbackTargetTurnId = targetTurnId;
+        state.rollbackTargetTurnIds.push(targetTurnId);
         if (state.terminalRollbackFailure) {
           return yield* new ProviderValidationError({
             operation: "ProviderService.rollbackConversationTo",
@@ -492,7 +492,7 @@ it("drives claimed convergence from interrupt through a settlement event", async
 
   expect(state.order).toEqual(["interrupt", "rollback", "restore", "complete"]);
   expect(state.historyTurnCount).toBe(1);
-  expect(state.rollbackTargetTurnId).toBe(TURN_ID);
+  expect(state.rollbackTargetTurnIds).toEqual([TURN_ID]);
   expect(state.row.status).toBe("completed");
   await stopHarness(harness);
 });
@@ -614,6 +614,7 @@ it("repeats absolute provider rollback harmlessly after a post-rollback crash", 
   expect(state.row.status).toBe("completed");
   expect(state.historyTurnCount).toBe(1);
   expect(state.order.filter((entry) => entry === "rollback")).toHaveLength(2);
+  expect(state.rollbackTargetTurnIds).toEqual([TURN_ID, TURN_ID]);
   expect(state.order.slice(-3)).toEqual(["rollback", "restore", "complete"]);
   await stopHarness(harness);
 });
