@@ -1725,6 +1725,40 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     ];
 
     const reconcileAttachmentFiles = Effect.fn("reconcileAttachmentFiles")(function* () {
+      const eventHeadRows = yield* sql<{ readonly eventHead: number }>`
+        SELECT COALESCE(MAX(sequence), 0) AS "eventHead"
+        FROM orchestration_events
+      `;
+      const eventHead = eventHeadRows[0]?.eventHead ?? 0;
+      const projectorStateRows = yield* sql<{
+        readonly projector: string;
+        readonly lastAppliedSequence: number;
+      }>`
+        SELECT
+          projector,
+          last_applied_sequence AS "lastAppliedSequence"
+        FROM projection_state
+      `;
+      const lastAppliedSequenceByProjector = new Map(
+        projectorStateRows.map((row) => [row.projector, row.lastAppliedSequence]),
+      );
+      const incompleteProjectors = projectors.filter(
+        (projector) => lastAppliedSequenceByProjector.get(projector.name) !== eventHead,
+      );
+      if (incompleteProjectors.length > 0) {
+        yield* Effect.logWarning(
+          "skipping attachment reconciliation until every projector reaches the event log head",
+          {
+            eventHead,
+            incompleteProjectors: incompleteProjectors.map((projector) => ({
+              projector: projector.name,
+              lastAppliedSequence: lastAppliedSequenceByProjector.get(projector.name) ?? null,
+            })),
+          },
+        );
+        return;
+      }
+
       const entries = yield* fileSystem
         .readDirectory(serverConfig.attachmentsDir, { recursive: false })
         .pipe(Effect.orElseSucceed(() => [] as Array<string>));
@@ -1869,14 +1903,14 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       yield* Stream.runForEach(
         eventStore.readFromSequence(firstSequence, Number.MAX_SAFE_INTEGER),
         (event) =>
-        Effect.forEach(
-          projectors,
-          (projector) =>
-            event.sequence > (lastAppliedSequenceByProjector.get(projector.name) ?? 0)
-              ? runProjectorForEvent(projector, event, "bootstrap")
-              : Effect.void,
-          { concurrency: 1 },
-        ),
+          Effect.forEach(
+            projectors,
+            (projector) =>
+              event.sequence > (lastAppliedSequenceByProjector.get(projector.name) ?? 0)
+                ? runProjectorForEvent(projector, event, "bootstrap")
+                : Effect.void,
+            { concurrency: 1 },
+          ),
       );
     });
 
