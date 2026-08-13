@@ -16,6 +16,7 @@ import {
 import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import {
   buildTurnStartParams,
+  deleteCodexThread,
   hasConfiguredMcpServer,
   isRecoverableThreadResumeError,
   openCodexThread,
@@ -466,6 +467,29 @@ describe("openCodexThread", () => {
 
       NodeAssert.ok(isCodexAppServerRequestError(error));
       NodeAssert.equal(error.errorMessage, "timed out waiting for server");
+    }),
+  );
+});
+
+describe("deleteCodexThread", () => {
+  it.effect("uses the provider thread id with thread/delete", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ method: string; payload: unknown }> = [];
+      const client = {
+        request: (method: "thread/delete", payload: { readonly threadId: string }) => {
+          calls.push({ method, payload });
+          return Effect.succeed({});
+        },
+      };
+
+      yield* deleteCodexThread(client, "provider-thread-transient");
+
+      NodeAssert.deepStrictEqual(calls, [
+        {
+          method: "thread/delete",
+          payload: { threadId: "provider-thread-transient" },
+        },
+      ]);
     }),
   );
 });

@@ -22,6 +22,10 @@ import { forkParked } from "../../serverActivation.ts";
 
 type ThreadDeletedEvent = Extract<OrchestrationEvent, { type: "thread.deleted" }>;
 
+export function shouldDiscardTransientProviderThread(event: ThreadDeletedEvent): boolean {
+  return event.payload.retraction?.firstUserMessage === true;
+}
+
 export function managedWorktreeCleanupTarget(input: {
   readonly event: ThreadDeletedEvent;
   readonly thread: ProjectionThread;
@@ -77,6 +81,13 @@ const make = Effect.gen(function* () {
       threadId,
     });
 
+  const discardTransientProviderThread = (threadId: ThreadDeletedEvent["payload"]["threadId"]) =>
+    logCleanupCauseUnlessInterrupted({
+      effect: providerService.discardTransientThread({ threadId }),
+      message: "thread retraction cleanup skipped transient provider thread discard",
+      threadId,
+    });
+
   const closeThreadTerminals = (threadId: ThreadDeletedEvent["payload"]["threadId"]) =>
     logCleanupCauseUnlessInterrupted({
       effect: terminalManager.close({ threadId, deleteHistory: true }),
@@ -113,6 +124,9 @@ const make = Effect.gen(function* () {
     event: ThreadDeletedEvent,
   ) {
     const { threadId } = event.payload;
+    if (shouldDiscardTransientProviderThread(event)) {
+      yield* discardTransientProviderThread(threadId);
+    }
     yield* stopProviderSession(threadId);
     yield* closeThreadTerminals(threadId);
     yield* removeRetractedManagedWorktree(event);

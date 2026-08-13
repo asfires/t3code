@@ -16,6 +16,7 @@ import type { ProjectionThread } from "../../persistence/Services/ProjectionThre
 import {
   logCleanupCauseUnlessInterrupted,
   managedWorktreeCleanupTarget,
+  shouldDiscardTransientProviderThread,
 } from "./ThreadDeletionReactor.ts";
 
 const threadId = ThreadId.make("thread-deletion-reactor-test");
@@ -158,5 +159,12 @@ describe("managedWorktreeCleanupTarget", () => {
         hasOtherLiveReference: false,
       }),
     ).toBeNull();
+  });
+});
+
+describe("shouldDiscardTransientProviderThread", () => {
+  it("selects only durable first-message retraction deletions", () => {
+    expect(shouldDiscardTransientProviderThread(deletedEvent())).toBe(true);
+    expect(shouldDiscardTransientProviderThread(deletedEvent(false))).toBe(false);
   });
 });

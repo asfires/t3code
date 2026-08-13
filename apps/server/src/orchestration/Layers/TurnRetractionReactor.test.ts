@@ -324,6 +324,7 @@ async function startHarness(
       }).pipe(Effect.andThen(state.interruptAcknowledgementHangs ? Effect.never : Effect.void)),
     respondToRequest: () => unsupported(),
     respondToUserInput: () => unsupported(),
+    discardTransientThread: () => unsupported(),
     stopSession: () => unsupported(),
     listSessions: () => Effect.succeed([]),
     getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),

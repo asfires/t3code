@@ -92,6 +92,13 @@ export interface ProviderAdapterShape<TError> {
   readonly stopSession: (threadId: ThreadId) => Effect.Effect<void, TError>;
 
   /**
+   * Permanently discard a provider-owned thread that T3 has already decided
+   * is transient. This is intentionally optional: callers must have their own
+   * durable proof that the conversation should not be retained.
+   */
+  readonly discardTransientThread?: (threadId: ThreadId) => Effect.Effect<void, TError>;
+
+  /**
    * List currently active provider sessions for this adapter.
    */
   readonly listSessions: () => Effect.Effect<ReadonlyArray<ProviderSession>>;

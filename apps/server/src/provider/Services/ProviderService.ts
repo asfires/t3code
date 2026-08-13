@@ -81,6 +81,15 @@ export interface ProviderServiceShape {
   ) => Effect.Effect<void, ProviderServiceError>;
 
   /**
+   * Permanently discard the provider-owned thread for a conversation that T3
+   * has already durably identified as transient. Unsupported providers and
+   * inactive sessions are left untouched.
+   */
+  readonly discardTransientThread: (
+    input: ProviderStopSessionInput,
+  ) => Effect.Effect<void, ProviderServiceError>;
+
+  /**
    * List active provider sessions.
    *
    * Aggregates runtime session lists from all registered adapters.
