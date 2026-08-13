@@ -3,16 +3,22 @@ import {
   CommandId,
   EventId,
   type ModelSelection,
+  type OrchestrationCheckpointSummary,
   type OrchestrationEvent,
+  type OrchestrationProjectShell,
   ProviderDriverKind,
   type ProjectId,
   type OrchestrationSession,
+  type OrchestrationThread,
   ThreadId,
   type ProviderSession,
   type RuntimeMode,
   type TurnId,
+  type VcsCreateWorktreeInput,
+  type VcsRef,
 } from "@t3tools/contracts";
 import { isTemporaryWorktreeBranch, WORKTREE_BRANCH_PREFIX } from "@t3tools/shared/git";
+import * as FileSystem from "effect/FileSystem";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
@@ -32,6 +38,7 @@ import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
+import { ProjectSetupScriptRunner } from "../../project/ProjectSetupScriptRunner.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
@@ -100,6 +107,55 @@ const MAX_THREAD_TITLE_CONTEXT_CHARS = 8_000;
 const MAX_FIRST_USER_TITLE_CONTEXT_CHARS = 2_000;
 const THREAD_TITLE_CONTEXT_TRUNCATION_MARKER = "[Earlier content truncated]\n\n";
 const FIRST_USER_CONTEXT_TRUNCATION_MARKER = "\n[First user message truncated]";
+
+type ManagedWorktreeRecoveryPlan = Pick<
+  VcsCreateWorktreeInput,
+  "refName" | "newRefName" | "baseRefName" | "path"
+>;
+
+export function managedWorktreeRecoveryPlan(input: {
+  readonly branch: string;
+  readonly path: string;
+  readonly refs: ReadonlyArray<VcsRef>;
+  readonly checkpoints: ReadonlyArray<OrchestrationCheckpointSummary>;
+}): ManagedWorktreeRecoveryPlan | null {
+  const localBranch = input.refs.find((ref) => ref.isRemote !== true && ref.name === input.branch);
+  if (localBranch?.worktreePath === null) {
+    return {
+      refName: input.branch,
+      path: input.path,
+    };
+  }
+
+  if (localBranch !== undefined) {
+    return null;
+  }
+
+  const defaultRef =
+    input.refs.find((ref) => ref.isRemote !== true && ref.current) ??
+    input.refs.find((ref) => ref.isRemote !== true && ref.isDefault) ??
+    input.refs.find((ref) => ref.isDefault);
+  const latestCheckpoint = input.checkpoints
+    .toReversed()
+    .find((checkpoint) => checkpoint.status === "ready");
+  const remoteBranch = input.refs.find(
+    (ref) =>
+      ref.isRemote === true &&
+      (ref.name === input.branch ||
+        (ref.remoteName !== undefined && ref.name === `${ref.remoteName}/${input.branch}`)),
+  );
+  const recoveryRef = latestCheckpoint?.checkpointRef ?? remoteBranch?.name ?? defaultRef?.name;
+  if (recoveryRef === undefined) {
+    return null;
+  }
+
+  return {
+    refName: recoveryRef,
+    newRefName: input.branch,
+    ...(defaultRef !== undefined ? { baseRefName: defaultRef.name } : {}),
+    path: input.path,
+  };
+}
 
 type ThreadTitleMessage = {
   readonly role: "user" | "assistant" | "system";
@@ -322,6 +378,8 @@ const make = Effect.gen(function* () {
   const providerService = yield* ProviderService;
   const providerRegistry = yield* ProviderRegistry;
   const gitWorkflow = yield* GitWorkflowService;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const projectSetupScriptRunner = yield* ProjectSetupScriptRunner;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
   const textGeneration = yield* TextGeneration;
   const serverSettingsService = yield* ServerSettingsService;
@@ -483,6 +541,66 @@ const make = Effect.gen(function* () {
     });
   });
 
+  const ensureThreadWorkspaceCwd = Effect.fn("ensureThreadWorkspaceCwd")(function* (input: {
+    readonly thread: OrchestrationThread;
+    readonly project: OrchestrationProjectShell | undefined;
+    readonly provider: ProviderDriverKind;
+  }) {
+    const cwd = resolveThreadWorkspaceCwd({
+      thread: input.thread,
+      projects: input.project ? [input.project] : [],
+    });
+    const managedWorktree = input.thread.managedWorktree;
+    if (
+      input.thread.worktreePath === null ||
+      managedWorktree == null ||
+      managedWorktree.path !== input.thread.worktreePath ||
+      input.thread.branch === null ||
+      (yield* fileSystem.exists(input.thread.worktreePath))
+    ) {
+      return cwd;
+    }
+
+    const refs = yield* gitWorkflow.listRefs({
+      cwd: managedWorktree.projectCwd,
+      includeMatchingRemoteRefs: true,
+      refresh: true,
+      limit: 200,
+    });
+    const recoveryPlan = managedWorktreeRecoveryPlan({
+      branch: input.thread.branch,
+      path: managedWorktree.path,
+      refs: refs.refs,
+      checkpoints: input.thread.checkpoints,
+    });
+    if (!refs.isRepo || recoveryPlan === null) {
+      return yield* new ProviderAdapterRequestError({
+        provider: input.provider,
+        method: "thread.turn.start",
+        detail: `Thread '${input.thread.id}' cannot resume because its managed worktree '${managedWorktree.path}' no longer exists and no safe Git ref is available to recreate it.`,
+      });
+    }
+
+    yield* gitWorkflow.createWorktree({
+      cwd: managedWorktree.projectCwd,
+      ...recoveryPlan,
+    });
+    yield* projectSetupScriptRunner.runForThread({
+      threadId: input.thread.id,
+      projectId: input.thread.projectId,
+      projectCwd: managedWorktree.projectCwd,
+      worktreePath: managedWorktree.path,
+    });
+    yield* Effect.logInfo("recreated missing managed thread worktree", {
+      threadId: input.thread.id,
+      branch: input.thread.branch,
+      worktreePath: managedWorktree.path,
+      recoveryRef: recoveryPlan.refName,
+      createdBranch: recoveryPlan.newRefName !== undefined,
+    });
+    return managedWorktree.path;
+  });
+
   const ensureSessionForThread = Effect.fn("ensureSessionForThread")(function* (
     threadId: ThreadId,
     createdAt: string,
@@ -617,9 +735,10 @@ const make = Effect.gen(function* () {
       }
     }
     const project = yield* resolveProject(thread.projectId);
-    const effectiveCwd = resolveThreadWorkspaceCwd({
+    const effectiveCwd = yield* ensureThreadWorkspaceCwd({
       thread,
-      projects: project ? [project] : [],
+      project,
+      provider: preferredProvider,
     });
 
     const startProviderSession = (input?: {
