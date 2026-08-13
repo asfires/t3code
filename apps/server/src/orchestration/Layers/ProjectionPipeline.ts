@@ -1466,11 +1466,17 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           const existingTurns = yield* projectionTurnRepository.listByThreadId({
             threadId: event.payload.threadId,
           });
+          // Same denylist as the message/activity/plan projectors: turns
+          // without checkpoint evidence (e.g. recorded while checkpointing
+          // was unavailable) must survive a revert, or their retained
+          // messages become unreachable to turn-anchored pagination.
+          const revertedTurnIds = yield* getRevertedTurnIds({
+            threadId: event.payload.threadId,
+            baselineTurnCount: event.payload.turnCount,
+            retractionTurnId: event.payload.retraction?.turnId ?? null,
+          });
           const keptTurns = existingTurns.filter(
-            (turn) =>
-              turn.turnId !== null &&
-              turn.checkpointTurnCount !== null &&
-              turn.checkpointTurnCount <= event.payload.turnCount,
+            (turn) => turn.turnId !== null && !revertedTurnIds.has(turn.turnId),
           );
           yield* projectionTurnRepository.deleteByThreadId({
             threadId: event.payload.threadId,
@@ -1858,7 +1864,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
 
       // Match live event-major ordering so a revert sees turn/session evidence
       // before later projectors apply that same event's trims.
-      yield* Stream.runForEach(eventStore.readFromSequence(firstSequence), (event) =>
+      // The full backlog, not the default 1k page: a projection rebuild (migration
+      // 045) resets the cursor to 0 and needs every event replayed.
+      yield* Stream.runForEach(
+        eventStore.readFromSequence(firstSequence, Number.MAX_SAFE_INTEGER),
+        (event) =>
         Effect.forEach(
           projectors,
           (projector) =>

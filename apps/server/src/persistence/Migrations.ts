@@ -58,6 +58,7 @@ import Migration0042 from "./Migrations/042_ProjectionTurnDispatchOwnership.ts";
 import Migration0043 from "./Migrations/043_ProjectionManagedWorktrees.ts";
 import Migration0044 from "./Migrations/044_CleanupCompletedRetractionMessages.ts";
 import Migration0045 from "./Migrations/045_RebuildProjectionsFromEvents.ts";
+import Migration0046 from "./Migrations/046_RebuildProjectionsWithRetainedTurns.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -115,6 +116,7 @@ export const migrationEntries = [
   [43, "ProjectionManagedWorktrees", Migration0043],
   [44, "CleanupCompletedRetractionMessages", Migration0044],
   [45, "RebuildProjectionsFromEvents", Migration0045],
+  [46, "RebuildProjectionsWithRetainedTurns", Migration0046],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

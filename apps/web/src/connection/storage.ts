@@ -63,8 +63,10 @@ const StoredShellSnapshotJson = Schema.fromJsonString(StoredShellSnapshot);
 // a warm cache resuming via `afterSequence` would render the ghost messages
 // forever. Any server-side row surgery needs a bump here to reach clients.
 // v6 pairs with server migration 045's full projection rebuild.
+// v7 pairs with server migration 046, which rebuilds again now that the
+// turns projector retains checkpointless turns across replayed reverts.
 const StoredThreadSnapshot = Schema.Struct({
-  schemaVersion: Schema.Literal(6),
+  schemaVersion: Schema.Literal(7),
   environmentId: EnvironmentId,
   threadId: ThreadId,
   snapshot: OrchestrationThreadDetailSnapshot,
@@ -572,7 +574,7 @@ export const connectionStorageLayer = Layer.effectContext(
       saveThread: (environmentId, snapshot) =>
         Effect.gen(function* () {
           const encoded = yield* encodeStoredThreadSnapshot({
-            schemaVersion: 6,
+            schemaVersion: 7,
             environmentId,
             threadId: snapshot.thread.id,
             snapshot,
