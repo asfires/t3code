@@ -324,6 +324,7 @@ async function startHarness(
       }).pipe(Effect.andThen(state.interruptAcknowledgementHangs ? Effect.never : Effect.void)),
     respondToRequest: () => unsupported(),
     respondToUserInput: () => unsupported(),
+    discardTransientThread: () => unsupported(),
     stopSession: () => unsupported(),
     listSessions: () => Effect.succeed([]),
     getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
@@ -447,6 +448,55 @@ it("completes a cancelled provider-send path after filesystem convergence", asyn
   const harness = await startHarness(state);
   expect(state.row.status).toBe("completed");
   expect(state.filesystemRestored).toBe(true);
+  expect(state.order).toEqual(["restore", "complete"]);
+  await stopHarness(harness);
+});
+
+it("settles a claimed first-message turn before restoring and completing without rollback", async () => {
+  const state = makeState("claimed");
+  state.row = pendingRow("claimed", true);
+  state.sessionStatus = "starting";
+  state.activeTurnId = null;
+  const harness = await startHarness(state);
+
+  expect(state.order).toEqual([]);
+  expect(state.row.status).toBe("requested");
+
+  state.sessionStatus = "running";
+  state.activeTurnId = TURN_ID;
+  await harness.emitRuntime({
+    type: "turn.started",
+    eventId: EventId.make("evt-first-message-turn-started"),
+    provider: ProviderDriverKind.make("codex"),
+    createdAt: NOW,
+    threadId: THREAD_ID,
+    turnId: TURN_ID,
+    payload: {},
+  });
+  await harness.runtime.runPromise(Effect.yieldNow);
+  await harness.runtime.runPromise(harness.reactor.drain);
+  expect(state.order).toEqual(["interrupt"]);
+
+  state.sessionStatus = "ready";
+  state.activeTurnId = null;
+  await harness.retryTick();
+  await harness.runtime.runPromise(harness.reactor.drain);
+
+  expect(state.filesystemRestored).toBe(true);
+  expect(state.row.status).toBe("completed");
+  expect(state.order).toEqual(["interrupt", "restore", "complete"]);
+  expect(state.interruptedTurnIds).toEqual([TURN_ID]);
+  expect(state.rollbackTargetTurnIds).toEqual([]);
+  await stopHarness(harness);
+});
+
+it("restores and completes a cancelled first-message send without stopping a provider", async () => {
+  const state = makeState("cancelled");
+  state.row = pendingRow("cancelled", true);
+  const harness = await startHarness(state);
+
+  expect(state.filesystemRestored).toBe(true);
+  expect(state.row.status).toBe("completed");
   expect(state.order).toEqual(["restore", "complete"]);
   await stopHarness(harness);
 });

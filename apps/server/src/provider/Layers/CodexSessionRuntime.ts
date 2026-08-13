@@ -141,6 +141,7 @@ export interface CodexSessionRuntimeShape {
   readonly rollbackThread: (
     numTurns: number,
   ) => Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
+  readonly deleteThread: Effect.Effect<void, CodexSessionRuntimeError>;
   readonly respondToRequest: (
     requestId: ApprovalRequestId,
     decision: ProviderApprovalDecision,
@@ -453,6 +454,22 @@ interface CodexThreadOpenClient {
     payload: CodexRpc.ClientRequestParamsByMethod[M],
   ) => Effect.Effect<CodexRpc.ClientRequestResponsesByMethod[M], CodexErrors.CodexAppServerError>;
 }
+
+interface CodexThreadDeleteClient {
+  readonly request: (
+    method: "thread/delete",
+    payload: CodexRpc.ClientRequestParamsByMethod["thread/delete"],
+  ) => Effect.Effect<
+    CodexRpc.ClientRequestResponsesByMethod["thread/delete"],
+    CodexErrors.CodexAppServerError
+  >;
+}
+
+export const deleteCodexThread = (
+  client: CodexThreadDeleteClient,
+  threadId: string,
+): Effect.Effect<void, CodexErrors.CodexAppServerError> =>
+  client.request("thread/delete", { threadId }).pipe(Effect.asVoid);
 
 export const openCodexThread = (input: {
   readonly client: CodexThreadOpenClient;
@@ -1853,6 +1870,9 @@ export const makeCodexSessionRuntime = (
           });
           return parseThreadSnapshot(response);
         }),
+      deleteThread: Effect.flatMap(readProviderThreadId, (providerThreadId) =>
+        deleteCodexThread(client, providerThreadId),
+      ),
       respondToRequest: (requestId, decision) =>
         Effect.gen(function* () {
           const pending = (yield* Ref.get(pendingApprovalsRef)).get(requestId);

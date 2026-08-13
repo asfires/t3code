@@ -545,6 +545,21 @@ export const makeTurnRetractionReactor = Effect.gen(function* () {
       }
     }
 
+    // A first-message retraction deletes the thread, so its settled provider
+    // conversation does not need a rollback boundary. Do not stop the session
+    // while ProviderCommandReactor may still be starting the send: the normal
+    // start/interrupt settlement above lets that durable worker finish. The
+    // correlated thread.deleted event owns final provider-session cleanup.
+    if (row.firstUserMessage) {
+      yield* restoreFilesystem(row, false);
+      yield* dispatchCompletion(row, targetTurnId);
+      clearIssuedInterrupts(row.requestId);
+      yield* logConvergence(row, "cleanup", "completed", {
+        action: "restore-and-delete-settled-first-message-thread",
+      });
+      return;
+    }
+
     yield* providerService
       .rollbackConversationTo({
         threadId: row.threadId,

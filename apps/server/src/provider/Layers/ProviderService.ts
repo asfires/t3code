@@ -938,6 +938,34 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     },
   );
 
+  const discardTransientThread: ProviderServiceMethod<"discardTransientThread"> = Effect.fn(
+    "discardTransientThread",
+  )(function* (rawInput) {
+    const input = yield* decodeInputOrValidationError({
+      operation: "ProviderService.discardTransientThread",
+      schema: ProviderStopSessionInput,
+      payload: rawInput,
+    });
+    const routed = yield* resolveRoutableSession({
+      threadId: input.threadId,
+      operation: "ProviderService.discardTransientThread",
+      allowRecovery: false,
+    });
+    yield* Effect.annotateCurrentSpan({
+      "provider.operation": "discard-transient-thread",
+      "provider.kind": routed.adapter.provider,
+      "provider.thread_id": input.threadId,
+    });
+    if (!routed.isActive || routed.adapter.discardTransientThread === undefined) {
+      return;
+    }
+    yield* routed.adapter.discardTransientThread(routed.threadId);
+    yield* analytics.record("provider.thread.discarded", {
+      provider: routed.adapter.provider,
+      reason: "transient",
+    });
+  });
+
   const listSessions: ProviderServiceMethod<"listSessions"> = Effect.fn("listSessions")(
     function* () {
       const currentAdapters = yield* getAdapterEntries;
@@ -1247,6 +1275,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     interruptTurn,
     respondToRequest,
     respondToUserInput,
+    discardTransientThread,
     stopSession,
     listSessions,
     getCapabilities,

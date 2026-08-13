@@ -163,6 +163,10 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
       }),
   );
 
+  const discardTransientThread = vi.fn(
+    (_threadId: ThreadId): Effect.Effect<void, ProviderAdapterError> => Effect.void,
+  );
+
   const listSessions = vi.fn(
     (): Effect.Effect<ReadonlyArray<ProviderSession>> =>
       Effect.sync(() => Array.from(sessions.values())),
@@ -223,6 +227,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     respondToRequest,
     respondToUserInput,
     stopSession,
+    ...(provider === CODEX_DRIVER ? { discardTransientThread } : {}),
     listSessions,
     hasSession,
     readThread,
@@ -259,6 +264,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     respondToRequest,
     respondToUserInput,
     stopSession,
+    discardTransientThread,
     listSessions,
     hasSession,
     readThread,
@@ -904,8 +910,14 @@ routing.layer("ProviderServiceLive routing", (it) => {
       assert.equal(Option.isSome(persisted), true);
       if (Option.isSome(persisted)) {
         assert.deepEqual(persisted.value.resumeCursor, rolledBackCursor);
+        const runtimePayload = persisted.value.runtimePayload;
         assert.equal(
-          persisted.value.runtimePayload.lastRuntimeEvent,
+          runtimePayload !== null &&
+            typeof runtimePayload === "object" &&
+            !Array.isArray(runtimePayload) &&
+            "lastRuntimeEvent" in runtimePayload
+            ? runtimePayload.lastRuntimeEvent
+            : undefined,
           "provider.rollbackConversationTo",
         );
       }
@@ -918,6 +930,43 @@ routing.layer("ProviderServiceLive routing", (it) => {
       routing.claude.startSession.mockClear();
       routing.claude.rollbackThreadTo.mockClear();
       routing.claude.stopSession.mockClear();
+    }),
+  );
+
+  it.effect("discards only provider threads whose adapter explicitly supports it", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const codexThreadId = asThreadId("transient-codex-thread");
+      const claudeThreadId = asThreadId("transient-claude-thread");
+      yield* provider.startSession(codexThreadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId: codexThreadId,
+        runtimeMode: "full-access",
+      });
+      yield* provider.startSession(claudeThreadId, {
+        provider: CLAUDE_AGENT_DRIVER,
+        providerInstanceId: claudeAgentInstanceId,
+        threadId: claudeThreadId,
+        runtimeMode: "full-access",
+      });
+      routing.codex.discardTransientThread.mockClear();
+      routing.claude.discardTransientThread.mockClear();
+
+      yield* provider.discardTransientThread({ threadId: codexThreadId });
+      yield* provider.discardTransientThread({ threadId: claudeThreadId });
+
+      assert.deepEqual(routing.codex.discardTransientThread.mock.calls, [[codexThreadId]]);
+      assert.equal(routing.claude.discardTransientThread.mock.calls.length, 0);
+
+      yield* provider.stopSession({ threadId: codexThreadId });
+      yield* provider.stopSession({ threadId: claudeThreadId });
+      routing.codex.startSession.mockClear();
+      routing.codex.stopSession.mockClear();
+      routing.codex.discardTransientThread.mockClear();
+      routing.claude.startSession.mockClear();
+      routing.claude.stopSession.mockClear();
+      routing.claude.discardTransientThread.mockClear();
     }),
   );
 

@@ -2028,6 +2028,18 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       yield* stopSessionInternal(session);
     });
 
+  const discardTransientThread: NonNullable<CodexAdapterShape["discardTransientThread"]> = (
+    threadId,
+  ) =>
+    requireSession(threadId).pipe(
+      Effect.flatMap((session) => session.runtime.deleteThread),
+      Effect.mapError((cause) =>
+        cause._tag === "ProviderAdapterSessionNotFoundError"
+          ? cause
+          : mapCodexRuntimeError(threadId, "thread/delete", cause),
+      ),
+    );
+
   const listSessions: CodexAdapterShape["listSessions"] = () =>
     Effect.forEach(
       Array.from(sessions.values()).filter((session) => !session.stopped),
@@ -2066,6 +2078,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     respondToRequest,
     respondToUserInput,
     stopSession,
+    discardTransientThread,
     listSessions,
     hasSession,
     stopAll,
