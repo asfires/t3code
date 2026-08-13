@@ -353,7 +353,7 @@ export interface InstalledFontFamiliesResult {
   /**
    * "unsupported" - the engine has no Local Font Access API (Safari,
    * Firefox); "denied" - the API exists but the user declined the permission
-   * prompt. Both fall back to the curated catalog.
+   * prompt. Both fall back to manual family-name entry.
    */
   readonly status: "granted" | "denied" | "unsupported";
 }
@@ -366,8 +366,11 @@ let installedFamiliesCache: InstalledFontFamiliesResult | null = null;
  * local-fonts permission prompt. A denial is not cached, so reopening the
  * picker can ask again after the user changes the site setting.
  */
-export async function queryInstalledFontFamilies(): Promise<InstalledFontFamiliesResult> {
-  if (installedFamiliesCache !== null) return installedFamiliesCache;
+export async function queryInstalledFontFamilies(options?: {
+  readonly refresh?: boolean;
+}): Promise<InstalledFontFamiliesResult> {
+  if (options?.refresh) installedFamiliesCache = null;
+  if (!options?.refresh && installedFamiliesCache !== null) return installedFamiliesCache;
   const query = (
     window as Window & {
       queryLocalFonts?: () => Promise<ReadonlyArray<{ readonly family: string }>>;

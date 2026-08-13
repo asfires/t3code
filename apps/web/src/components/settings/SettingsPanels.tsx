@@ -96,15 +96,13 @@ import { Input } from "../ui/input";
 import {
   DEFAULT_CODE_FONT_STACK,
   DEFAULT_SANS_FONT_STACK,
-  isFontFamilyAvailable,
-  isMonospaceFamily,
   resolveDefaultFamilyLabel,
   resolveTerminalFontPreference,
   resolveTerminalFontSizePreference,
   TYPOGRAPHY_ADVANCED_STORAGE_KEY,
 } from "../../appearanceFonts";
 import { CodeFontPreview, PromptFontPreview, TerminalFontPreview } from "./SettingsFontPreviews";
-import { discoverInstalledFonts, FontFamilyPicker, useFontEnumeration } from "./FontFamilyPicker";
+import { FontFamilyPicker } from "./FontFamilyPicker";
 import {
   NumberField,
   NumberFieldDecrement,
@@ -1427,127 +1425,24 @@ function FontFamilySettingsRow({
   };
 }) {
   const trimmed = value.trim();
-  // The fallback input edits a draft; the preference only commits once typing
-  // pauses and the text probes as an available font (or is an explicit
-  // clear), so the current font holds and nothing reflows mid-word.
-  const [draft, setDraft] = useState(value);
-  const [draftSettled, setDraftSettled] = useState(true);
-  const commitTimerRef = useRef<number | null>(null);
-  const lastValueRef = useRef(value);
-  if (lastValueRef.current !== value) {
-    // The committed value changed externally (hydration, reset, picker
-    // selection); adopt it and drop any pending commit of a stale draft.
-    lastValueRef.current = value;
-    if (commitTimerRef.current !== null) {
-      window.clearTimeout(commitTimerRef.current);
-      commitTimerRef.current = null;
-    }
-    setDraft(value);
-    setDraftSettled(true);
-  }
-  useEffect(
-    () => () => {
-      if (commitTimerRef.current !== null) window.clearTimeout(commitTimerRef.current);
-    },
-    [],
-  );
-  const acceptsFamily = (candidate: string) =>
-    isFontFamilyAvailable(candidate) && (!requireMonospace || isMonospaceFamily(candidate));
-  const commitDraft = (next: string) => {
-    setDraftSettled(true);
-    // A rejected name stays in the field, flagged: the terminal would silently
-    // fall back to its default, so the row must not claim it took the value.
-    if (next.trim().length === 0 || acceptsFamily(next)) {
-      onValueChange(next);
-    }
-  };
-  const flushDraft = () => {
-    if (commitTimerRef.current === null) return;
-    window.clearTimeout(commitTimerRef.current);
-    commitTimerRef.current = null;
-    commitDraft(draft);
-  };
-  const draftTrimmed = draft.trim();
-  // Flag an unknown name only once typing pauses, and never for an empty
-  // field - that is the starting state, not a rejected entry.
-  const draftPending = draftSettled && draftTrimmed.length > 0 && draftTrimmed !== trimmed;
   const resetToDefault = () => {
-    if (commitTimerRef.current !== null) {
-      window.clearTimeout(commitTimerRef.current);
-      commitTimerRef.current = null;
-    }
-    setDraft(defaultValue);
-    setDraftSettled(true);
     onReset();
   };
   const resetAction =
     value !== defaultValue || size.value !== size.defaultValue ? (
       <SettingResetButton label={title.toLowerCase()} onClick={resetToDefault} />
     ) : null;
-  const fontEnumeration = useFontEnumeration();
-  // Everyone starts on the plain input; focusing it is the user gesture that
-  // runs font discovery. Where the engine can enumerate, the control then
-  // upgrades to the picker - popped open when the swap happens under focus,
-  // so the interaction continues without a second click.
-  const inputFocusedRef = useRef(false);
-  const familyControl =
-    fontEnumeration.status === "granted" ? (
-      <FontFamilyPicker
-        ariaLabel={`${title} family`}
-        defaultFamily={defaultFamily}
-        selectedFamily={trimmed}
-        requireMonospace={requireMonospace}
-        initialOpen={inputFocusedRef.current}
-        onSelect={onValueChange}
-      />
-    ) : (
-      <Input
-        aria-label={`${title} family`}
-        aria-invalid={draftPending || undefined}
-        autoCapitalize="off"
-        autoComplete="off"
-        className="min-w-0 flex-1"
-        maxLength={200}
-        onFocus={() => {
-          inputFocusedRef.current = true;
-          discoverInstalledFonts();
-        }}
-        onBlur={() => {
-          inputFocusedRef.current = false;
-          flushDraft();
-        }}
-        onChange={(event) => {
-          const next = event.currentTarget.value;
-          setDraft(next);
-          setDraftSettled(false);
-          if (commitTimerRef.current !== null) {
-            window.clearTimeout(commitTimerRef.current);
-          }
-          commitTimerRef.current = window.setTimeout(() => {
-            commitTimerRef.current = null;
-            commitDraft(next);
-          }, 400);
-        }}
-        onKeyDown={(event) => {
-          if (event.key === "Enter") flushDraft();
-          if (event.key === "Escape") {
-            // Discard uncommitted typing without closing the settings page,
-            // which is what an unhandled Escape does.
-            event.preventDefault();
-            event.stopPropagation();
-            if (commitTimerRef.current !== null) {
-              window.clearTimeout(commitTimerRef.current);
-              commitTimerRef.current = null;
-            }
-            setDraft(value);
-            setDraftSettled(true);
-          }
-        }}
-        placeholder={defaultFamily}
-        spellCheck={false}
-        value={draft}
-      />
-    );
+  // The picker always supports exact-name entry. Permission only controls
+  // whether the browser supplies the complete installed-family list.
+  const familyControl = (
+    <FontFamilyPicker
+      ariaLabel={`${title} family`}
+      defaultFamily={defaultFamily}
+      selectedFamily={trimmed}
+      requireMonospace={requireMonospace}
+      onSelect={onValueChange}
+    />
+  );
   const control = (
     <div className="flex w-full items-center gap-2 sm:w-auto">
       <div className="min-w-0 flex-1 sm:w-44 sm:flex-none">{familyControl}</div>
