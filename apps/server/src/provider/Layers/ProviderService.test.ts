@@ -196,6 +196,15 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
       Effect.succeed({ threadId, turns: [] }),
   );
 
+  const rollbackThreadTo = vi.fn(
+    (
+      threadId: ThreadId,
+      _retainedTurnCount: number,
+      _targetTurnId?: TurnId,
+    ): Effect.Effect<{ threadId: ThreadId; turns: readonly [] }, ProviderAdapterError> =>
+      Effect.succeed({ threadId, turns: [] }),
+  );
+
   const stopAll = vi.fn(
     (): Effect.Effect<void, ProviderAdapterError> =>
       Effect.sync(() => {
@@ -218,6 +227,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     hasSession,
     readThread,
     rollbackThread,
+    rollbackThreadTo,
     stopAll,
     get streamEvents() {
       return Stream.fromPubSub(runtimeEventPubSub);
@@ -253,6 +263,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     hasSession,
     readThread,
     rollbackThread,
+    rollbackThreadTo,
     stopAll,
   };
 }
@@ -854,6 +865,62 @@ it.effect(
 );
 
 routing.layer("ProviderServiceLive routing", (it) => {
+  it.effect("persists the provider resume cursor after absolute rollback", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const threadId = asThreadId("thread-rollback-cursor");
+      const targetTurnId = asTurnId("turn-rollback-cursor");
+      const session = yield* provider.startSession(threadId, {
+        provider: CLAUDE_AGENT_DRIVER,
+        providerInstanceId: claudeAgentInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const rolledBackCursor = {
+        threadId,
+        resume: "resume-after-rollback",
+        resumeSessionAt: "assistant-before-target",
+        turnCount: 22,
+      };
+      routing.claude.rollbackThreadTo.mockImplementationOnce((adapterThreadId) =>
+        Effect.sync(() => {
+          routing.claude.updateSession(adapterThreadId, (existing) => ({
+            ...existing,
+            status: "ready",
+            resumeCursor: rolledBackCursor,
+          }));
+          return { threadId: adapterThreadId, turns: [] };
+        }),
+      );
+
+      yield* provider.rollbackConversationTo({
+        threadId: session.threadId,
+        retainedTurnCount: 22,
+        targetTurnId,
+      });
+
+      const persisted = yield* directory.getBinding(threadId);
+      assert.equal(Option.isSome(persisted), true);
+      if (Option.isSome(persisted)) {
+        assert.deepEqual(persisted.value.resumeCursor, rolledBackCursor);
+        assert.equal(
+          persisted.value.runtimePayload.lastRuntimeEvent,
+          "provider.rollbackConversationTo",
+        );
+      }
+      assert.deepEqual(routing.claude.rollbackThreadTo.mock.calls.at(-1), [
+        threadId,
+        22,
+        targetTurnId,
+      ]);
+      yield* provider.stopSession({ threadId });
+      routing.claude.startSession.mockClear();
+      routing.claude.rollbackThreadTo.mockClear();
+      routing.claude.stopSession.mockClear();
+    }),
+  );
+
   it.effect("routes provider operations and rollback conversation", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;

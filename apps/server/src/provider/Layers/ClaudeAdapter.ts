@@ -4768,6 +4768,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const validateRollbackBoundary = Effect.fn("validateClaudeRollbackBoundary")(function* (
     threadId: ThreadId,
     retainedTurnCount: number,
+    targetTurnId?: TurnId,
   ) {
     const context = yield* requireSession(threadId);
     if (!Number.isInteger(retainedTurnCount) || retainedTurnCount < 0) {
@@ -4776,6 +4777,44 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         operation: "rollbackThreadTo",
         issue: "retainedTurnCount must be an integer >= 0.",
       });
+    }
+    if (targetTurnId !== undefined) {
+      if (context.turnState !== undefined && context.turnState.turnId !== targetTurnId) {
+        return yield* new ProviderAdapterValidationError({
+          provider: PROVIDER,
+          operation: "rollbackThreadTo",
+          issue: `Active provider turn '${context.turnState.turnId}' does not match rollback target '${targetTurnId}'.`,
+        });
+      }
+      const targetIndex = context.turns.findIndex((turn) => turn.id === targetTurnId);
+      const targetIsActive = context.turnState?.turnId === targetTurnId;
+      if (targetIndex < 0 && !targetIsActive) {
+        const lifetimeTurnCount = context.sessionBaseTurnCount + context.turns.length;
+        if (lifetimeTurnCount < retainedTurnCount) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "rollbackThreadTo",
+            issue: `Provider history has ${lifetimeTurnCount} turns, below retained boundary ${retainedTurnCount}.`,
+          });
+        }
+        if (lifetimeTurnCount > retainedTurnCount) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "rollbackThreadTo",
+            issue: `Rollback target '${targetTurnId}' is unavailable while provider history remains above retained boundary ${retainedTurnCount}.`,
+          });
+        }
+        return;
+      }
+      const retainedSessionTurnCount = targetIndex >= 0 ? targetIndex : context.turns.length;
+      if (retainedSessionTurnCount > retainedTurnCount) {
+        return yield* new ProviderAdapterValidationError({
+          provider: PROVIDER,
+          operation: "rollbackThreadTo",
+          issue: `Provider rollback would retain ${retainedSessionTurnCount} session turns, above retained boundary ${retainedTurnCount}.`,
+        });
+      }
+      return;
     }
     const lifetimeTurnCount = context.sessionBaseTurnCount + context.turns.length;
     if (lifetimeTurnCount < retainedTurnCount) {
@@ -4792,9 +4831,49 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const rollbackThreadTo: NonNullable<ClaudeAdapterShape["rollbackThreadTo"]> = Effect.fn(
     "rollbackThreadTo",
-  )(function* (threadId, retainedTurnCount) {
-    yield* validateRollbackBoundary(threadId, retainedTurnCount);
+  )(function* (threadId, retainedTurnCount, targetTurnId) {
+    yield* validateRollbackBoundary(threadId, retainedTurnCount, targetTurnId);
     const context = yield* requireSession(threadId);
+    if (targetTurnId !== undefined) {
+      const targetIndex = context.turns.findIndex((turn) => turn.id === targetTurnId);
+      const nextLength = targetIndex >= 0 ? targetIndex : context.turns.length;
+      const retainedTurns = context.turns.slice(0, nextLength);
+      const nextSessionBaseTurnCount = retainedTurnCount - nextLength;
+
+      // A concrete orchestration turn id is stronger rollback evidence than
+      // Claude's logical lifetime count, which can lag after older resume
+      // cursors or projection repairs. Remove the target and every later local
+      // turn, then rebase the cursor watermark to T3's retained boundary.
+      // If the target is already absent, preserve all visible local turns: a
+      // prior attempt may have completed before its receipt was persisted.
+      const snapshot = yield* applyRollback(context, nextLength, nextSessionBaseTurnCount);
+      if (snapshot.turns.some((turn) => turn.id === targetTurnId)) {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "thread/rollback-to",
+          detail: `Provider history still contains retracted turn '${targetTurnId}'.`,
+        });
+      }
+      if (
+        snapshot.turns.length !== retainedTurns.length ||
+        snapshot.turns.some((turn, index) => turn.id !== retainedTurns[index]?.id)
+      ) {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "thread/rollback-to",
+          detail: `Provider rollback for '${targetTurnId}' did not preserve the preceding turn history.`,
+        });
+      }
+      const resultingLifetimeTurnCount = context.sessionBaseTurnCount + snapshot.turns.length;
+      if (resultingLifetimeTurnCount !== retainedTurnCount) {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "thread/rollback-to",
+          detail: `Expected ${retainedTurnCount} retained turns, found ${resultingLifetimeTurnCount}.`,
+        });
+      }
+      return snapshot;
+    }
     const lifetimeTurnCount = context.sessionBaseTurnCount + context.turns.length;
     const delta = lifetimeTurnCount - retainedTurnCount;
     const sessionLocalTurnCount = context.turns.length;
