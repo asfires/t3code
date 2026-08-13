@@ -2911,6 +2911,200 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
     }),
   );
 
+  it.effect("retains checkpointless turns and their messages across a revert", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread-revert-turns");
+      const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+        eventStore
+          .append(event)
+          .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+      const sessionSet = (
+        suffix: string,
+        occurredAt: string,
+        status: "running" | "ready",
+        activeTurnId: string | null,
+      ) =>
+        appendAndProject({
+          type: "thread.session-set",
+          eventId: EventId.make(`evt-rt-${suffix}`),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt,
+          commandId: CommandId.make(`cmd-rt-${suffix}`),
+          causationEventId: null,
+          correlationId: CorrelationId.make(`cmd-rt-${suffix}`),
+          metadata: {},
+          payload: {
+            threadId,
+            session: {
+              threadId,
+              status,
+              providerName: "claude",
+              runtimeMode: "full-access",
+              activeTurnId: activeTurnId === null ? null : TurnId.make(activeTurnId),
+              lastError: null,
+              updatedAt: occurredAt,
+            },
+          },
+        });
+      const messageSent = (suffix: string, occurredAt: string, messageId: string, turnId: string) =>
+        appendAndProject({
+          type: "thread.message-sent",
+          eventId: EventId.make(`evt-rt-${suffix}`),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt,
+          commandId: CommandId.make(`cmd-rt-${suffix}`),
+          causationEventId: null,
+          correlationId: CorrelationId.make(`cmd-rt-${suffix}`),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId: MessageId.make(messageId),
+            role: "assistant" as const,
+            text: messageId,
+            turnId: TurnId.make(turnId),
+            streaming: false,
+            createdAt: occurredAt,
+            updatedAt: occurredAt,
+          },
+        });
+      const diffCompleted = (
+        suffix: string,
+        occurredAt: string,
+        turnId: string,
+        checkpointTurnCount: number,
+        assistantMessageId: string,
+      ) =>
+        appendAndProject({
+          type: "thread.turn-diff-completed",
+          eventId: EventId.make(`evt-rt-${suffix}`),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt,
+          commandId: CommandId.make(`cmd-rt-${suffix}`),
+          causationEventId: null,
+          correlationId: CorrelationId.make(`cmd-rt-${suffix}`),
+          metadata: {},
+          payload: {
+            threadId,
+            turnId: TurnId.make(turnId),
+            checkpointTurnCount,
+            checkpointRef: CheckpointRef.make(
+              `refs/t3/checkpoints/thread-revert-turns/turn/${checkpointTurnCount}`,
+            ),
+            status: "ready" as const,
+            files: [],
+            assistantMessageId: MessageId.make(assistantMessageId),
+            completedAt: occurredAt,
+          },
+        });
+
+      yield* appendAndProject({
+        type: "project.created",
+        eventId: EventId.make("evt-rt-1"),
+        aggregateKind: "project",
+        aggregateId: ProjectId.make("project-revert-turns"),
+        occurredAt: "2026-02-26T13:00:00.000Z",
+        commandId: CommandId.make("cmd-rt-1"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-rt-1"),
+        metadata: {},
+        payload: {
+          projectId: ProjectId.make("project-revert-turns"),
+          title: "Project Revert Turns",
+          workspaceRoot: "/tmp/project-revert-turns",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: "2026-02-26T13:00:00.000Z",
+          updatedAt: "2026-02-26T13:00:00.000Z",
+        },
+      });
+      yield* appendAndProject({
+        type: "thread.created",
+        eventId: EventId.make("evt-rt-2"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-02-26T13:00:01.000Z",
+        commandId: CommandId.make("cmd-rt-2"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-rt-2"),
+        metadata: {},
+        payload: {
+          threadId,
+          projectId: ProjectId.make("project-revert-turns"),
+          title: "Thread Revert Turns",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt: "2026-02-26T13:00:01.000Z",
+          updatedAt: "2026-02-26T13:00:01.000Z",
+        },
+      });
+
+      // A turn recorded while checkpointing was unavailable: it settles
+      // without ever getting a checkpoint_turn_count.
+      yield* sessionSet("3", "2026-02-26T13:00:02.000Z", "running", "turn-early");
+      yield* messageSent("4", "2026-02-26T13:00:03.000Z", "assistant-early", "turn-early");
+      yield* sessionSet("5", "2026-02-26T13:00:04.000Z", "ready", null);
+
+      // A checkpointed turn at the revert baseline, then one past it.
+      yield* sessionSet("6", "2026-02-26T13:00:05.000Z", "running", "turn-mid");
+      yield* diffCompleted("7", "2026-02-26T13:00:06.000Z", "turn-mid", 1, "assistant-mid");
+      yield* messageSent("8", "2026-02-26T13:00:06.500Z", "assistant-mid", "turn-mid");
+      yield* sessionSet("9", "2026-02-26T13:00:07.000Z", "ready", null);
+      yield* sessionSet("10", "2026-02-26T13:00:08.000Z", "running", "turn-late");
+      yield* diffCompleted("11", "2026-02-26T13:00:09.000Z", "turn-late", 2, "assistant-late");
+      yield* messageSent("12", "2026-02-26T13:00:09.500Z", "assistant-late", "turn-late");
+      yield* sessionSet("13", "2026-02-26T13:00:10.000Z", "ready", null);
+
+      yield* appendAndProject({
+        type: "thread.reverted",
+        eventId: EventId.make("evt-rt-14"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-02-26T13:00:11.000Z",
+        commandId: CommandId.make("cmd-rt-14"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-rt-14"),
+        metadata: {},
+        payload: {
+          threadId,
+          turnCount: 1,
+        },
+      });
+
+      // The post-baseline checkpointed turn is reverted; the checkpointless
+      // turn survives so its message stays reachable to turn-anchored
+      // pagination.
+      const turnRows = yield* sql<{ readonly turnId: string | null }>`
+        SELECT turn_id AS "turnId"
+        FROM projection_turns
+        WHERE thread_id = ${threadId}
+        ORDER BY turn_id ASC
+      `;
+      assert.deepEqual(turnRows, [{ turnId: "turn-early" }, { turnId: "turn-mid" }]);
+
+      const messageRowsAfterRevert = yield* sql<{ readonly messageId: string }>`
+        SELECT message_id AS "messageId"
+        FROM projection_thread_messages
+        WHERE thread_id = ${threadId}
+        ORDER BY message_id ASC
+      `;
+      assert.deepEqual(messageRowsAfterRevert, [
+        { messageId: "assistant-early" },
+        { messageId: "assistant-mid" },
+      ]);
+    }),
+  );
+
   it.effect("excludes a completed retraction message from SQLite projection", () =>
     Effect.gen(function* () {
       const projectionPipeline = yield* OrchestrationProjectionPipeline;
