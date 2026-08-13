@@ -115,3 +115,45 @@ describe("projectActivityPayload agent-field survival", () => {
     expect(projected.payload).toEqual(source.payload);
   });
 });
+
+describe("projectActivityPayload legacy retraction compatibility", () => {
+  function retractionFailure(detail: string): OrchestrationThreadActivity {
+    return {
+      id: "retraction-failure-1",
+      tone: "error",
+      kind: "turn.retract.failed",
+      summary: "Message retract failed",
+      payload: {
+        requestId: "request-1",
+        stage: "provider-rollback",
+        retryable: false,
+        detail,
+      },
+      turnId: "turn-1",
+      createdAt: "2026-08-12T18:49:47.397Z",
+    } as unknown as OrchestrationThreadActivity;
+  }
+
+  it("marks replayed unavailable-boundary failures silent", () => {
+    const projected = projectActivityPayload(
+      retractionFailure(
+        "Provider adapter validation failed (claudeAgent) in rollbackThreadTo: Provider history has 3 turns, below retained boundary 11.",
+      ),
+    );
+
+    expect(projected.payload).toMatchObject({
+      requestId: "request-1",
+      detail:
+        "Provider adapter validation failed (claudeAgent) in rollbackThreadTo: Provider history has 3 turns, below retained boundary 11.",
+      silent: true,
+    });
+  });
+
+  it("keeps unrelated retraction failures visible", () => {
+    const source = retractionFailure(
+      "Provider adapter validation failed (claudeAgent) in rollbackThreadTo: retainedTurnCount must be an integer >= 0.",
+    );
+
+    expect(projectActivityPayload(source)).toBe(source);
+  });
+});
