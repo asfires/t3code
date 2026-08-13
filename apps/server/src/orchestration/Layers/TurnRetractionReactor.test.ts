@@ -79,6 +79,7 @@ type MutableState = {
   activeTurnId: TurnId | null;
   historyTurnCount: number;
   readonly rollbackTargetTurnIds: Array<TurnId | undefined>;
+  providerStopped: boolean;
   filesystemRestored: boolean;
   failRollbackAfterEffect: boolean;
   failRestoreAfterEffect: boolean;
@@ -119,6 +120,7 @@ function makeState(providerSendState: ProjectionTurnRetraction["providerSendStat
     activeTurnId: providerSendState === "claimed" ? TURN_ID : null,
     historyTurnCount: 2,
     rollbackTargetTurnIds: [],
+    providerStopped: false,
     filesystemRestored: false,
     failRollbackAfterEffect: false,
     failRestoreAfterEffect: false,
@@ -324,7 +326,13 @@ async function startHarness(
       }).pipe(Effect.andThen(state.interruptAcknowledgementHangs ? Effect.never : Effect.void)),
     respondToRequest: () => unsupported(),
     respondToUserInput: () => unsupported(),
-    stopSession: () => unsupported(),
+    stopSession: () =>
+      Effect.sync(() => {
+        state.order.push("stop");
+        state.providerStopped = true;
+        state.sessionStatus = "ready";
+        state.activeTurnId = null;
+      }),
     listSessions: () => Effect.succeed([]),
     getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
     getInstanceInfo: (instanceId) =>
@@ -447,6 +455,34 @@ it("completes a cancelled provider-send path after filesystem convergence", asyn
   const harness = await startHarness(state);
   expect(state.row.status).toBe("completed");
   expect(state.filesystemRestored).toBe(true);
+  expect(state.order).toEqual(["restore", "complete"]);
+  await stopHarness(harness);
+});
+
+it("stops, restores, and completes a claimed first-message retraction without rollback", async () => {
+  const state = makeState("claimed");
+  state.row = pendingRow("claimed", true);
+  state.sessionStatus = "starting";
+  state.activeTurnId = null;
+  const harness = await startHarness(state);
+
+  expect(state.providerStopped).toBe(true);
+  expect(state.filesystemRestored).toBe(true);
+  expect(state.row.status).toBe("completed");
+  expect(state.order).toEqual(["stop", "restore", "complete"]);
+  expect(state.interruptedTurnIds).toEqual([]);
+  expect(state.rollbackTargetTurnIds).toEqual([]);
+  await stopHarness(harness);
+});
+
+it("restores and completes a cancelled first-message send without stopping a provider", async () => {
+  const state = makeState("cancelled");
+  state.row = pendingRow("cancelled", true);
+  const harness = await startHarness(state);
+
+  expect(state.providerStopped).toBe(false);
+  expect(state.filesystemRestored).toBe(true);
+  expect(state.row.status).toBe("completed");
   expect(state.order).toEqual(["restore", "complete"]);
   await stopHarness(harness);
 });
