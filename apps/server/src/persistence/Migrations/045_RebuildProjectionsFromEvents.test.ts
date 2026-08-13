@@ -54,7 +54,9 @@ layer("045_RebuildProjectionsFromEvents", (it) => {
 
       yield* sql`DROP TABLE projection_thread_proposed_plans`;
       yield* rebuildProjectionsFromEvents;
-      assert.deepEqual(migrationManifest.at(-1), [45, "RebuildProjectionsFromEvents"]);
+      // The manifest must end on a full rebuild so boot replays every event
+      // through the current projectors after the wipe.
+      assert.deepEqual(migrationManifest.at(-1), [46, "RebuildProjectionsWithRetainedTurns"]);
     }),
   );
 });
