@@ -9,6 +9,7 @@ import {
   ProviderSession,
   ProviderDriverKind,
   ProviderInstanceId,
+  type VcsRef,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import {
@@ -46,12 +47,14 @@ import {
 import { makeProviderRegistryLayer } from "../../provider/testUtils/providerRegistryMock.ts";
 import { TextGeneration, type TextGenerationShape } from "../../textGeneration/TextGeneration.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
+import { ProjectSetupScriptRunner } from "../../project/ProjectSetupScriptRunner.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
 import {
+  managedWorktreeRecoveryPlan,
   providerErrorLabel,
   providerErrorLabelFromInstanceHint,
   ProviderCommandReactorLive,
@@ -145,6 +148,100 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
+  describe("managed worktree recovery planning", () => {
+    it("reattaches an existing local branch", () => {
+      expect(
+        managedWorktreeRecoveryPlan({
+          branch: "t3code/fix",
+          path: "/repo/worktrees/fix",
+          refs: [
+            {
+              name: "t3code/fix",
+              current: false,
+              isDefault: false,
+              isRemote: false,
+              worktreePath: null,
+            },
+          ],
+          checkpoints: [],
+        }),
+      ).toEqual({
+        refName: "t3code/fix",
+        path: "/repo/worktrees/fix",
+      });
+    });
+
+    it("recreates a deleted branch from its latest ready checkpoint", () => {
+      expect(
+        managedWorktreeRecoveryPlan({
+          branch: "t3code/merged-fix",
+          path: "/repo/worktrees/merged-fix",
+          refs: [
+            {
+              name: "main",
+              current: true,
+              isDefault: true,
+              isRemote: false,
+              worktreePath: "/repo",
+            },
+            {
+              name: "origin/t3code/merged-fix",
+              remoteName: "origin",
+              current: false,
+              isDefault: false,
+              isRemote: true,
+              worktreePath: null,
+            },
+          ],
+          checkpoints: [
+            {
+              turnId: asTurnId("turn-1"),
+              checkpointTurnCount: 1,
+              checkpointRef: CheckpointRef.make("refs/t3/checkpoints/old"),
+              status: "ready",
+              files: [],
+              assistantMessageId: null,
+              completedAt: "2026-01-01T00:00:00.000Z",
+            },
+            {
+              turnId: asTurnId("turn-2"),
+              checkpointTurnCount: 2,
+              checkpointRef: CheckpointRef.make("refs/t3/checkpoints/latest"),
+              status: "ready",
+              files: [],
+              assistantMessageId: null,
+              completedAt: "2026-01-01T00:01:00.000Z",
+            },
+          ],
+        }),
+      ).toEqual({
+        refName: "refs/t3/checkpoints/latest",
+        newRefName: "t3code/merged-fix",
+        baseRefName: "main",
+        path: "/repo/worktrees/merged-fix",
+      });
+    });
+
+    it("does not steal a branch checked out by another worktree", () => {
+      expect(
+        managedWorktreeRecoveryPlan({
+          branch: "t3code/fix",
+          path: "/repo/worktrees/fix",
+          refs: [
+            {
+              name: "t3code/fix",
+              current: false,
+              isDefault: false,
+              isRemote: false,
+              worktreePath: "/repo/worktrees/other",
+            },
+          ],
+          checkpoints: [],
+        }),
+      ).toBeNull();
+    });
+  });
+
   async function createHarness(input?: {
     readonly baseDir?: string;
     readonly threadModelSelection?: ModelSelection;
@@ -157,6 +254,12 @@ describe("ProviderCommandReactor", () => {
     ) => Effect.Effect<ProviderSession, ProviderAdapterRequestError>;
     readonly beforeThreadDetailRead?: (callIndex: number) => Effect.Effect<void>;
     readonly ensurePreTurnBaselineEffect?: () => Effect.Effect<CheckpointRef | null>;
+    readonly missingManagedWorktree?: {
+      readonly branch: string;
+      readonly path: string;
+      readonly refs: ReadonlyArray<VcsRef>;
+      readonly checkpointRef?: CheckpointRef;
+    };
   }) {
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir =
@@ -271,6 +374,29 @@ describe("ProviderCommandReactor", () => {
             : "renamed-branch",
       }),
     );
+    const listRefs = vi.fn(() =>
+      Effect.succeed({
+        refs: [...(input?.missingManagedWorktree?.refs ?? [])],
+        isRepo: true,
+        hasPrimaryRemote: true,
+        nextCursor: null,
+        totalCount: input?.missingManagedWorktree?.refs.length ?? 0,
+      }),
+    );
+    const createWorktree = vi.fn(
+      (
+        worktreeInput: Parameters<
+          GitWorkflowService.GitWorkflowService["Service"]["createWorktree"]
+        >[0],
+      ) =>
+        Effect.succeed({
+          worktree: {
+            path: worktreeInput.path ?? "/tmp/provider-created-worktree",
+            refName: worktreeInput.newRefName ?? worktreeInput.refName,
+          },
+        }),
+    );
+    const runSetupScript = vi.fn(() => Effect.succeed({ status: "no-script" as const }));
     const refreshStatus = vi.fn((_: string) =>
       Effect.succeed({
         isRepo: true,
@@ -427,9 +553,12 @@ describe("ProviderCommandReactor", () => {
       Layer.provideMerge(makeProviderRegistryLayer(providerSnapshots as never)),
       Layer.provideMerge(
         Layer.mock(GitWorkflowService.GitWorkflowService)({
+          createWorktree,
+          listRefs,
           renameBranch,
         } satisfies Partial<GitWorkflowService.GitWorkflowService["Service"]>),
       ),
+      Layer.provideMerge(Layer.succeed(ProjectSetupScriptRunner, { runForThread: runSetupScript })),
       Layer.provideMerge(
         Layer.succeed(VcsStatusBroadcaster, {
           getStatus: () => Effect.die("getStatus should not be called in this test"),
@@ -483,6 +612,37 @@ describe("ProviderCommandReactor", () => {
         createdAt: now,
       }),
     );
+    if (input?.missingManagedWorktree) {
+      await Effect.runPromise(
+        engine.dispatch({
+          type: "thread.managed-worktree.record",
+          commandId: CommandId.make("cmd-managed-worktree-record"),
+          threadId: ThreadId.make("thread-1"),
+          branch: input.missingManagedWorktree.branch,
+          managedWorktree: {
+            projectCwd: "/tmp/provider-project",
+            path: input.missingManagedWorktree.path,
+            createdForCommandId: CommandId.make("cmd-thread-create"),
+          },
+        }),
+      );
+      if (input.missingManagedWorktree.checkpointRef !== undefined) {
+        await Effect.runPromise(
+          engine.dispatch({
+            type: "thread.turn.diff.complete",
+            commandId: CommandId.make("cmd-managed-worktree-checkpoint"),
+            threadId: ThreadId.make("thread-1"),
+            turnId: asTurnId("turn-before-restart"),
+            checkpointTurnCount: 1,
+            checkpointRef: input.missingManagedWorktree.checkpointRef,
+            status: "ready",
+            files: [],
+            completedAt: now,
+            createdAt: now,
+          }),
+        );
+      }
+    }
     if (input?.titleRegenerationBeforeStart === "two") {
       await Effect.runPromise(
         engine.dispatch({
@@ -533,6 +693,9 @@ describe("ProviderCommandReactor", () => {
       respondToUserInput,
       stopSession,
       renameBranch,
+      listRefs,
+      createWorktree,
+      runSetupScript,
       refreshStatus,
       generateBranchName,
       generateThreadTitle,
@@ -585,6 +748,67 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.status).toBe("starting");
     expect(thread?.session?.runtimeMode).toBe("approval-required");
+  });
+
+  it("recreates a pruned managed worktree before resuming a provider turn", async () => {
+    const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3code-reactor-recovery-"));
+    const worktreePath = NodePath.join(baseDir, "missing-worktree");
+    const checkpointRef = CheckpointRef.make("refs/t3/checkpoints/thread-1/turn/1");
+    const harness = await createHarness({
+      baseDir,
+      missingManagedWorktree: {
+        branch: "t3code/merged-fix",
+        path: worktreePath,
+        checkpointRef,
+        refs: [
+          {
+            name: "main",
+            current: true,
+            isDefault: true,
+            isRemote: false,
+            worktreePath: "/tmp/provider-project",
+          },
+        ],
+      },
+    });
+    const now = "2026-01-01T00:02:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-after-prune"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-after-prune"),
+          role: "user",
+          text: "continue after restart",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.createWorktree.mock.calls.length === 1);
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.createWorktree.mock.calls[0]?.[0]).toEqual({
+      cwd: "/tmp/provider-project",
+      refName: checkpointRef,
+      newRefName: "t3code/merged-fix",
+      baseRefName: "main",
+      path: worktreePath,
+    });
+    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+      cwd: worktreePath,
+    });
+    expect(harness.runSetupScript).toHaveBeenCalledWith({
+      threadId: ThreadId.make("thread-1"),
+      projectId: asProjectId("project-1"),
+      projectCwd: "/tmp/provider-project",
+      worktreePath,
+    });
   });
 
   effectIt.effect("cancels an unclaimed retraction before provider session creation", () =>
