@@ -50,7 +50,6 @@ type RetractionStage =
   | "eligibility"
   | "interrupt"
   | "settlement"
-  | "provider-stop"
   | "provider-rollback"
   | "checkpoint-restore"
   | "cleanup";
@@ -416,32 +415,6 @@ export const makeTurnRetractionReactor = Effect.gen(function* () {
       })),
     );
 
-    // A first-message retraction deletes the thread, so there is no provider
-    // conversation to retain or resume. Stop the provider before restoring the
-    // baseline so it cannot write into the workspace after restoration, then
-    // let completion emit the existing reverted + deleted event pair.
-    if (row.firstUserMessage) {
-      if (row.providerSendState === "claimed") {
-        yield* providerService.stopSession({ threadId: row.threadId }).pipe(
-          Effect.mapError((error) => ({
-            stage: "provider-stop" as const,
-            retryable: !isTerminalProviderError(error),
-            detail: failureDetail(error),
-          })),
-        );
-      }
-      yield* restoreFilesystem(row, row.providerSendState === "cancelled");
-      yield* dispatchCompletion(row, targetTurnId);
-      clearIssuedInterrupts(row.requestId);
-      yield* logConvergence(row, "cleanup", "completed", {
-        action:
-          row.providerSendState === "claimed"
-            ? "stop-provider-restore-and-delete-first-message-thread"
-            : "restore-and-delete-cancelled-first-message-thread",
-      });
-      return;
-    }
-
     if (row.providerSendState === "cancelled") {
       yield* restoreFilesystem(row, true);
       yield* dispatchCompletion(row, targetTurnId);
@@ -570,6 +543,21 @@ export const makeTurnRetractionReactor = Effect.gen(function* () {
         });
         return;
       }
+    }
+
+    // A first-message retraction deletes the thread, so its settled provider
+    // conversation does not need a rollback boundary. Do not stop the session
+    // while ProviderCommandReactor may still be starting the send: the normal
+    // start/interrupt settlement above lets that durable worker finish. The
+    // correlated thread.deleted event owns final provider-session cleanup.
+    if (row.firstUserMessage) {
+      yield* restoreFilesystem(row, false);
+      yield* dispatchCompletion(row, targetTurnId);
+      clearIssuedInterrupts(row.requestId);
+      yield* logConvergence(row, "cleanup", "completed", {
+        action: "restore-and-delete-settled-first-message-thread",
+      });
+      return;
     }
 
     yield* providerService
