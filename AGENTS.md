@@ -172,11 +172,12 @@ section by keeping the fork's version.
   web app, never end with a bare "done" — Adam verifies changes himself in a
   running app before merging. Start the dev server in the background from
   the worktree root (`vp run dev`; worktree-local `.t3` state and
-  path-hashed ports make parallel threads safe), wait for startup, and
-  paste the full pairing URL (`/pair#token=...`) in your final reply for
-  Adam to click. Never open that URL yourself — the token is single-use;
-  mint a replacement with `node apps/server/src/bin.ts pair` if it gets
-  consumed. Leave the server running — teardown is automatic: once Adam
+  path-hashed ports make parallel threads safe), and wait for startup. On
+  the first handoff, paste the full pairing URL (`/pair#token=...`) for Adam
+  to click. On later handoffs for the same retained origin, paste the ordinary
+  web URL and do not mint another token unless Adam says the browser needs to
+  pair again. Never open a pairing URL yourself — the token is single-use.
+  Leave the server running — teardown is automatic: once Adam
   merges the PR and deletes the branch, `t3wt prune` stops the worktree's
   leftover processes and removes it. The link is the whole deliverable.
   This bullet is standing permission to run the dev server at handoff; it
