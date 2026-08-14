@@ -40,6 +40,7 @@ import {
   expandCollapsedComposerCursor,
   replaceTextRange,
   shouldAcceptPromptSuggestionOnTab,
+  shouldCollapseExpandedComposer,
   shouldSubmitComposerOnEnter,
 } from "../../composer-logic";
 import { deriveComposerSendState, readFileAsDataUrl } from "../ChatView.logic";
@@ -196,6 +197,8 @@ import { toastManager } from "../ui/toast";
 import {
   BotIcon,
   CircleAlertIcon,
+  Maximize2Icon,
+  Minimize2Icon,
   PencilRulerIcon,
   type LucideIcon,
   LockIcon,
@@ -950,6 +953,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const [isComposerPrimaryActionsCompact, setIsComposerPrimaryActionsCompact] = useState(false);
   const [isComposerModelPickerOpen, setIsComposerModelPickerOpen] = useState(false);
   const [isComposerFocused, setIsComposerFocused] = useState(false);
+  const [isComposerExpanded, setIsComposerExpanded] = useState(false);
+  const [isComposerExpandAvailable, setIsComposerExpandAvailable] = useState(false);
   const [composerMenuAnchor, setComposerMenuAnchor] = useState<HTMLDivElement | null>(null);
   const [isStashMenuOpen, setIsStashMenuOpen] = useState(false);
   const [stashPulse, setStashPulse] = useState<{ key: number; active: boolean }>({
@@ -1402,9 +1407,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     setComposerHighlightedItemId(null);
     setComposerCursor(collapseExpandedComposerCursor(promptRef.current, promptRef.current.length));
     setComposerTrigger(detectComposerTrigger(promptRef.current, promptRef.current.length));
+    setIsComposerExpanded(false);
+    setIsComposerExpandAvailable(false);
     dragDepthRef.current = 0;
     setIsDragOverComposer(false);
   }, [draftId, activeThreadId, promptRef]);
+
+  useEffect(() => {
+    if (isMobileViewport) {
+      setIsComposerExpanded(false);
+    }
+  }, [isMobileViewport]);
 
   // ------------------------------------------------------------------
   // Footer compact layout observation
@@ -1531,6 +1544,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       cursorAdjacentToMention: boolean,
       terminalContextIds: string[],
     ) => {
+      if (shouldCollapseExpandedComposer(nextPrompt)) {
+        setIsComposerExpanded(false);
+        setIsComposerExpandAvailable(false);
+      }
       if (activePendingProgress?.activeQuestion && pendingUserInputs.length > 0) {
         setComposerCursor(nextCursor);
         setComposerTrigger(
@@ -1828,6 +1845,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         return;
       }
       onSend(event);
+      setIsComposerExpanded(false);
       if (shouldBlurMobileComposerOnSubmit()) {
         blurMobileComposerAfterSend();
       }
@@ -1862,6 +1880,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         mobileComposerExpandInFlightRef.current = false;
       });
     });
+  }, []);
+
+  const handleComposerBeyondMinimumHeightChange = useCallback((beyondMinimumHeight: boolean) => {
+    setIsComposerExpandAvailable(beyondMinimumHeight);
+    if (!beyondMinimumHeight) {
+      setIsComposerExpanded(false);
+    }
   }, []);
 
   // ------------------------------------------------------------------
@@ -2674,6 +2699,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       <div
         className={cn(
           "group rounded-[22px] p-px transition-colors duration-200",
+          isComposerExpanded && "h-[min(48rem,calc(100dvh-5rem))]",
           composerProviderState.composerFrameClassName,
         )}
         onDragEnter={onComposerDragEnter}
@@ -2690,6 +2716,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           data-chat-composer-mobile-collapsed={isComposerCollapsedMobile ? "true" : "false"}
           className={cn(
             "rounded-[20px] transition-[background-color] duration-200",
+            isComposerExpanded && "flex h-full min-h-0 flex-col",
             isDragOverComposer ? "bg-accent/45 ring-1 ring-primary/70" : null,
             projectSelectionRequired ? "opacity-75" : null,
             composerProviderState.composerSurfaceClassName,
@@ -2868,6 +2895,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             ref={setComposerMenuAnchor}
             className={cn(
               "relative px-3 pb-2 sm:px-4",
+              isComposerExpanded && "flex min-h-0 flex-1 flex-col",
               hasComposerHeader ? "pt-2.5 sm:pt-3" : "pt-3.5 sm:pt-4",
               isComposerCollapsedMobile && "hidden",
             )}
@@ -2909,6 +2937,37 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 />
               </ComposerCommandMenuLayer>
             )}
+
+            {!isMobileViewport && (isComposerExpandAvailable || isComposerExpanded) ? (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-xs"
+                      className={cn(
+                        "absolute right-4 z-10 text-secondary-label hover:text-foreground",
+                        hasComposerHeader ? "top-2.5 sm:top-3" : "top-3.5 sm:top-4",
+                      )}
+                      aria-label={isComposerExpanded ? "Collapse" : "Expand"}
+                      aria-expanded={isComposerExpanded}
+                      onPointerDown={(event) => event.preventDefault()}
+                      onClick={() => setIsComposerExpanded((expanded) => !expanded)}
+                    >
+                      {isComposerExpanded ? (
+                        <Minimize2Icon className="size-3.5" />
+                      ) : (
+                        <Maximize2Icon className="size-3.5" />
+                      )}
+                    </Button>
+                  }
+                />
+                <TooltipPopup side="left">
+                  {isComposerExpanded ? "Collapse" : "Expand"}
+                </TooltipPopup>
+              </Tooltip>
+            ) : null}
 
             {!isComposerCollapsedMobile &&
               !isComposerApprovalState &&
@@ -2961,7 +3020,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 (image) =>
                   !composerPreviewAnnotations.some((annotation) => annotation.id === image.id),
               ) && (
-                <div className="mb-3 flex flex-wrap gap-2">
+                <div
+                  className={cn(
+                    "mb-3 flex flex-wrap gap-2",
+                    !isMobileViewport &&
+                      (isComposerExpandAvailable || isComposerExpanded) &&
+                      "pr-8",
+                  )}
+                >
                   {composerImages
                     .filter(
                       (image) =>
@@ -3032,7 +3098,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 </div>
               )}
 
-            <div className="relative">
+            <div className={cn("relative", isComposerExpanded && "min-h-0 flex-1")}>
               <ComposerPromptEditor
                 editorRef={composerEditorRef}
                 value={
@@ -3049,7 +3115,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     : []
                 }
                 skills={selectedProviderStatus?.skills ?? []}
-                {...(showMobilePendingAnswerActions ? { className: "max-sm:pb-11" } : {})}
+                expanded={isComposerExpanded}
+                className={cn(
+                  showMobilePendingAnswerActions && "max-sm:pb-11",
+                  !isMobileViewport &&
+                    (isComposerExpandAvailable || isComposerExpanded) &&
+                    "composer-editor-expand-control-visible pr-8",
+                )}
+                onBeyondMinimumHeightChange={handleComposerBeyondMinimumHeightChange}
                 onRemoveTerminalContext={removeComposerTerminalContextFromDraft}
                 onChange={onPromptChange}
                 onCommandKeyDown={onComposerCommandKey}
