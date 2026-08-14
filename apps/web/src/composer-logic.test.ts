@@ -9,6 +9,7 @@ import {
   parseStandaloneComposerSlashCommand,
   replaceTextRange,
   shouldAcceptPromptSuggestionOnTab,
+  shouldCollapseExpandedComposer,
   shouldSubmitComposerOnEnter,
 } from "./composer-logic";
 import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "./lib/terminalContext";
@@ -56,6 +57,14 @@ describe("shouldAcceptPromptSuggestionOnTab", () => {
         suggestedPrompt: "run the tests",
       }),
     ).toBe(false);
+  });
+});
+
+describe("shouldCollapseExpandedComposer", () => {
+  it("collapses only when the editor value becomes empty", () => {
+    expect(shouldCollapseExpandedComposer("")).toBe(true);
+    expect(shouldCollapseExpandedComposer(" ")).toBe(false);
+    expect(shouldCollapseExpandedComposer("still editing")).toBe(false);
   });
 });
 

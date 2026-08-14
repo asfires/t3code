@@ -876,14 +876,25 @@ export interface ComposerPromptEditorHandle {
   };
 }
 
+export function isComposerPromptEditorBeyondMinimumHeight(
+  element: Pick<HTMLElement, "clientHeight">,
+  minimumHeight: number,
+): boolean {
+  // Ignore sub-pixel rounding so the affordance does not flicker at the
+  // editor's minimum-height boundary.
+  return element.clientHeight - minimumHeight > 1;
+}
+
 interface ComposerPromptEditorProps {
   value: string;
   cursor: number;
   terminalContexts: ReadonlyArray<TerminalContextDraft>;
   skills: ReadonlyArray<ServerProviderSkill>;
   disabled: boolean;
+  expanded?: boolean;
   placeholder: string;
   className?: string;
+  onBeyondMinimumHeightChange?: (beyondMinimumHeight: boolean) => void;
   onRemoveTerminalContext: (contextId: string) => void;
   onChange: (
     nextValue: string,
@@ -1531,8 +1542,10 @@ function ComposerPromptEditorInner({
   terminalContexts,
   skills,
   disabled,
+  expanded = false,
   placeholder,
   className,
+  onBeyondMinimumHeightChange,
   onRemoveTerminalContext,
   onChange,
   onCommandKeyDown,
@@ -1570,6 +1583,46 @@ function ComposerPromptEditorInner({
   useEffect(() => {
     editor.setEditable(!disabled);
   }, [disabled, editor]);
+
+  useLayoutEffect(() => {
+    if (!onBeyondMinimumHeightChange || expanded) return;
+
+    const rootElement = editor.getRootElement();
+    if (!rootElement) return;
+
+    let animationFrame: number | null = null;
+    const measureHeight = () => {
+      animationFrame = null;
+      const minimumHeight = Number.parseFloat(window.getComputedStyle(rootElement).minHeight);
+      onBeyondMinimumHeightChange(
+        Number.isFinite(minimumHeight) &&
+          isComposerPromptEditorBeyondMinimumHeight(rootElement, minimumHeight),
+      );
+    };
+    const scheduleMeasurement = () => {
+      if (animationFrame !== null) return;
+      animationFrame = window.requestAnimationFrame(measureHeight);
+    };
+
+    measureHeight();
+    const resizeObserver =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(scheduleMeasurement);
+    resizeObserver?.observe(rootElement);
+    const mutationObserver = new MutationObserver(scheduleMeasurement);
+    mutationObserver.observe(rootElement, {
+      childList: true,
+      characterData: true,
+      subtree: true,
+    });
+
+    return () => {
+      if (animationFrame !== null) {
+        window.cancelAnimationFrame(animationFrame);
+      }
+      resizeObserver?.disconnect();
+      mutationObserver.disconnect();
+    };
+  }, [editor, expanded, onBeyondMinimumHeightChange]);
 
   useLayoutEffect(() => {
     const normalizedCursor = clampCollapsedComposerCursor(value, cursor);
@@ -1747,14 +1800,15 @@ function ComposerPromptEditorInner({
 
   return (
     <ComposerTerminalContextActionsContext value={terminalContextActions}>
-      <div className="composer-editor-surface relative">
+      <div className={cn("composer-editor-surface relative", expanded && "h-full min-h-0")}>
         <PlainTextPlugin
           contentEditable={
             <ContentEditable
               className={cn(
                 // The size comes from .composer-editor-surface so Settings -> Appearance
                 // can drive it; keep everything else here.
-                "block max-h-50 min-h-17.5 w-full overflow-y-auto whitespace-pre-wrap wrap-break-word bg-transparent leading-relaxed text-foreground focus:outline-none",
+                "block max-h-64 min-h-17.5 w-full overflow-y-auto whitespace-pre-wrap wrap-break-word bg-transparent leading-relaxed text-foreground focus:outline-none",
+                expanded && "h-full min-h-0 max-h-none",
                 className,
               )}
               data-testid="composer-editor"
@@ -1793,8 +1847,10 @@ export function ComposerPromptEditor({
   terminalContexts,
   skills,
   disabled,
+  expanded = false,
   placeholder,
   className,
+  onBeyondMinimumHeightChange,
   onRemoveTerminalContext,
   onChange,
   onCommandKeyDown,
@@ -1831,11 +1887,13 @@ export function ComposerPromptEditor({
         terminalContexts={terminalContexts}
         skills={skills}
         disabled={disabled}
+        expanded={expanded}
         placeholder={placeholder}
         onRemoveTerminalContext={onRemoveTerminalContext}
         onChange={onChange}
         onPaste={onPaste}
         editorRef={editorRef}
+        {...(onBeyondMinimumHeightChange ? { onBeyondMinimumHeightChange } : {})}
         {...(onCommandKeyDown ? { onCommandKeyDown } : {})}
         {...(className ? { className } : {})}
       />

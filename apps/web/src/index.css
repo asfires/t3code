@@ -1703,6 +1703,13 @@ code {
   font-size: var(--font-size-prompt, 0.875rem);
 }
 
+/* The expand control owns the composer's top-right corner. In Chromium-based
+   web and desktop clients, start the native editor scrollbar below it instead
+   of shifting the control away from the corner. */
+.composer-editor-expand-control-visible::-webkit-scrollbar-track {
+  margin-block-start: 2rem;
+}
+
 /* Touch browsers zoom the page when a focused field is under 16px, so keep
    the floor there regardless of the preference. Gated on a coarse pointer:
    the zoom quirk does not exist on desktop, where a narrow window must not

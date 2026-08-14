@@ -32,6 +32,10 @@ export function shouldAcceptPromptSuggestionOnTab(input: {
   );
 }
 
+export function shouldCollapseExpandedComposer(prompt: string): boolean {
+  return prompt.length === 0;
+}
+
 const isInlineTokenSegment = (
   segment:
     | { type: "text"; text: string }
