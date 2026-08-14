@@ -29,7 +29,8 @@ import {
   toastManager,
 } from "../components/ui/toast";
 import { resolveAndPersistPreferredEditor } from "../editorPreferences";
-import { applyAppearanceFontVariables } from "~/appearanceFonts";
+import { applyAppearanceFontVariables, isFontFamilyAvailable } from "~/appearanceFonts";
+import { loadHostFontFamily } from "../hostFonts";
 import { useClientSettings } from "../hooks/useSettings";
 import {
   deriveLogicalProjectKeyFromSettings,
@@ -179,6 +180,16 @@ function FontAppearanceSync() {
       sizeCode: fontSizeCode,
       smoothing: fontSmoothing,
     });
+    for (const family of new Set([fontFamilySans, fontFamilyCode, fontFamilyComposer])) {
+      const normalized = family.trim();
+      if (
+        normalized.length > 0 &&
+        !normalized.includes(",") &&
+        !isFontFamilyAvailable(normalized)
+      ) {
+        void loadHostFontFamily(normalized);
+      }
+    }
   }, [
     fontFamilyCode,
     fontFamilyComposer,

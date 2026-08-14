@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   areFontAdvancesMonospace,
@@ -9,10 +9,49 @@ import {
   DEFAULT_SANS_FONT_STACK,
   appearanceFontStack,
   cssFontFamilies,
+  queryInstalledFontFamilies,
   resolveDefaultFamilyLabel,
   resolveTerminalFontPreference,
   resolveTerminalFontSizePreference,
 } from "./appearanceFonts";
+
+describe("installed font discovery", () => {
+  it("reuses the cached list until a refresh is requested", async () => {
+    const queryLocalFonts = vi
+      .fn<() => Promise<ReadonlyArray<{ readonly family: string }>>>()
+      .mockResolvedValueOnce([{ family: "Inter" }])
+      .mockResolvedValueOnce([{ family: "Fira Code" }, { family: "Inter" }])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ family: "JetBrains Mono" }]);
+    vi.stubGlobal("window", { queryLocalFonts });
+
+    try {
+      await expect(queryInstalledFontFamilies()).resolves.toEqual({
+        families: ["Inter"],
+        status: "granted",
+      });
+      await expect(queryInstalledFontFamilies()).resolves.toEqual({
+        families: ["Inter"],
+        status: "granted",
+      });
+      await expect(queryInstalledFontFamilies({ refresh: true })).resolves.toEqual({
+        families: ["Fira Code", "Inter"],
+        status: "granted",
+      });
+      await expect(queryInstalledFontFamilies({ refresh: true })).resolves.toEqual({
+        families: [],
+        status: "denied",
+      });
+      await expect(queryInstalledFontFamilies()).resolves.toEqual({
+        families: ["JetBrains Mono"],
+        status: "granted",
+      });
+      expect(queryLocalFonts).toHaveBeenCalledTimes(4);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
 
 describe("areFontAdvancesMonospace", () => {
   it("accepts a fixed advance and rejects any proportional glyph", () => {
@@ -48,6 +87,7 @@ describe("cssFontFamilies", () => {
   it("quotes names that are not single CSS idents", () => {
     expect(cssFontFamilies("3270 Nerd Font")).toBe('"3270 Nerd Font"');
     expect(cssFontFamilies("M+ 1m")).toBe('"M+ 1m"');
+    expect(cssFontFamilies("Jost*")).toBe('"Jost*"');
   });
 });
 
