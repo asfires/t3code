@@ -83,6 +83,7 @@ type TypographySettings = Pick<
   | "fontSizeInterface"
   | "fontSizePrompt"
   | "fontSizeCode"
+  | "fontSizeToolOutput"
   | "fontSizeTerminal"
 >;
 
@@ -100,6 +101,9 @@ export function getChangedTypographySettingLabels(settings: TypographySettings):
     ...(settings.fontFamilyCode !== DEFAULT_UNIFIED_SETTINGS.fontFamilyCode ||
     settings.fontSizeCode !== DEFAULT_UNIFIED_SETTINGS.fontSizeCode
       ? ["Code font"]
+      : []),
+    ...(settings.fontSizeToolOutput !== DEFAULT_UNIFIED_SETTINGS.fontSizeToolOutput
+      ? ["Tool output"]
       : []),
     ...(settings.fontFamilyTerminal !== DEFAULT_UNIFIED_SETTINGS.fontFamilyTerminal ||
     settings.fontSizeTerminal !== DEFAULT_UNIFIED_SETTINGS.fontSizeTerminal
