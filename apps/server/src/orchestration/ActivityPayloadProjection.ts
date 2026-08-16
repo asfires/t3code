@@ -349,6 +349,28 @@ function projectMcpToolCallData(data: Record<string, unknown>): Record<string, u
 }
 
 /**
+ * ACP providers deliver command output as a `content` array of text entries
+ * rather than `rawOutput`. Join the text so the client can render it like any
+ * other retained output; the caller caps it like every other output field.
+ */
+function joinAcpContentText(value: unknown): string | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const text = value
+    .map((entryValue) => {
+      const entry = asRecord(entryValue);
+      const content = asRecord(entry?.content);
+      return entry?.type === "content" && content?.type === "text"
+        ? asTrimmedString(content.text)
+        : null;
+    })
+    .filter((entry): entry is string => entry !== null)
+    .join("\n");
+  return text.length > 0 ? text : null;
+}
+
+/**
  * Removes activity payload fields that no current client reads while retaining
  * the full payload in persistence and the event store.
  */
@@ -393,6 +415,15 @@ export function projectActivityPayload(
   if (changedFiles.length > 0) {
     // Both clients discover file names by walking objects with path-like keys.
     projectedData.files = changedFiles.map((path) => ({ path }));
+  }
+
+  if (!("rawOutput" in projectedData)) {
+    const acpText = joinAcpContentText(data.content);
+    if (acpText !== null) {
+      const capped = capProjectedToolValue({ content: acpText });
+      projectedData.rawOutput = capped.value;
+      resultTruncated ||= capped.truncated;
+    }
   }
 
   if (resultTruncated) {

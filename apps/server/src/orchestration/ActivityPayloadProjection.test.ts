@@ -44,6 +44,77 @@ describe("projectActivityPayload agent-field survival", () => {
     expect(data.somethingClientNeverReads).toBeUndefined();
   });
 
+  it("retains Codex command output under the projection cap", () => {
+    const aggregatedOutput = `hello from codex\n${"x".repeat(5000)}`;
+    const projected = projectActivityPayload(
+      activity({
+        itemType: "command_execution",
+        data: {
+          item: {
+            command: "/bin/zsh -lc 'printf hello'",
+            aggregatedOutput,
+          },
+        },
+      }),
+    );
+    const data = (projected.payload as Record<string, unknown>).data as Record<string, unknown>;
+    expect(data.item).toEqual({
+      command: "/bin/zsh -lc 'printf hello'",
+      aggregatedOutput,
+    });
+    expect(data.resultTruncated).toBeUndefined();
+  });
+
+  it("retains Claude rawOutput and folds ACP content into rawOutput", () => {
+    const claudeStdout = `hello from claude\n${"y".repeat(5000)}`;
+    const acpText = `hello from acp\n${"z".repeat(5000)}`;
+    const claude = projectActivityPayload(
+      activity({
+        itemType: "command_execution",
+        data: {
+          command: "printf hello",
+          rawOutput: { stdout: claudeStdout },
+        },
+      }),
+    );
+    const acp = projectActivityPayload(
+      activity({
+        itemType: "command_execution",
+        data: {
+          command: "printf hello",
+          content: [
+            { type: "content", content: { type: "text", text: acpText } },
+            { type: "content", content: { type: "image", data: "…" } },
+          ],
+        },
+      }),
+    );
+
+    const claudeData = (claude.payload as Record<string, unknown>).data as Record<string, unknown>;
+    const acpData = (acp.payload as Record<string, unknown>).data as Record<string, unknown>;
+    expect(claudeData.rawOutput).toEqual({ stdout: claudeStdout });
+    expect(acpData.rawOutput).toEqual({ content: acpText });
+    expect(acpData.content).toBeUndefined();
+    expect(acpData.resultTruncated).toBeUndefined();
+  });
+
+  it("caps folded ACP content like other retained output", () => {
+    const projected = projectActivityPayload(
+      activity({
+        itemType: "command_execution",
+        data: {
+          command: "cat big",
+          content: [{ type: "content", content: { type: "text", text: "a".repeat(60_000) } }],
+        },
+      }),
+    );
+    const data = (projected.payload as Record<string, unknown>).data as Record<string, unknown>;
+    const rawOutput = data.rawOutput as Record<string, unknown>;
+    expect(typeof rawOutput.content).toBe("string");
+    expect((rawOutput.content as string).length).toBeLessThan(60_000);
+    expect(data.resultTruncated).toBe(true);
+  });
+
   it("slims Codex-shaped mcp_tool_call items to rendered fields plus a result summary", () => {
     const projected = projectActivityPayload(
       activity({
