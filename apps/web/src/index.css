@@ -1269,7 +1269,10 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --sidebar-muted-foreground: var(--muted-foreground);
   --sidebar-control-surface: var(--muted);
   --sidebar-row-hover: color-mix(in srgb, var(--foreground) 8%, transparent);
-  --sidebar-row-active: color-mix(in srgb, var(--foreground) 11%, transparent);
+  /* Active sits only a step above hover on purpose: the open thread's
+     semibold, full-brightness title carries the selection, so the surface
+     just needs to anchor it rather than shout. */
+  --sidebar-row-active: color-mix(in srgb, var(--foreground) 9%, transparent);
   --sidebar-row-selected: color-mix(in srgb, var(--foreground) 7%, transparent);
   --sidebar-border: var(--border);
   /* The stage-channel header art must ramp to THIS panel's surface, not the
@@ -2213,6 +2216,170 @@ label:has(> select#reasoning-effort) select {
   }
   [data-slot="skeleton"]::after {
     content: none;
+  }
+}
+
+/* Sidebar "Working" spinner: Material's indeterminate ring, transform-only.
+   The arc's grow-and-reel-in is faked by two half-ring SVGs, one per clipped
+   half, counter-rotating with ease-in-out inside a stepped-rotation layer
+   inside a linearly rotating container (MDC's construction and timings). Every
+   animated property is a transform on an HTML element or a root <svg>, so the
+   compositor drives all of it and the main thread never repaints a frame —
+   the same bar the stepped status indicators hold themselves to. A stroke-dash
+   animation would look identical but repaint on the main thread every vsync. */
+.working-spinner {
+  position: relative;
+  display: block;
+}
+
+.working-spinner__track,
+.working-spinner__container,
+.working-spinner__layer {
+  position: absolute;
+  inset: 0;
+  display: block;
+}
+
+.working-spinner__track {
+  opacity: 0.25;
+}
+
+.working-spinner__container {
+  opacity: 0.75;
+  animation: working-spinner-container-rotate 1568ms linear infinite;
+}
+
+.working-spinner__layer {
+  animation: working-spinner-layer-rotate 5332ms cubic-bezier(0.4, 0, 0.2, 1) infinite both;
+}
+
+.working-spinner__clipper {
+  position: absolute;
+  top: 0;
+  display: block;
+  width: 50%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.working-spinner__clipper--left {
+  left: 0;
+}
+
+.working-spinner__clipper--right {
+  left: 50%;
+}
+
+.working-spinner__clipper > svg {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 200%;
+  height: 100%;
+}
+
+.working-spinner__clipper--right > svg {
+  left: -100%;
+}
+
+.working-spinner__clipper--left > svg {
+  animation: working-spinner-left-spin 1333ms cubic-bezier(0.4, 0, 0.2, 1) infinite both;
+}
+
+.working-spinner__clipper--right > svg {
+  animation: working-spinner-right-spin 1333ms cubic-bezier(0.4, 0, 0.2, 1) infinite both;
+}
+
+/* A hairline sliver of ring parked over the 12 o'clock seam where the two
+   halves meet (the arc always spans it), so antialiasing never shows a gap. */
+.working-spinner__patch {
+  position: absolute;
+  top: 0;
+  left: 46%;
+  display: block;
+  width: 8%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.working-spinner__patch > svg {
+  position: absolute;
+  top: 0;
+  left: -575%;
+  width: 1250%;
+  height: 100%;
+  transform: rotate(180deg);
+}
+
+@keyframes working-spinner-container-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes working-spinner-layer-rotate {
+  12.5% {
+    transform: rotate(135deg);
+  }
+  25% {
+    transform: rotate(270deg);
+  }
+  37.5% {
+    transform: rotate(405deg);
+  }
+  50% {
+    transform: rotate(540deg);
+  }
+  62.5% {
+    transform: rotate(675deg);
+  }
+  75% {
+    transform: rotate(810deg);
+  }
+  87.5% {
+    transform: rotate(945deg);
+  }
+  100% {
+    transform: rotate(1080deg);
+  }
+}
+
+@keyframes working-spinner-left-spin {
+  from {
+    transform: rotate(265deg);
+  }
+  50% {
+    transform: rotate(130deg);
+  }
+  to {
+    transform: rotate(265deg);
+  }
+}
+
+@keyframes working-spinner-right-spin {
+  from {
+    transform: rotate(-265deg);
+  }
+  50% {
+    transform: rotate(-130deg);
+  }
+  to {
+    transform: rotate(-265deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .working-spinner__container,
+  .working-spinner__layer,
+  .working-spinner__clipper > svg {
+    animation: none;
+  }
+  /* Static ~125° arc, the footprint the old fixed arc had. */
+  .working-spinner__clipper--left > svg {
+    transform: rotate(208deg);
+  }
+  .working-spinner__clipper--right > svg {
+    transform: rotate(-208deg);
   }
 }
 

@@ -38,8 +38,6 @@ import {
   CheckIcon,
   ChevronDownIcon,
   CircleAlertIcon,
-  CircleCheckIcon,
-  CircleDashedIcon,
   ClockIcon,
   FolderIcon,
   FolderPlusIcon,
@@ -222,6 +220,81 @@ function JumpHintBadge(props: { label: string }) {
   );
 }
 
+// The two status glyphs share one geometry: both fill the full 24-unit box
+// (the spinner's r=10 ring + 4-unit stroke reaches r=12; the check ring is
+// r=11 + 2-unit stroke = r=12), so at the same rendered size their outer
+// edges coincide and Working ↔ Done reads as the same mark changing state.
+// lucide's CircleCheck (r=10, edge 11) sat visibly inside the spinner.
+//
+// The spinner is Material's transform-only construction (see .working-spinner
+// in index.css): a static track ring, then two half-ring SVGs whose rotation
+// inside clipped halves makes the arc grow and reel in without animating any
+// paint property. Half ring = full circumference dash, offset by half.
+const SPINNER_RING_CIRCUMFERENCE = 2 * Math.PI * 10;
+
+function SpinnerHalfRing() {
+  return (
+    <svg aria-hidden xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+      <circle
+        cx="12"
+        cy="12"
+        r="10"
+        stroke="currentColor"
+        strokeWidth="4"
+        strokeDasharray={SPINNER_RING_CIRCUMFERENCE}
+        strokeDashoffset={SPINNER_RING_CIRCUMFERENCE / 2}
+      />
+    </svg>
+  );
+}
+
+function WorkingSpinnerIcon(props: { className?: string }) {
+  return (
+    <span aria-hidden className={cn("working-spinner", props.className)}>
+      <svg
+        className="working-spinner__track"
+        xmlns="http://www.w3.org/2000/svg"
+        fill="none"
+        viewBox="0 0 24 24"
+      >
+        <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+      </svg>
+      <span className="working-spinner__container">
+        <span className="working-spinner__layer">
+          <span className="working-spinner__clipper working-spinner__clipper--left">
+            <SpinnerHalfRing />
+          </span>
+          <span className="working-spinner__patch">
+            <SpinnerHalfRing />
+          </span>
+          <span className="working-spinner__clipper working-spinner__clipper--right">
+            <SpinnerHalfRing />
+          </span>
+        </span>
+      </span>
+    </span>
+  );
+}
+
+function DoneCircleCheckIcon(props: { className?: string }) {
+  return (
+    <svg
+      aria-hidden
+      xmlns="http://www.w3.org/2000/svg"
+      fill="none"
+      viewBox="0 0 24 24"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={props.className}
+    >
+      <circle cx="12" cy="12" r="11" />
+      <path d="m7.1 12 3.1 3.1L17 8.3" />
+    </svg>
+  );
+}
+
 // Self-ticking so only this span re-renders each second, not the whole row.
 function WorkingDuration(props: { startedAt: string | null }) {
   const startedMs = props.startedAt !== null ? Date.parse(props.startedAt) : Number.NaN;
@@ -232,11 +305,7 @@ function WorkingDuration(props: { startedAt: string | null }) {
     return () => window.clearInterval(id);
   }, [startedMs]);
   if (Number.isNaN(startedMs)) return null;
-  return (
-    <span className="font-mono tabular-nums">
-      {formatWorkingDurationLabel(Date.now() - startedMs)}
-    </span>
-  );
+  return <span className="tabular-nums">{formatWorkingDurationLabel(Date.now() - startedMs)}</span>;
 }
 
 function terminalProcessLabel(count: number): string {
@@ -787,13 +856,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     wokeAtDate !== null &&
     (lastVisitedDate === null || lastVisitedDate < wokeAtDate) &&
     !changeRequestAutoSettles(prState, props.autoSettleOnMerge);
-  // In-flight rows (working, or waiting on approval/input) fade as a whole:
-  // there is nothing for the user to do yet, so prominence is reserved for
-  // rows that need a human — done (unread), read-but-unsettled, failed, and
-  // freshly woken. The status label keeps its hue, so waiting rows stay
-  // findable. In-flight rows recede the same as read-ready ones (inbox-zero:
-  // working threads aren't your problem yet) — only the colored status label
-  // stands out.
+  // In-flight rows (working, or waiting on approval/input) recede exactly the
+  // same as read-ready ones — same title/label/branch treatment, no extra
+  // row-level fade (which stacked on the per-element dimming and made a live
+  // thread's branch visibly darker than a stale one's). There is nothing for
+  // the user to do yet, so prominence is reserved for rows that need a human —
+  // done (unread), failed, and freshly woken — and only the colored status
+  // label marks a row as in flight (inbox-zero: working threads aren't your
+  // problem yet).
   const isInFlight =
     status === "working" || status === "monitoring" || status === "approval" || status === "input";
   const shouldRecede =
@@ -808,10 +878,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
           icon: "working" as const,
           // No shimmer: a label that animates forever is noise in a sidebar
           // full of them (and repaints every vsync on high-refresh displays).
-          // Working is a background state, so it rests at the dim end of what
-          // the old pulse cycled through; only the thread you have open gets
-          // the label at full strength.
-          className: cn("text-sky-600 dark:text-sky-400", !props.isActive && "opacity-75"),
+          // No dimming either: a receded working row is otherwise identical to
+          // a read one, so this label is the only thing marking it in flight
+          // and stays at full hue like Done and Woke do. (An earlier fade here
+          // left it the faintest colored text in the sidebar.)
+          className: "text-sky-600 dark:text-sky-400",
         }
       : status === "monitoring"
         ? {
@@ -1046,10 +1117,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
         : shouldRecede
           ? "text-sidebar-muted-foreground/75 hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
           : "bg-transparent text-sidebar-foreground hover:bg-sidebar-row-hover",
-    isInFlight &&
-      !props.isActive &&
-      !isSelected &&
-      "opacity-70 transition-opacity hover:opacity-100",
   );
 
   const title = isRenaming ? (
@@ -1069,14 +1136,24 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     <span
       className={cn(
         "min-w-0 flex-1 text-sm transition-opacity motion-reduce:transition-none",
-        shouldRecede ? "font-normal" : "font-medium",
+        // Cards hold a steady medium weight in every state — the recede
+        // system works through color alone, so titles never reflow as a
+        // thread changes state — and the open thread steps up to semibold.
+        // Slim (settled) rows keep the lighter resting weight.
+        variant === "card"
+          ? props.isActive
+            ? "font-[550]"
+            : "font-medium"
+          : shouldRecede
+            ? "font-normal"
+            : "font-medium",
         variant === "card"
           ? cn(
               "truncate",
-              isUnread || isWoke
+              props.isActive || isUnread || isWoke
                 ? "text-foreground"
                 : shouldRecede
-                  ? "text-secondary-label"
+                  ? "text-foreground/[0.67]"
                   : status === "failed"
                     ? "text-foreground/95"
                     : "text-foreground/90",
@@ -1301,7 +1378,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
             />
           }
         >
-          <div className="relative z-10 h-[4.875rem] px-[var(--sidebar-row-content-inset)] py-[var(--sidebar-content-inset)]">
+          <div className="relative z-10 h-20 px-[var(--sidebar-row-content-inset)] py-[var(--sidebar-content-inset)]">
             <div className="flex h-5 min-w-0 items-center gap-1.5">
               <ProjectFavicon
                 environmentId={thread.environmentId}
@@ -1310,12 +1387,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                 className="size-4 shrink-0"
               />
               {props.projectTitle ? (
-                <span
-                  className={cn(
-                    "min-w-0 flex-1 truncate text-secondary-label text-xs",
-                    shouldRecede ? "font-normal" : "font-medium",
-                  )}
-                >
+                <span className="min-w-0 flex-1 truncate text-xs font-medium text-secondary-label/80">
                   {props.projectTitle}
                 </span>
               ) : (
@@ -1380,9 +1452,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                         )}
                       >
                         {topStatus.icon === "working" ? (
-                          <CircleDashedIcon aria-hidden className="size-4 shrink-0" />
+                          <WorkingSpinnerIcon className="size-3 shrink-0" />
                         ) : topStatus.icon === "done" ? (
-                          <CircleCheckIcon aria-hidden className="size-4 shrink-0" />
+                          <DoneCircleCheckIcon className="size-3 shrink-0" />
                         ) : null}
                         {/* The label alone is the live region: a role="status"
                             wrapper around the ticking duration would make
@@ -1442,14 +1514,16 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                 </span>
               ) : null}
             </div>
-            <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-secondary-label text-xs">
+            <div className="mt-1 flex min-w-0 items-center gap-1.5 text-secondary-label text-xs">
               {/* Always the branch. The plan step used to take this slot while
                   working, but it truncated to a half-sentence and dropped the
                   branch, so the row lost its most stable identifier. */}
               {thread.branch ? (
                 <>
                   <ThreadWorktreeIndicator thread={thread} />
-                  <span className="min-w-0 flex-1 truncate whitespace-nowrap">{thread.branch}</span>
+                  <span className="min-w-0 flex-1 truncate whitespace-nowrap font-mono text-[11px] text-secondary-label/70">
+                    {thread.branch}
+                  </span>
                 </>
               ) : (
                 <span className="flex-1" />
