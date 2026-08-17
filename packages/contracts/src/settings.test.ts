@@ -49,6 +49,22 @@ describe("ClientSettings glass opacity", () => {
   });
 });
 
+describe("ClientSettings tool output font size", () => {
+  it("defaults to 11px", () => {
+    expect(decodeClientSettings({}).fontSizeToolOutput).toBe(11);
+  });
+
+  it.each([9, 19, 11.5])("rejects a size outside the supported integer range: %s", (value) => {
+    expect(() => decodeClientSettings({ fontSizeToolOutput: value })).toThrow();
+    expect(() => decodeClientSettingsPatch({ fontSizeToolOutput: value })).toThrow();
+  });
+
+  it.each([10, 11, 18])("accepts a size within the supported range: %s", (value) => {
+    expect(decodeClientSettings({ fontSizeToolOutput: value }).fontSizeToolOutput).toBe(value);
+    expect(decodeClientSettingsPatch({ fontSizeToolOutput: value }).fontSizeToolOutput).toBe(value);
+  });
+});
+
 describe("ClientSettings environment identification", () => {
   it("defaults to artwork and accepts each presentation mode", () => {
     expect(decodeClientSettings({}).environmentIdentificationMode).toBe("artwork");

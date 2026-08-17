@@ -168,6 +168,7 @@ function FontAppearanceSync() {
   const fontSizeInterface = useClientSettings((settings) => settings.fontSizeInterface);
   const fontSizePrompt = useClientSettings((settings) => settings.fontSizePrompt);
   const fontSizeCode = useClientSettings((settings) => settings.fontSizeCode);
+  const fontSizeToolOutput = useClientSettings((settings) => settings.fontSizeToolOutput);
   const fontSmoothing = useClientSettings((settings) => settings.fontSmoothing);
 
   useEffect(() => {
@@ -178,6 +179,7 @@ function FontAppearanceSync() {
       sizeInterface: fontSizeInterface,
       sizePrompt: fontSizePrompt,
       sizeCode: fontSizeCode,
+      sizeToolOutput: fontSizeToolOutput,
       smoothing: fontSmoothing,
     });
     for (const family of new Set([fontFamilySans, fontFamilyCode, fontFamilyComposer])) {
@@ -195,6 +197,7 @@ function FontAppearanceSync() {
     fontFamilyComposer,
     fontFamilySans,
     fontSizeCode,
+    fontSizeToolOutput,
     fontSizeInterface,
     fontSizePrompt,
     fontSmoothing,

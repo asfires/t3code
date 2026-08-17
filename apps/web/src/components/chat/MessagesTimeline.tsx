@@ -2308,7 +2308,7 @@ export const WorkEntryExpandedBody = memo(function WorkEntryExpandedBody(props: 
       {blocks.map((block) =>
         block.kind === "output" ? (
           <div key={`output:${block.text}`}>
-            <pre className="max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] text-foreground/80 leading-relaxed select-text">
+            <pre className="max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-[length:var(--font-size-tool-output,0.6875rem)] text-foreground/80 leading-relaxed select-text">
               {block.isError ? "Error output\n" : null}
               {block.text}
               {block.truncated ? "\n\nOutput truncated" : null}
@@ -2317,14 +2317,14 @@ export const WorkEntryExpandedBody = memo(function WorkEntryExpandedBody(props: 
         ) : block.kind === "empty" ? (
           <p
             key="empty"
-            className="font-mono text-[11px] italic leading-relaxed text-muted-foreground"
+            className="font-mono text-[length:var(--font-size-tool-output,0.6875rem)] italic leading-relaxed text-muted-foreground"
           >
             (No output)
           </p>
         ) : (
           <pre
             key={`text:${block.text}`}
-            className="max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-secondary-label text-[11px] leading-relaxed select-text"
+            className="max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-secondary-label text-[length:var(--font-size-tool-output,0.6875rem)] leading-relaxed select-text"
           >
             {block.text}
           </pre>

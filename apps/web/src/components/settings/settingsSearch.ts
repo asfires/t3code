@@ -84,6 +84,11 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/appearance",
   },
   {
+    id: "tool-output-font",
+    title: "Tool output",
+    to: "/settings/appearance",
+  },
+  {
     id: "terminal-font",
     title: "Terminal font",
     to: "/settings/appearance",

@@ -626,6 +626,24 @@ describe("MessagesTimeline", () => {
     expect(copyControlMarkup).not.toContain("Copy output");
   });
 
+  it("sizes every expanded body block with the tool-output variable", () => {
+    const markup = renderToStaticMarkup(
+      <WorkEntryExpandedBody
+        body={{
+          blocks: [
+            { kind: "output", text: "command output", isError: false, truncated: false },
+            { kind: "empty" },
+            { kind: "text", text: "tool detail" },
+          ],
+        }}
+      />,
+    );
+
+    const toolOutputClass = "text-[length:var(--font-size-tool-output,0.6875rem)]";
+    expect(markup.split(toolOutputClass)).toHaveLength(4);
+    expect(markup).not.toContain("--font-size-code");
+  });
+
   it("renders provider no-output sentinels as the empty state", () => {
     for (const sentinel of [
       "(Bash completed with no output)",

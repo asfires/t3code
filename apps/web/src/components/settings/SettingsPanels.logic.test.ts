@@ -27,8 +27,9 @@ describe("typography settings restore", () => {
         ...DEFAULT_UNIFIED_SETTINGS,
         fontSizeInterface: 18,
         fontFamilyCode: "Fira Code",
+        fontSizeToolOutput: 12,
       }),
-    ).toEqual(["Interface font", "Code font"]);
+    ).toEqual(["Interface font", "Code font", "Tool output"]);
   });
 });
 
