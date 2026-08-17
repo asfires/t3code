@@ -17,7 +17,11 @@ import {
   type VcsCreateWorktreeInput,
   type VcsRef,
 } from "@t3tools/contracts";
-import { isTemporaryWorktreeBranch, WORKTREE_BRANCH_PREFIX } from "@t3tools/shared/git";
+import {
+  deriveProjectBranchPrefix,
+  isTemporaryWorktreeBranch,
+  WORKTREE_BRANCH_PREFIX,
+} from "@t3tools/shared/git";
 import * as FileSystem from "effect/FileSystem";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
@@ -334,16 +338,18 @@ function stalePendingRequestDetail(
   return `Stale pending ${requestKind} request: ${requestId}. Provider callback state does not survive app restarts or recovered sessions. Restart the turn to continue.`;
 }
 
-function buildGeneratedWorktreeBranchName(raw: string): string {
+function buildGeneratedWorktreeBranchName(raw: string, projectCwd: string): string {
   const normalized = raw
     .trim()
     .toLowerCase()
     .replace(/^refs\/heads\//, "")
     .replace(/['"`]/g, "");
 
-  const withoutPrefix = normalized.startsWith(`${WORKTREE_BRANCH_PREFIX}/`)
-    ? normalized.slice(`${WORKTREE_BRANCH_PREFIX}/`.length)
-    : normalized;
+  const projectPrefix = deriveProjectBranchPrefix(projectCwd);
+  const existingPrefix = [projectPrefix, WORKTREE_BRANCH_PREFIX].find((prefix) =>
+    normalized.startsWith(`${prefix}/`),
+  );
+  const withoutPrefix = existingPrefix ? normalized.slice(`${existingPrefix}/`.length) : normalized;
 
   const branchFragment = withoutPrefix
     .replace(/[^a-z0-9/_-]+/g, "-")
@@ -354,7 +360,7 @@ function buildGeneratedWorktreeBranchName(raw: string): string {
     .replace(/[./_-]+$/g, "");
 
   const safeFragment = branchFragment.length > 0 ? branchFragment : "update";
-  return `${WORKTREE_BRANCH_PREFIX}/${safeFragment}`;
+  return `${projectPrefix}/${safeFragment}`;
 }
 
 const make = Effect.gen(function* () {
@@ -911,6 +917,7 @@ const make = Effect.gen(function* () {
     readonly threadId: ThreadId;
     readonly branch: string | null;
     readonly worktreePath: string | null;
+    readonly projectCwd: string;
     readonly messageText: string;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
   }) {
@@ -942,7 +949,7 @@ const make = Effect.gen(function* () {
       });
       if (!generated) return;
 
-      const targetBranch = buildGeneratedWorktreeBranchName(generated.branch);
+      const targetBranch = buildGeneratedWorktreeBranchName(generated.branch, input.projectCwd);
       if (targetBranch === oldBranch) return;
 
       const renamed = yield* gitWorkflow.renameBranch({ cwd, oldBranch, newBranch: targetBranch });
@@ -1239,6 +1246,7 @@ const make = Effect.gen(function* () {
         branch: thread.branch,
         worktreePath: thread.worktreePath,
         ...generationInput,
+        projectCwd: project?.workspaceRoot ?? generationCwd,
       }).pipe(Effect.forkScoped);
 
       if (canReplaceThreadTitle(thread.title, event.payload.titleSeed)) {

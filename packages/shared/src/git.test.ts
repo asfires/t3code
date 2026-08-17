@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   applyGitStatusStreamEvent,
   buildTemporaryWorktreeBranchName,
+  deriveProjectBranchPrefix,
   isTemporaryWorktreeBranch,
   normalizeGitRemoteUrl,
   parseGitHubRepositoryNameWithOwnerFromRemoteUrl,
@@ -66,7 +67,7 @@ describe("isTemporaryWorktreeBranch", () => {
   it("matches the generated temporary worktree refName format", () => {
     expect(
       isTemporaryWorktreeBranch(
-        buildTemporaryWorktreeBranchName((byteLength) => {
+        buildTemporaryWorktreeBranchName("/Users/example/Code/dashboard", (byteLength) => {
           expect(byteLength).toBe(4);
           return "DEADBEEF";
         }),
@@ -75,15 +76,18 @@ describe("isTemporaryWorktreeBranch", () => {
   });
 
   it("matches generated temporary worktree refs", () => {
-    expect(isTemporaryWorktreeBranch(`${WORKTREE_BRANCH_PREFIX}/deadbeef`)).toBe(true);
-    expect(isTemporaryWorktreeBranch(` ${WORKTREE_BRANCH_PREFIX}/deadbeef `)).toBe(true);
-    expect(isTemporaryWorktreeBranch(`${WORKTREE_BRANCH_PREFIX}/DEADBEEF`)).toBe(true);
+    expect(isTemporaryWorktreeBranch("dashboard/worktree-deadbeef")).toBe(true);
+    expect(isTemporaryWorktreeBranch(" dashboard/worktree-deadbeef ")).toBe(true);
+    expect(isTemporaryWorktreeBranch("dashboard/worktree-DEADBEEF")).toBe(true);
   });
 
-  it("normalizes a UUID-shaped random callback to the canonical 8-hex form", () => {
-    expect(buildTemporaryWorktreeBranchName(() => "f4ae4e0e-f971-4d48-b4f2-9cf0aa54ab12")).toBe(
-      `${WORKTREE_BRANCH_PREFIX}/f4ae4e0e`,
-    );
+  it("scopes temporary branches to the project directory", () => {
+    expect(
+      buildTemporaryWorktreeBranchName(
+        "C:\\Users\\example\\Code\\My Dashboard.git\\",
+        () => "f4ae4e0e-f971-4d48-b4f2-9cf0aa54ab12",
+      ),
+    ).toBe("my-dashboard/worktree-f4ae4e0e");
   });
 
   it("matches legacy UUID-shaped temporary worktree refs from older mobile builds", () => {
@@ -107,6 +111,16 @@ describe("isTemporaryWorktreeBranch", () => {
     expect(isTemporaryWorktreeBranch(`${WORKTREE_BRANCH_PREFIX}/feature/demo`)).toBe(false);
     expect(isTemporaryWorktreeBranch("main")).toBe(false);
     expect(isTemporaryWorktreeBranch(`${WORKTREE_BRANCH_PREFIX}/deadbeef-extra`)).toBe(false);
+    expect(isTemporaryWorktreeBranch("feature/deadbeef")).toBe(false);
+  });
+});
+
+describe("deriveProjectBranchPrefix", () => {
+  it("uses the project directory rather than the T3 Code product name", () => {
+    expect(deriveProjectBranchPrefix("/home/example/Code/scratch")).toBe("scratch");
+    expect(deriveProjectBranchPrefix("/home/example/Code/Nightsong Dashboard/")).toBe(
+      "nightsong-dashboard",
+    );
   });
 });
 

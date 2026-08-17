@@ -1894,7 +1894,7 @@ describe("ProviderCommandReactor", () => {
         type: "thread.meta.update",
         commandId: CommandId.make("cmd-thread-branch"),
         threadId: ThreadId.make("thread-1"),
-        branch: "t3code/1234abcd",
+        branch: "provider-project/worktree-1234abcd",
         worktreePath: "/tmp/provider-project-worktree",
       }),
     );
@@ -1937,6 +1937,11 @@ describe("ProviderCommandReactor", () => {
       message: "Add a safer reconnect backoff.",
     });
     expect(harness.refreshStatus.mock.calls[0]?.[0]).toBe("/tmp/provider-project-worktree");
+    expect(harness.renameBranch.mock.calls[0]?.[0]).toEqual({
+      cwd: "/tmp/provider-project-worktree",
+      oldBranch: "provider-project/worktree-1234abcd",
+      newBranch: "provider-project/feature/gpt-5-6-luna",
+    });
   });
 
   it("forwards codex model options through session start and turn send", async () => {
