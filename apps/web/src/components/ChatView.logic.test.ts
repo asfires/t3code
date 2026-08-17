@@ -26,7 +26,6 @@ import {
   isBranchMismatchDismissedForSession,
   reconcileMountedTerminalThreadIds,
   reconcileRetainedMountedThreadIds,
-  resolveActiveThreadVisitedAt,
   resolveThreadMetadataUpdateForNextTurn,
   resolveSendEnvMode,
   scheduleEnvironmentReconnectWarning,
@@ -39,41 +38,6 @@ const environmentId = EnvironmentId.make("environment-local");
 const projectId = ProjectId.make("project-1");
 const threadId = ThreadId.make("thread-1");
 const now = "2026-03-29T00:00:00.000Z";
-
-describe("resolveActiveThreadVisitedAt", () => {
-  const thread = {
-    createdAt: "2026-03-29T00:00:00.000Z",
-    latestTurn: {
-      turnId: TurnId.make("turn-1"),
-      state: "running" as const,
-      assistantMessageId: null,
-      requestedAt: "2026-03-29T00:01:00.000Z",
-      startedAt: "2026-03-29T00:01:01.000Z",
-      completedAt: null,
-    },
-  };
-
-  it("records an in-flight first turn before it completes", () => {
-    expect(resolveActiveThreadVisitedAt(thread)).toBe("2026-03-29T00:01:01.000Z");
-  });
-
-  it("advances the visit marker to completion while the thread remains open", () => {
-    expect(
-      resolveActiveThreadVisitedAt({
-        ...thread,
-        latestTurn: {
-          ...thread.latestTurn,
-          state: "completed",
-          completedAt: "2026-03-29T00:02:00.000Z",
-        },
-      }),
-    ).toBe("2026-03-29T00:02:00.000Z");
-  });
-
-  it("uses thread creation as the baseline before a turn is projected", () => {
-    expect(resolveActiveThreadVisitedAt({ ...thread, latestTurn: null })).toBe(thread.createdAt);
-  });
-});
 
 describe("environment reconnect warning grace", () => {
   afterEach(() => vi.useRealTimers());

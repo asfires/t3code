@@ -32,6 +32,7 @@ import { resolveAndPersistPreferredEditor } from "../editorPreferences";
 import { applyAppearanceFontVariables, isFontFamilyAvailable } from "~/appearanceFonts";
 import { loadHostFontFamily } from "../hostFonts";
 import { useClientSettings } from "../hooks/useSettings";
+import { useMarkLiveCompletedThreadsUnread } from "../hooks/useMarkLiveCompletedThreadsUnread";
 import {
   deriveLogicalProjectKeyFromSettings,
   derivePhysicalProjectKeyFromPath,
@@ -140,6 +141,7 @@ function RootRouteView() {
         <ConfirmDialogHost />
         <SlowRpcRequestToastCoordinator />
         <HostedStaticEnvironmentBootstrap />
+        <CompletedThreadUnreadTracker />
         {primaryEnvironmentAuthenticated ? <EventRouter /> : null}
         {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}
         {appShell}
@@ -149,6 +151,11 @@ function RootRouteView() {
       </AnchoredToastProvider>
     </ToastProvider>
   );
+}
+
+function CompletedThreadUnreadTracker() {
+  useMarkLiveCompletedThreadsUnread();
+  return null;
 }
 
 function GlassAppearanceSync() {
