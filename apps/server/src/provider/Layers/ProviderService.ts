@@ -291,10 +291,32 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       });
     });
 
+  const persistLiveResumeCursor = Effect.fn("ProviderService.persistLiveResumeCursor")(
+    function* (input: {
+      readonly adapter: ProviderAdapterShape<ProviderAdapterError>;
+      readonly instanceId: ProviderInstanceId;
+      readonly threadId: ThreadId;
+    }) {
+      const liveSession = (yield* input.adapter.listSessions()).find(
+        (session) => session.threadId === input.threadId,
+      );
+      if (liveSession?.resumeCursor === undefined) {
+        return;
+      }
+      yield* directory.upsert({
+        threadId: input.threadId,
+        provider: input.adapter.provider,
+        providerInstanceId: input.instanceId,
+        resumeCursor: liveSession.resumeCursor,
+      });
+    },
+  );
+
   const processRuntimeEvent = (
     source: {
       readonly instanceId: ProviderInstanceId;
       readonly provider: ProviderDriverKind;
+      readonly adapter: ProviderAdapterShape<ProviderAdapterError>;
     },
     event: ProviderRuntimeEvent,
   ): Effect.Effect<void> =>
@@ -303,7 +325,27 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         increment(providerRuntimeEventsTotal, {
           provider: canonicalEvent.provider,
           eventType: canonicalEvent.type,
-        }).pipe(Effect.andThen(publishRuntimeEvent(canonicalEvent))),
+        }).pipe(
+          Effect.andThen(
+            canonicalEvent.type === "turn.completed" && source.provider === "claudeAgent"
+              ? persistLiveResumeCursor({
+                  adapter: source.adapter,
+                  instanceId: source.instanceId,
+                  threadId: canonicalEvent.threadId,
+                }).pipe(
+                  Effect.catchCause((cause) =>
+                    Effect.logWarning("provider.turn.resume-cursor-persist-failed", {
+                      threadId: canonicalEvent.threadId,
+                      provider: source.provider,
+                      providerInstanceId: source.instanceId,
+                      errorTag: causeErrorTag(cause),
+                    }),
+                  ),
+                )
+              : Effect.void,
+          ),
+          Effect.andThen(publishRuntimeEvent(canonicalEvent)),
+        ),
       ),
     );
 
@@ -346,6 +388,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             {
               instanceId: id,
               provider: adapter.provider,
+              adapter,
             },
             event,
           ),
@@ -911,6 +954,22 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "provider.thread_id": input.threadId,
         });
         if (routed.isActive) {
+          // The idle reaper stops through here. Capture the adapter's live
+          // cursor first so recovery resumes at the last completed turn, and
+          // never let that bookkeeping keep a session from stopping.
+          yield* persistLiveResumeCursor({
+            adapter: routed.adapter,
+            instanceId: routed.instanceId,
+            threadId: routed.threadId,
+          }).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("provider.stop.resume-cursor-persist-failed", {
+                threadId: input.threadId,
+                provider: routed.adapter.provider,
+                errorTag: causeErrorTag(cause),
+              }),
+            ),
+          );
           yield* routed.adapter.stopSession(routed.threadId);
         }
         yield* clearMcpSession(input.threadId);
