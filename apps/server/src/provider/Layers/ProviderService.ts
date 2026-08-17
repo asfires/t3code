@@ -1144,6 +1144,26 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         "provider.rollback_turns": input.numTurns,
       });
       yield* routed.adapter.rollbackThread(routed.threadId, input.numTurns);
+
+      // Rollback can change the provider's native resume cursor. Persist it
+      // before reporting success so recovery never resumes the removed turn.
+      const rolledBackSession = (yield* routed.adapter.listSessions()).find(
+        (session) => session.threadId === routed.threadId,
+      );
+      if (rolledBackSession !== undefined) {
+        yield* upsertSessionBinding(
+          {
+            ...rolledBackSession,
+            providerInstanceId: routed.instanceId,
+          },
+          input.threadId,
+          {
+            lastRuntimeEvent: "provider.rollbackConversation",
+            lastRuntimeEventAt: yield* nowIso,
+          },
+        );
+      }
+
       yield* analytics.record("provider.conversation.rolled_back", {
         provider: routed.adapter.provider,
         turns: input.numTurns,
