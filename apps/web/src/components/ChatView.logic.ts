@@ -370,6 +370,28 @@ export function threadHasStarted(thread: Thread | null | undefined): boolean {
   );
 }
 
+/**
+ * The newest server-backed point the open chat has actually presented.
+ * Recording an in-flight turn gives its first completion a read baseline:
+ * leaving before completion makes the later completedAt unread, while staying
+ * open advances the marker to completedAt and clears Done as usual.
+ */
+export function resolveActiveThreadVisitedAt(
+  thread: Pick<Thread, "createdAt" | "latestTurn">,
+): string | null {
+  const turn = thread.latestTurn;
+  const candidates = turn
+    ? [turn.completedAt, turn.startedAt, turn.requestedAt]
+    : [thread.createdAt];
+
+  for (const candidate of candidates) {
+    if (candidate !== null && Number.isFinite(Date.parse(candidate))) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
 // `threadProvider` is the open branded driver kind carried by the session.
 // Unknown driver kinds degrade to `null` (i.e. "unlocked"), which is the safe
 // rollback / fork behavior — the routing layer is the right place to surface
