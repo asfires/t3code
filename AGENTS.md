@@ -154,6 +154,13 @@ section by keeping the fork's version.
 
 - PRs target fork `main` only. Never open a PR against upstream (`gh` is
   pinned to the fork as a backstop). The usual PR rules above still apply.
+- Small fork-local maintenance changes that do not touch product code, such as
+  updates limited to this fork-local `AGENTS.md` guidance, may skip a PR. Make
+  the change in a worktree, show Adam the final diff, commit only the relevant
+  maintenance files, fetch and rebase onto `origin/main`, then fast-forward
+  push the commit directly to `origin/main`. Keep the main checkout untouched.
+  If the change includes product code or would require a non-fast-forward push,
+  use the normal PR workflow instead.
 - The main checkout at `~/Code/t3code` stays parked on `main`. Never switch
   its branch or commit there. Do all work in your own worktree — T3 threads
   created in worktree mode already are; anything else creates one first.
@@ -161,12 +168,17 @@ section by keeping the fork's version.
   real T3 instance from frozen dist artifacts after fast-forwarding `main`
   to `origin/main` and rebuilding if stale. Don't run it, don't rebuild the
   dist artifacts, and don't touch `~/.t3/userdata` from task threads.
-- Merge flow: Adam reviews, merges, and deletes PR branches on GitHub, then
-  restarts via `t3start`. Nothing else to do after your PR is approved.
-  Worktrees of merged-and-deleted branches are pruned automatically —
-  `t3wt prune` stops their leftover processes (dev servers included) and
-  deletes them — so never stash anything valuable in an old worktree or
-  count on its dev server outliving the merge.
+- Merge flow: Adam often opens several PRs from separate T3 Code threads, then
+  asks a new thread to merge them. When explicitly asked to merge all open PRs,
+  inspect and merge every open PR targeting the fork's `main`, then verify that
+  none remain. Do not include an upstream sync unless Adam explicitly asks for
+  one. After all merges are complete, end the final handoff by telling Adam to
+  run `t3r`. That restart runs `t3start`, which fast-forwards the main checkout
+  and launches `t3wt prune` in the background. The prune stops leftover
+  processes (dev servers included) and removes clean worktrees and local
+  branches whose tips are merged into `origin/main`; it does not require Adam
+  to delete remote branches on GitHub. Never stash anything valuable in a
+  merged worktree or count on its dev server outliving the restart.
 - Verification handoff: when the thread's work is done and viewable in the
   web app, never end with a bare "done" — Adam verifies changes himself in a
   running app before merging. Start the dev server in the background from
@@ -176,9 +188,9 @@ section by keeping the fork's version.
   to click. On later handoffs for the same retained origin, paste the ordinary
   web URL and do not mint another token unless Adam says the browser needs to
   pair again. Never open a pairing URL yourself — the token is single-use.
-  Leave the server running — teardown is automatic: once Adam
-  merges the PR and deletes the branch, `t3wt prune` stops the worktree's
-  leftover processes and removes it. The link is the whole deliverable.
+  Leave the server running — teardown is automatic: once the PR is merged and
+  Adam runs `t3r`, `t3wt prune` stops the worktree's leftover processes and
+  removes it. The link is the whole deliverable.
   This bullet is standing permission to run the dev server at handoff; it
   does not extend to browsers or computer use. For changes that aren't
   visible in the web app, state concretely how to observe the result
