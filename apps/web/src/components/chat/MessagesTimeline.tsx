@@ -84,6 +84,7 @@ import {
   resolveTimelineMinimapIndexFromPointer,
   resolveTimelineMinimapInteractiveWidth,
   resolveTimelineMinimapTopPercent,
+  resolveTimelineMinimapWheelIndex,
   shouldPreserveAssistantLineBreaks,
   type StableMessagesTimelineRowsState,
   type MessagesTimelineRow,
@@ -729,6 +730,8 @@ function TimelineMinimap({
   onSelect: (item: TimelineMinimapItem) => void;
 }) {
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  const minimapButtonRef = useRef<HTMLButtonElement | null>(null);
+  const wheelIndexRef = useRef<number | null>(null);
 
   const resolvedActiveIndex =
     activeIndex !== null && activeIndex < items.length ? activeIndex : null;
@@ -745,6 +748,10 @@ function TimelineMinimap({
         : resolvedActiveIndex === items.length - 1
           ? "-100%"
           : "-50%";
+
+  useEffect(() => {
+    wheelIndexRef.current = resolvedActiveIndex;
+  }, [resolvedActiveIndex]);
 
   const resolveActiveIndexFromPointer = useCallback(
     (event: MouseEvent<HTMLElement>) => {
@@ -763,9 +770,65 @@ function TimelineMinimap({
     (event: MouseEvent<HTMLElement>) => {
       const nextIndex = resolveActiveIndexFromPointer(event);
       setActiveIndex(nextIndex);
+      wheelIndexRef.current = nextIndex;
     },
     [resolveActiveIndexFromPointer],
   );
+
+  const navigateFromWheel = useCallback(
+    (event: WheelEvent) => {
+      if (event.deltaY === 0) {
+        return;
+      }
+
+      const button = minimapButtonRef.current;
+      if (!button) {
+        return;
+      }
+
+      const rect = button.getBoundingClientRect();
+      const pointerIndex = resolveTimelineMinimapIndexFromPointer({
+        itemCount: items.length,
+        railTop: rect.top,
+        railHeight: rect.height,
+        pointerY: event.clientY,
+      });
+      const currentIndex = wheelIndexRef.current ?? pointerIndex;
+      if (currentIndex === null) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      const nextIndex = resolveTimelineMinimapWheelIndex({
+        currentIndex,
+        itemCount: items.length,
+        deltaY: event.deltaY,
+      });
+      const nextItem = nextIndex === null ? null : (items[nextIndex] ?? null);
+      if (nextIndex === null || nextIndex === currentIndex || nextItem === null) {
+        return;
+      }
+
+      setActiveIndex(nextIndex);
+      wheelIndexRef.current = nextIndex;
+      onSelect(nextItem);
+    },
+    [items, onSelect],
+  );
+
+  useEffect(() => {
+    const button = minimapButtonRef.current;
+    if (!button) {
+      return;
+    }
+
+    button.addEventListener("wheel", navigateFromWheel, { passive: false });
+    return () => {
+      button.removeEventListener("wheel", navigateFromWheel);
+    };
+  }, [navigateFromWheel]);
 
   const moveActiveIndex = useCallback(
     (delta: number) => {
@@ -794,6 +857,7 @@ function TimelineMinimap({
     >
       <div className="relative h-full w-full select-none">
         <button
+          ref={minimapButtonRef}
           aria-label={`Jump to message: ${activeItem?.userText ?? "User message"}`}
           className={cn(
             "absolute top-1/2 left-3 -translate-y-1/2 cursor-pointer bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70",
