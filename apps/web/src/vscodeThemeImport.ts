@@ -1,7 +1,14 @@
 import {
+  createThemeStatusColors,
   createVividThemeColors,
   getThemeModes,
+  limitThemeColorStep,
   parseThemeFile,
+  readableThemeColorOn,
+  shiftThemeColorLightness,
+  themeColorChroma,
+  themeColorDistance,
+  themeColorLightness,
   themeColorToHex,
   THEME_FILE_VERSION,
   type ThemeAppearance,
@@ -184,21 +191,79 @@ function resolveName(value: Record<string, unknown>): string {
   return "VS Code theme";
 }
 
+/**
+ * Fully transparent workbench colors are how VS Code themes hide a focus ring
+ * or a hover; they mean "none", not "the surface color", so they read as
+ * unset. Anything this faint flattens to the surface it sits on anyway.
+ */
+const MIN_VISIBLE_ALPHA = 0.02;
+
+/**
+ * Below this OKLab distance two surfaces are the same color. VS Code themes
+ * routinely give widgets, menus, and borders the editor color and lean on
+ * shadows and border keys for separation; our surfaces separate by tone, so
+ * an identical color would erase the step rather than restyle it. The bar is
+ * deliberately low: a theme's quiet hover (Tokyo Night steps its list hover
+ * 0.014 below the sidebar) is a choice to honor, not noise.
+ */
+const MIN_SURFACE_DISTANCE = 0.008;
+
+/**
+ * Borders are hairlines here: the stock palettes keep them within about 0.07
+ * to 0.09 lightness of the surface they outline. VS Code themes size their
+ * border keys for one line between two panes (Catppuccin's `panel.border` is
+ * three surface steps up), and that weight around every card and the composer
+ * reads as heavy, so border roles are pulled back to this step.
+ */
+const MAX_HAIRLINE_STEP = 0.11;
+
+/**
+ * A list highlight (the hovered row in a menu or the mention picker) is drawn
+ * on the popover surface, not the canvas, and has to clear it by a visible
+ * step. The unthemed app uses a 4% white wash, about this much lightness.
+ * Themes size `list.activeSelectionBackground` against their editor, so on
+ * a popover one derived step up it can land on exactly the same tone.
+ */
+const MIN_HIGHLIGHT_STEP = 0.04;
+
+/**
+ * A status color has to be a signal: below this OKLCH chroma it is a tint
+ * (Solarized's `errorForeground` is a pale pink for message text), not the
+ * theme's red or amber.
+ */
+const MIN_STATUS_CHROMA = 0.05;
+
+/**
+ * Secondary text only counts as the theme's muted color while it is clearly
+ * dimmer than body text (the stock palettes sit near 0.3 of the text
+ * contrast); a theme that sets `descriptionForeground` to its editor
+ * foreground would otherwise flatten every label to full strength.
+ */
+const MUTED_CONTRAST_RATIO = 0.6;
+
 export function parseVsCodeThemeFile(value: unknown): ThemeDefinition {
   if (!isRecord(value)) throw new Error("Theme files must contain a JSON object.");
   const colors = isRecord(value.colors) ? value.colors : {};
 
-  /** First key that carries a usable color, in priority order. */
-  const pick = (...keys: ReadonlyArray<string>): VsCodeRgba | null => {
-    for (const key of keys) {
-      const parsed = parseVsCodeColor(colors[key]);
-      if (parsed) return parsed;
-    }
-    return null;
-  };
+  /** Every usable (parseable, not transparent) color among `keys`, in priority order. */
+  const candidates = (...keys: ReadonlyArray<string>): VsCodeRgba[] =>
+    keys
+      .map((key) => parseVsCodeColor(colors[key]))
+      .filter((parsed): parsed is VsCodeRgba => parsed !== null && parsed.a >= MIN_VISIBLE_ALPHA);
+  const pick = (...keys: ReadonlyArray<string>): VsCodeRgba | null =>
+    candidates(...keys)[0] ?? null;
   const solidOver = (base: VsCodeRgb, ...keys: ReadonlyArray<string>): string | null => {
     const parsed = pick(...keys);
     return parsed ? flattenOver(parsed, base) : null;
+  };
+  /** First specified color that is actually distinguishable from `base` once flattened onto it. */
+  const distinctOver = (base: VsCodeRgb, ...keys: ReadonlyArray<string>): string | null => {
+    const baseHex = toHex(base);
+    for (const parsed of candidates(...keys)) {
+      const flattened = flattenOver(parsed, base);
+      if (themeColorDistance(flattened, baseHex) >= MIN_SURFACE_DISTANCE) return flattened;
+    }
+    return null;
   };
 
   const canvasColor = pick("editor.background", "editorPane.background");
@@ -208,28 +273,50 @@ export function parseVsCodeThemeFile(value: unknown): ThemeDefinition {
     );
   }
   const canvas = { r: canvasColor.r, g: canvasColor.g, b: canvasColor.b };
+  const canvasHex = toHex(canvas);
   const appearance = resolveAppearance(value, canvas);
+  const dark = relativeLuminance(canvas) < 0.179;
 
-  const accentColor = pick(
+  // The accent has to show: a focus ring or badge wants WCAG's 3:1 non-text
+  // contrast, and themes like Nord and One Dark put a barely-there grey in
+  // `focusBorder` while the link and button carry the real color. When
+  // nothing clears 3:1, the first visible candidate still beats none.
+  const accentKeys = [
     "focusBorder",
     "button.background",
     "textLink.foreground",
     "activityBarBadge.background",
     "progressBar.background",
     "badge.background",
-  );
-  const canvasHex = toHex(canvas);
-  const accentHex = accentColor ? flattenOver(accentColor, canvas) : null;
+  ];
+  const accentHex =
+    candidates(...accentKeys)
+      .map((parsed) => flattenOver(parsed, canvas))
+      .find((candidate) => contrastRatio(hexToRgb(candidate), canvas) >= 3) ??
+    distinctOver(canvas, ...accentKeys);
+  const foregroundHex = solidOver(canvas, "editor.foreground", "foreground");
 
   // The derived palette is the floor: every role starts contrast-solved, then
   // the theme's own workbench colors replace what it actually specified. The
   // floor derives from a muted accent -- the vivid engine carries the accent
   // hue into every surface, which washes an imported neutral palette (a gray
-  // theme with a blue focusBorder would get blue code and text surfaces).
-  const mutedAccentHex = accentColor
-    ? flattenOver({ r: accentColor.r, g: accentColor.g, b: accentColor.b, a: 0.2 }, canvas)
-    : null;
-  const derived = createVividThemeColors(appearance, canvasHex, mutedAccentHex ?? canvasHex);
+  // theme with a blue focusBorder would get blue code and text surfaces) --
+  // and from the theme's own foreground, so every derived text color is a
+  // relative of the text the theme chose rather than a synthesized neutral.
+  const mutedAccentHex = accentHex ? flattenOver({ ...hexToRgb(accentHex), a: 0.2 }, canvas) : null;
+  const textOptions = foregroundHex ? { text: foregroundHex } : {};
+  const derived = createVividThemeColors(
+    appearance,
+    canvasHex,
+    mutedAccentHex ?? canvasHex,
+    textOptions,
+  );
+  // The accent family (update pills, banners) wants the real accent, which
+  // the muted floor deliberately does not carry.
+  const accented = accentHex
+    ? createVividThemeColors(appearance, canvasHex, accentHex, textOptions)
+    : derived;
+
   const sidebarHex =
     solidOver(canvas, "sideBar.background", "activityBar.background") ?? derived.sidebar;
   const sidebar = hexToRgb(sidebarHex);
@@ -237,86 +324,165 @@ export function parseVsCodeThemeFile(value: unknown): ThemeDefinition {
     solidOver(canvas, "terminal.background", "panel.background") ?? derived.terminalBackground;
   const terminal = hexToRgb(terminalHex);
 
-  /** Foregrounds only win when they stay readable on the surface they land on;
-   *  a theme tuned for its own chrome can be unreadable on ours. */
+  /**
+   * Foregrounds only win when they stay readable on the surface they land
+   * on. The first readable candidate wins; when none clears the bar, the
+   * theme's first choice is lifted along its own hue until it does, and only
+   * a theme that specified nothing falls back to the derived value (lifted
+   * the same way when the file replaced the surface it was solved against).
+   */
   const readableOn = (
     surface: string,
     fallback: string,
-    ...keys: ReadonlyArray<string>
+    keys: ReadonlyArray<string>,
+    accept: (candidate: string) => boolean = () => true,
   ): string => {
     const surfaceRgb = hexToRgb(surface);
-    const isReadable = (candidate: string) => contrastRatio(hexToRgb(candidate), surfaceRgb) >= 4.5;
-    const specified = solidOver(surfaceRgb, ...keys);
-    if (specified && isReadable(specified)) return specified;
-    // The derived fallback was solved against the derived surface. When the
-    // file replaced that surface (a light sideBar in a dark theme, say), the
-    // fallback has to clear the bar there too, or the text falls back to the
-    // readable end of the greyscale for the surface actually in play.
-    if (isReadable(fallback)) return fallback;
-    return relativeLuminance(surfaceRgb) < 0.179 ? "#ffffff" : "#000000";
+    const specified = candidates(...keys)
+      .map((parsed) => flattenOver(parsed, surfaceRgb))
+      .filter(accept);
+    const readable = specified.find(
+      (candidate) => contrastRatio(hexToRgb(candidate), surfaceRgb) >= 4.5,
+    );
+    if (readable) return readable;
+    return readableThemeColorOn(specified[0] ?? fallback, surface);
   };
+  /** Secondary text must sit noticeably below `primary` on `surface` to count as muted. */
+  const dimmerThan =
+    (primary: string, surface: string) =>
+    (candidate: string): boolean =>
+      contrastRatio(hexToRgb(candidate), hexToRgb(surface)) <
+      contrastRatio(hexToRgb(primary), hexToRgb(surface)) * MUTED_CONTRAST_RATIO;
+  const hairlineOn = (surface: string, value: string): string =>
+    limitThemeColorStep(value, surface, MAX_HAIRLINE_STEP);
+  /** Push a highlight off `surface` (away from the canvas) until it shows. */
+  const highlightOn = (surface: string, value: string): string => {
+    const delta = themeColorLightness(value) - themeColorLightness(surface);
+    if (Math.abs(delta) >= MIN_HIGHLIGHT_STEP) return value;
+    return shiftThemeColorLightness(value, (dark ? 1 : -1) * MIN_HIGHLIGHT_STEP - delta);
+  };
+  const chromatic = (candidate: string): boolean =>
+    themeColorChroma(candidate) >= MIN_STATUS_CHROMA;
 
-  const overrides: Partial<Record<ThemeColorRole, string>> = {
-    canvas: canvasHex,
-    text: readableOn(canvasHex, derived.text, "editor.foreground", "foreground"),
-    textMuted: readableOn(
-      canvasHex,
-      derived.textMuted,
-      "descriptionForeground",
-      "disabledForeground",
-    ),
-    surface: solidOver(canvas, "editorWidget.background") ?? derived.surface,
-    surfaceRaised:
-      solidOver(canvas, "editorWidget.background", "dropdown.background") ?? derived.surfaceRaised,
-    surfaceOverlay:
-      solidOver(canvas, "menu.background", "quickInput.background", "dropdown.background") ??
-      derived.surfaceOverlay,
-    border:
-      solidOver(canvas, "panel.border", "editorGroup.border", "contrastBorder") ?? derived.border,
-    input: solidOver(canvas, "input.border", "dropdown.border") ?? derived.input,
-    placeholder: readableOn(canvasHex, derived.placeholder, "input.placeholderForeground"),
-    error: readableOn(canvasHex, derived.error, "editorError.foreground", "errorForeground"),
-    warning: readableOn(canvasHex, derived.warning, "editorWarning.foreground"),
-    accentSurface:
-      solidOver(canvas, "list.activeSelectionBackground", "list.hoverBackground") ??
+  const text = derived.text;
+  // Our sidebar text is the app's body text (the unthemed app aliases them);
+  // VS Code's `sideBar.foreground` is the dimmer tree-item color, which maps
+  // to our secondary sidebar text -- but only while it is actually dimmer,
+  // or a theme that sets it to full strength would flatten the hierarchy.
+  const sidebarForeground = readableThemeColorOn(text, sidebarHex);
+  const sidebarMutedForeground = readableOn(
+    sidebarHex,
+    derived.sidebarMutedForeground,
+    ["sideBar.foreground", "descriptionForeground"],
+    dimmerThan(sidebarForeground, sidebarHex),
+  );
+
+  // Status colors: the theme's own red and amber when it has them, lifted to
+  // read on the canvas, and their surfaces and foregrounds follow suit so a
+  // theme is not half its own palette and half ours.
+  const errorHex = readableOn(
+    canvasHex,
+    derived.error,
+    ["errorForeground", "list.errorForeground", "editorError.foreground"],
+    chromatic,
+  );
+  const warningHex = readableOn(
+    canvasHex,
+    derived.warning,
+    ["list.warningForeground", "editorWarning.foreground", "problemsWarningIcon.foreground"],
+    chromatic,
+  );
+  const status = createThemeStatusColors(canvasHex, { error: errorHex, warning: warningHex });
+
+  const textMuted = readableOn(
+    canvasHex,
+    derived.textMuted,
+    ["descriptionForeground", "disabledForeground"],
+    dimmerThan(text, canvasHex),
+  );
+  const surfaceOverlay =
+    distinctOver(canvas, "menu.background", "quickInput.background", "dropdown.background") ??
+    derived.surfaceOverlay;
+  const accentSurface = highlightOn(
+    surfaceOverlay,
+    distinctOver(canvas, "list.activeSelectionBackground", "list.hoverBackground") ??
       derived.accentSurface,
-    codeBackground: solidOver(canvas, "textCodeBlock.background") ?? derived.codeBackground,
+  );
+  const overrides: Partial<Record<ThemeColorRole, string>> = {
+    ...status,
+    canvas: canvasHex,
+    text,
+    textMuted,
+    // The stock palettes use one muted color for labels, icons, and text on
+    // muted surfaces; the theme's choice carries to all of them.
+    secondaryLabel: textMuted,
+    iconMuted: textMuted,
+    mutedForeground: readableThemeColorOn(textMuted, derived.muted),
+    surface: distinctOver(canvas, "editorWidget.background") ?? derived.surface,
+    surfaceRaised:
+      distinctOver(canvas, "editorWidget.background", "dropdown.background") ??
+      derived.surfaceRaised,
+    surfaceOverlay,
+    border: hairlineOn(
+      canvasHex,
+      distinctOver(canvas, "panel.border", "contrastBorder") ?? derived.border,
+    ),
+    // `dropdown.border` is usually the accent (a dropdown is a button); our
+    // input outline is the quiet edge of the composer and text fields.
+    input: hairlineOn(canvasHex, distinctOver(canvas, "input.border") ?? derived.input),
+    toolbarBorder: hairlineOn(canvasHex, derived.toolbarBorder),
+    placeholder: readableOn(
+      canvasHex,
+      derived.placeholder,
+      ["input.placeholderForeground"],
+      dimmerThan(text, canvasHex),
+    ),
+    accentSurface,
+    accentSurfaceForeground: readableThemeColorOn(text, accentSurface),
+    codeBackground: distinctOver(canvas, "textCodeBlock.background") ?? derived.codeBackground,
     sidebar: sidebarHex,
-    sidebarForeground: readableOn(sidebarHex, derived.sidebarForeground, "sideBar.foreground"),
-    sidebarBorder: solidOver(sidebar, "sideBar.border") ?? derived.sidebarBorder,
-    sidebarRowHover: solidOver(sidebar, "list.hoverBackground") ?? derived.sidebarRowHover,
+    sidebarForeground,
+    sidebarMutedForeground,
+    sidebarBorder: hairlineOn(
+      sidebarHex,
+      distinctOver(sidebar, "sideBar.border") ?? derived.sidebarBorder,
+    ),
+    sidebarRowHover: distinctOver(sidebar, "list.hoverBackground") ?? derived.sidebarRowHover,
     sidebarRowActive:
-      solidOver(sidebar, "list.inactiveSelectionBackground", "list.hoverBackground") ??
+      distinctOver(sidebar, "list.inactiveSelectionBackground", "list.hoverBackground") ??
       derived.sidebarRowActive,
     sidebarRowSelected:
-      solidOver(sidebar, "list.activeSelectionBackground") ?? derived.sidebarRowSelected,
+      distinctOver(sidebar, "list.activeSelectionBackground") ?? derived.sidebarRowSelected,
     terminalBackground: terminalHex,
-    terminalForeground: readableOn(terminalHex, derived.terminalForeground, "terminal.foreground"),
+    terminalForeground: readableOn(terminalHex, derived.terminalForeground, [
+      "terminal.foreground",
+    ]),
     terminalCursor:
       solidOver(terminal, "terminalCursor.foreground", "editorCursor.foreground") ??
       derived.terminalCursor,
     terminalSelection:
-      solidOver(terminal, "terminal.selectionBackground", "editor.selectionBackground") ??
+      distinctOver(terminal, "terminal.selectionBackground", "editor.selectionBackground") ??
       derived.terminalSelection,
     terminalScrollbar:
-      solidOver(terminal, "scrollbarSlider.background") ?? derived.terminalScrollbar,
+      distinctOver(terminal, "scrollbarSlider.background") ?? derived.terminalScrollbar,
   };
   if (accentHex) {
     overrides.accent = accentHex;
     overrides.focus = accentHex;
-    // The button pair is the closest thing VS Code has to our action color.
+    overrides.update = accented.update;
+    overrides.updateForeground = accented.updateForeground;
+    overrides.updateSurface = accented.updateSurface;
+    overrides.accentForeground = readableOn(accentHex, derived.accentForeground, [
+      "button.foreground",
+    ]);
+    // The button pair is the closest thing VS Code has to our action color,
+    // and its hover state is a lightness step off whichever color won.
     const actionHex = solidOver(canvas, "button.background") ?? accentHex;
     overrides.messageAction = actionHex;
-    overrides.messageActionForeground = readableOn(
-      actionHex,
-      derived.messageActionForeground,
+    overrides.messageActionForeground = readableOn(actionHex, derived.messageActionForeground, [
       "button.foreground",
-    );
-    overrides.accentForeground = readableOn(
-      accentHex,
-      derived.accentForeground,
-      "button.foreground",
-    );
+    ]);
+    overrides.messageActionHover = shiftThemeColorLightness(actionHex, dark ? 0.06 : -0.06);
   }
 
   // Reuse the theme-file parser so ids, names, and color values go through the

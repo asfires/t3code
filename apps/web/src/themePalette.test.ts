@@ -34,8 +34,13 @@ import {
   updateCustomTheme,
   CUSTOM_THEMES_STORAGE_KEY,
   createManagedThemeColors,
+  createThemeStatusColors,
   createVividThemeColors,
   getDefaultThemeColors,
+  limitThemeColorStep,
+  readableThemeColorOn,
+  shiftThemeColorLightness,
+  themeColorDistance,
   themeColorToHex,
   toCanonicalThemeColor,
   THEME_FILE_VERSION,
@@ -173,6 +178,117 @@ describe("theme files", () => {
       // Update family follows the theme, not the default palette.
       expect(asHex(colors.update)).toBe(accent);
     }
+  });
+
+  it("keeps vivid muted text muted instead of at body strength", () => {
+    for (const [appearance, canvas, accent] of [
+      ["dark", "#101a2c", "#4f8fe8"],
+      ["dark", "#292828", "#a89984"],
+      ["light", "#f4f9f2", "#1d8a4e"],
+    ] as const) {
+      const colors = createVividThemeColors(appearance, canvas, accent);
+      // Solving muted text for readability alone left it identical to body
+      // text on dark canvases; it is a mix toward its surface at the stock
+      // palettes' muted strength.
+      expect(contrastRatio(colors.mutedForeground, colors.muted)).toBeLessThan(
+        contrastRatio(colors.text, colors.muted),
+      );
+      expect(contrastRatio(colors.mutedForeground, colors.muted)).toBeGreaterThanOrEqual(4.5);
+      expect(contrastRatio(colors.placeholder, colors.surfaceRaised)).toBeLessThan(
+        contrastRatio(colors.text, colors.surfaceRaised),
+      );
+      expect(contrastRatio(colors.placeholder, colors.surfaceRaised)).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  it("compresses the surface ramp on mid-dark canvases", () => {
+    const lightness = (value: string) =>
+      Number.parseFloat(/^oklch\(([0-9.]+)/.exec(value)?.[1] ?? "NaN");
+    const step = (colors: ReturnType<typeof createVividThemeColors>) =>
+      lightness(colors.messageSurface) - lightness(colors.canvas);
+    const nearBlack = createVividThemeColors("dark", "#0a0a0a", "#346bf1");
+    const midDark = createVividThemeColors("dark", "#292828", "#a89984");
+    expect(step(midDark)).toBeLessThan(step(nearBlack));
+    // Still a visible step, and still ordered.
+    expect(step(midDark)).toBeGreaterThan(0.05);
+    expect(lightness(midDark.surface)).toBeGreaterThan(lightness(midDark.canvas));
+    expect(lightness(midDark.surfaceRaised)).toBeGreaterThan(lightness(midDark.surface));
+    expect(lightness(midDark.surfaceOverlay)).toBeGreaterThan(lightness(midDark.surfaceRaised));
+    // Light canvases keep the full step.
+    const light = createVividThemeColors("light", "#fdf6ec", "#c2571b");
+    expect(lightness(light.canvas) - lightness(light.messageSurface)).toBeGreaterThan(0.09);
+  });
+
+  it("builds derived text from a seeded foreground pulled toward the stock text", () => {
+    const lightness = (value: string) =>
+      Number.parseFloat(/^oklch\(([0-9.]+)/.exec(value)?.[1] ?? "NaN");
+    const hue = (value: string) =>
+      Number.parseFloat(/^oklch\([0-9.]+ [0-9.]+ ([0-9.]+)/.exec(value)?.[1] ?? "NaN");
+    // Editor foregrounds are code colors at mid lightness; primary text
+    // travels most of the way to the stock near-white while keeping a
+    // tint of the seed's hue, and every derived text role follows it.
+    const seeded = createVividThemeColors("dark", "#292828", "#a89984", { text: "#d4be98" });
+    const seedL = lightness(toCanonicalThemeColor("#d4be98")!);
+    expect(lightness(seeded.text)).toBeGreaterThan(seedL + 0.08);
+    expect(lightness(seeded.text)).toBeLessThan(0.97);
+    expect(Math.abs(hue(seeded.text) - hue(toCanonicalThemeColor("#d4be98")!))).toBeLessThan(6);
+    for (const role of ["codeForeground", "sidebarForeground", "messageForeground"] as const) {
+      expect(asHex(seeded[role])).toBe(asHex(seeded.text));
+    }
+    // Light canvases pull toward the stock near-black instead.
+    const light = createVividThemeColors("light", "#fbf1c7", "#7c6f64", { text: "#654735" });
+    expect(lightness(light.text)).toBeLessThan(lightness(toCanonicalThemeColor("#654735")!) - 0.08);
+    expect(lightness(light.text)).toBeGreaterThan(0.27);
+    // A foreground that cannot read on the canvas keeps its hue and gains lightness.
+    const lifted = createVividThemeColors("dark", "#101010", "#69b1ff", { text: "#3a2f2a" });
+    expect(asHex(lifted.text)).not.toBe("#3a2f2a");
+    expect(contrastRatio(lifted.text, lifted.canvas)).toBeGreaterThanOrEqual(4.5);
+    // Without a seed, text is still solved to AAA.
+    const synthesized = createVividThemeColors("dark", "#292828", "#a89984");
+    expect(contrastRatio(synthesized.text, synthesized.canvas)).toBeGreaterThanOrEqual(7);
+  });
+
+  it("derives status surfaces and foregrounds from theme-supplied signals", () => {
+    const status = createThemeStatusColors("#292828", { error: "#ea6962", warning: "#d8a657" });
+    expect(asHex(status.error)).toBe("#ea6962");
+    expect(asHex(status.warning)).toBe("#d8a657");
+    expect(contrastRatio(status.errorForeground, status.errorSurface)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(status.warningForeground, status.warningSurface)).toBeGreaterThanOrEqual(
+      4.5,
+    );
+    // The surface is the signal laid over the canvas, not the standard red.
+    expect(themeColorDistance(status.errorSurface, "#292828")).toBeLessThan(0.15);
+    // Without signals the standard pair still applies.
+    const standard = createThemeStatusColors("#0a0a0a");
+    expect(asHex(standard.error)).toBe("#fb414a");
+  });
+
+  it("lifts colors along their own hue and shifts lightness in place", () => {
+    const lifted = readableThemeColorOn("#928374", "#292828");
+    expect(contrastRatio(lifted, "#292828")).toBeGreaterThanOrEqual(4.5);
+    const hue = (value: string) =>
+      Number.parseFloat(/^oklch\([0-9.]+ [0-9.]+ ([0-9.]+)/.exec(value)?.[1] ?? "NaN");
+    expect(Math.abs(hue(lifted) - hue(toCanonicalThemeColor("#928374")!))).toBeLessThan(3);
+    // Already readable colors are returned as they are.
+    expect(asHex(readableThemeColorOn("#d4be98", "#292828"))).toBe("#d4be98");
+    const shifted = shiftThemeColorLightness("#a89984", 0.06);
+    expect(Math.abs(hue(shifted) - hue(toCanonicalThemeColor("#a89984")!))).toBeLessThan(3);
+    expect(contrastRatio(shifted, "#292828")).toBeGreaterThan(contrastRatio("#a89984", "#292828"));
+    expect(themeColorDistance("#292828", "#292828")).toBe(0);
+    expect(themeColorDistance("#292828", "#32302f")).toBeGreaterThan(0.02);
+  });
+
+  it("limits a color's lightness step off its base along a straight OKLab line", () => {
+    const lightness = (value: string) =>
+      Number.parseFloat(/^oklch\(([0-9.]+)/.exec(value)?.[1] ?? "NaN");
+    const base = toCanonicalThemeColor("#1e1e2e")!;
+    const limited = limitThemeColorStep("#585b70", "#1e1e2e", 0.11);
+    expect(lightness(limited) - lightness(base)).toBeCloseTo(0.11, 2);
+    // Within the cap the color is returned as-is (canonicalized).
+    expect(limitThemeColorStep("#45403d", "#292828", 0.11)).toBe(toCanonicalThemeColor("#45403d"));
+    // Works in the light direction too.
+    const light = limitThemeColorStep("#acb0be", "#eff1f5", 0.11);
+    expect(lightness(toCanonicalThemeColor("#eff1f5")!) - lightness(light)).toBeCloseTo(0.11, 2);
   });
 
   it("keys status colors off the canvas, not the appearance slot", () => {

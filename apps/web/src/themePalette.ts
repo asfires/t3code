@@ -766,11 +766,15 @@ const STANDARD_STATUS_COLORS = {
 } as const;
 
 /**
- * Status surfaces are the standard color laid over the theme's own canvas
- * (the unthemed app uses 8% in light and 16% in dark), so alerts still sit on
- * the palette while the signal color stays standard.
+ * Status surfaces are the signal color laid over the theme's own canvas (the
+ * unthemed app uses 8% in light and 16% in dark), so alerts still sit on the
+ * palette. Generated palettes use the standard red and amber; an imported
+ * theme can supply its own pair and the surface and foreground follow it.
  */
-function standardStatusColors(canvas: ThemeRgbColor): {
+export function createThemeStatusColors(
+  canvasValue: string,
+  signals: Readonly<{ error?: string; warning?: string }> = {},
+): {
   error: string;
   errorForeground: string;
   errorSurface: string;
@@ -778,6 +782,7 @@ function standardStatusColors(canvas: ThemeRgbColor): {
   warningForeground: string;
   warningSurface: string;
 } {
+  const canvas = parseThemeRgbColor(canvasValue, { r: 0, g: 0, b: 0 });
   // Keyed off the canvas rather than the appearance slot: a dark canvas saved
   // as a light theme still needs the dark pair, or the alert foreground lands
   // on a dark surface unreadable.
@@ -788,7 +793,8 @@ function standardStatusColors(canvas: ThemeRgbColor): {
     mixThemeRgbColors(canvas, parseThemeRgbColor(value, canvas), surfaceMix);
   // The standard foregrounds are tuned against the unthemed canvas; on a
   // tinted one they can fall just short, so lightness is nudged until the
-  // pair clears 4.5 while the hue stays standard.
+  // pair clears 4.5 while the hue stays put. A theme-supplied signal has no
+  // separate foreground, so its own hue is lifted the same way.
   const readableOn = (foreground: string, surface: ThemeRgbColor) =>
     themeOklchToThemeColor(
       solveOklchLightness(
@@ -799,16 +805,47 @@ function standardStatusColors(canvas: ThemeRgbColor): {
         appearance === "dark" ? "lighter" : "darker",
       ),
     );
-  const errorSurface = surfaceOf(standard.error);
-  const warningSurface = surfaceOf(standard.warning);
+  const error = signals.error ?? standard.error;
+  const warning = signals.warning ?? standard.warning;
+  const errorSurface = surfaceOf(error);
+  const warningSurface = surfaceOf(warning);
   return {
-    error: toCanonicalThemeColor(standard.error)!,
-    errorForeground: readableOn(standard.errorForeground, errorSurface),
+    error: toCanonicalThemeColor(error)!,
+    errorForeground: readableOn(signals.error ?? standard.errorForeground, errorSurface),
     errorSurface: themeRgbToThemeColor(errorSurface),
-    warning: toCanonicalThemeColor(standard.warning)!,
-    warningForeground: readableOn(standard.warningForeground, warningSurface),
+    warning: toCanonicalThemeColor(warning)!,
+    warningForeground: readableOn(signals.warning ?? standard.warningForeground, warningSurface),
     warningSurface: themeRgbToThemeColor(warningSurface),
   };
+}
+
+export type VividThemeOptions = Readonly<{
+  /**
+   * A foreground to build every derived text color from, for palettes that
+   * already own one (an imported theme's editor foreground). Editor
+   * foregrounds are code colors -- mid-lightness, because tokens carry the
+   * contrast -- so it is pulled most of the way toward the stock text
+   * lightness (near-white on dark, near-black on light) while keeping a
+   * tint of its hue; without it, text is synthesized from the accent hue.
+   */
+  text?: string;
+}>;
+
+/** How far a seeded foreground travels toward the stock text extreme. */
+const SEEDED_TEXT_PULL = 0.7;
+/** OKLCH lightness of the stock text colors, #f5f5f5 and #27272a. */
+const STOCK_TEXT_LIGHTNESS = { dark: 0.97, light: 0.27 } as const;
+
+/**
+ * The surface ramp was tuned on near-black canvases, where a lightness step
+ * reads as a quiet tonal shift. The same absolute step on a mid-dark canvas
+ * (Gruvbox, Solarized, Nord all sit around L 0.3) lands on a conspicuous grey
+ * slab, so steps compress as the canvas brightens. Light canvases have no
+ * such headroom problem and keep the full step.
+ */
+function vividRampScale(canvas: ThemeOklch, dark: boolean): number {
+  if (!dark) return 1;
+  return Math.min(1, Math.max(0.5, 0.19 / Math.max(canvas.L, 0.01)));
 }
 
 /**
@@ -821,6 +858,7 @@ export function createVividThemeColors(
   appearance: ThemeAppearance,
   backgroundValue: string,
   accentValue: string,
+  options: VividThemeOptions = {},
 ): ThemeColors {
   const defaults = getDefaultThemeColors(appearance);
   const canvasRgb = parseThemeRgbColor(
@@ -835,25 +873,53 @@ export function createVividThemeColors(
   // still gets light text and raised surfaces. 0.179 is the relative
   // luminance where white and black text have equal contrast headroom.
   const dark = themeRelativeLuminance(canvasRgb) < 0.179;
-  const hue = accent.C < 0.02 ? canvas.h : accent.h;
+  const seededSource = options.text ? parseThemeColor(options.text)?.color : undefined;
+  const seededText = seededSource
+    ? mixThemeOklch(
+        seededSource,
+        { L: dark ? STOCK_TEXT_LIGHTNESS.dark : STOCK_TEXT_LIGHTNESS.light, C: 0, h: 0 },
+        SEEDED_TEXT_PULL,
+      )
+    : undefined;
+  // The ramp's tint hue: the accent when it has one, else the canvas, else
+  // (a neutral canvas under a neutral accent) the seeded text, whose warmth
+  // or coolness is the palette's remaining voice. A neutral canvas's own hue
+  // is rounding noise and would cast the ramp at random.
+  const hue =
+    accent.C >= 0.02
+      ? accent.h
+      : canvas.C >= 0.01 || !seededSource || seededSource.C < 0.02
+        ? canvas.h
+        : seededSource.h;
   const tintC = Math.min(0.045, Math.max(0.008, accent.C * 0.22));
-  const step = dark ? 1 : -1;
+  const step = (dark ? 1 : -1) * vividRampScale(canvas, dark);
 
+  // Surfaces are steps of the canvas. A tinted canvas keeps its own hue and
+  // at least its own chroma up the ramp, so a cream canvas steps into deeper
+  // cream rather than grey; only a neutral canvas takes the accent's tint.
+  const canvasTinted = canvas.C >= 0.01;
   const surfaceAt = (deltaL: number, chroma = tintC): ThemeOklch => ({
     L: Math.min(0.98, Math.max(0.05, canvas.L + step * deltaL)),
-    C: chroma,
-    h: hue,
+    C: canvasTinted ? Math.max(chroma, canvas.C) : chroma,
+    h: canvasTinted ? canvas.h : hue,
   });
   const themeColor = (color: ThemeOklch) => themeOklchToThemeColor(color);
 
   // Text carries a whisper of the accent hue instead of falling back to a
-  // fixed foreground, and is solved to WCAG AAA against the canvas.
-  const textBase: ThemeOklch = {
+  // fixed foreground, and is solved to WCAG AAA against the canvas. A
+  // supplied foreground is the theme's own voice: it only has to read (AA),
+  // so low-contrast palettes like Solarized keep their character.
+  const textBase: ThemeOklch = seededText ?? {
     L: dark ? 0.95 : 0.2,
     C: Math.min(0.035, accent.C * 0.25),
     h: hue,
   };
-  const text = solveOklchLightness(textBase, canvasRgb, 7, dark ? "lighter" : "darker");
+  const text = solveOklchLightness(
+    textBase,
+    canvasRgb,
+    seededText ? 4.5 : 7,
+    dark ? "lighter" : "darker",
+  );
   const textRgb = themeOklchToRgb(text);
   const textMutedRgb = standardMutedThemeText(canvasRgb, textRgb);
 
@@ -891,14 +957,19 @@ export function createVividThemeColors(
     themeOklchToThemeColor(
       solveOklchLightness(textBase, surfaceRgb, 4.6, dark ? "lighter" : "darker"),
     );
-  const mutedForeground = foregroundOn(mutedRgb);
-  const placeholder = foregroundOn(surfaceRaisedRgb);
+  // Secondary text is the primary text pulled toward its surface to the
+  // stock palettes' muted strength, not merely "still readable": solving for
+  // readability alone leaves it identical to body text on a dark canvas.
+  const mutedOn = (surfaceRgb: ThemeRgbColor): string =>
+    themeRgbToThemeColor(standardMutedThemeText(surfaceRgb, textRgb));
+  const mutedForeground = mutedOn(mutedRgb);
+  const placeholder = mutedOn(surfaceRaisedRgb);
 
   const actionHover: ThemeOklch = { ...action, L: action.L + (dark ? 0.06 : -0.06) };
 
   return {
     ...defaults,
-    ...standardStatusColors(canvasRgb),
+    ...createThemeStatusColors(themeRgbToThemeColor(canvasRgb)),
     canvas: themeRgbToThemeColor(canvasRgb),
     // The top bar shares the canvas so the main panel reads as one surface.
     chrome: themeRgbToThemeColor(canvasRgb),
@@ -952,6 +1023,84 @@ export function createVividThemeColors(
     terminalScrollbar: themeColor(surfaceAt(dark ? 0.22 : 0.16, tintC)),
     terminalScrollbarHover: themeColor(surfaceAt(dark ? 0.3 : 0.22, tintC)),
   };
+}
+
+/**
+ * Keep a color's hue and chroma but move its lightness away from `surface`
+ * until it clears `minContrast`. Palettes that fail a contrast check keep
+ * their own voice this way instead of being swapped for an unrelated color.
+ */
+export function readableThemeColorOn(value: string, surface: string, minContrast = 4.5): string {
+  const surfaceRgb = parseThemeRgbColor(surface, { r: 0, g: 0, b: 0 });
+  const dark = themeRelativeLuminance(surfaceRgb) < 0.179;
+  const base = themeRgbToOklch(
+    parseThemeRgbColor(value, dark ? THEME_WHITE_FOREGROUND : THEME_BLACK_FOREGROUND),
+  );
+  return themeOklchToThemeColor(
+    solveOklchLightness(base, surfaceRgb, minContrast, dark ? "lighter" : "darker"),
+  );
+}
+
+/** OKLCH lightness of a color, 0 to 1. */
+export function themeColorLightness(value: string): number {
+  return themeRgbToOklch(parseThemeRgbColor(value, { r: 0, g: 0, b: 0 })).L;
+}
+
+/** OKLCH chroma of a color; below about 0.05 a color reads as a neutral. */
+export function themeColorChroma(value: string): number {
+  return themeRgbToOklch(parseThemeRgbColor(value, { r: 0, g: 0, b: 0 })).C;
+}
+
+/** Straight-line interpolation in OKLab, so lightness moves evenly and chroma shrinks with it. */
+function mixThemeOklch(from: ThemeOklch, to: ThemeOklch, amount: number): ThemeOklch {
+  const lab = ({ L, C, h }: ThemeOklch) => {
+    const radians = (h * Math.PI) / 180;
+    return { L, a: C * Math.cos(radians), b: C * Math.sin(radians) };
+  };
+  const start = lab(from);
+  const end = lab(to);
+  const a = start.a + (end.a - start.a) * amount;
+  const b = start.b + (end.b - start.b) * amount;
+  return {
+    L: start.L + (end.L - start.L) * amount,
+    C: Math.hypot(a, b),
+    h: (Math.atan2(b, a) * 180) / Math.PI,
+  };
+}
+
+/**
+ * Pull `value` toward `base` until its lightness step is at most `maxDeltaL`.
+ * The pull is a straight line in OKLab, so a strong border keeps a hint of its
+ * hue while landing at hairline weight; a step already within the cap is
+ * returned untouched.
+ */
+export function limitThemeColorStep(value: string, base: string, maxDeltaL: number): string {
+  const from = themeRgbToOklch(parseThemeRgbColor(base, { r: 0, g: 0, b: 0 }));
+  const to = themeRgbToOklch(parseThemeRgbColor(value, { r: 0, g: 0, b: 0 }));
+  const step = Math.abs(to.L - from.L);
+  if (step <= maxDeltaL) return toCanonicalThemeColor(value) ?? value;
+  return themeOklchToThemeColor(mixThemeOklch(from, to, maxDeltaL / step));
+}
+
+/** Shift a color's OKLCH lightness by `deltaL`, keeping hue and chroma. */
+export function shiftThemeColorLightness(value: string, deltaL: number): string {
+  const base = themeRgbToOklch(parseThemeRgbColor(value, { r: 0, g: 0, b: 0 }));
+  return themeOklchToThemeColor({ ...base, L: Math.min(1, Math.max(0, base.L + deltaL)) });
+}
+
+/**
+ * Perceptual (OKLab) distance between two colors. Around 0.02 is the smallest
+ * step that still reads as a distinct surface on a monitor.
+ */
+export function themeColorDistance(first: string, second: string): number {
+  const toLab = (value: string) => {
+    const { L, C, h } = themeRgbToOklch(parseThemeRgbColor(value, { r: 0, g: 0, b: 0 }));
+    const radians = (h * Math.PI) / 180;
+    return { L, a: C * Math.cos(radians), b: C * Math.sin(radians) };
+  };
+  const a = toLab(first);
+  const b = toLab(second);
+  return Math.hypot(a.L - b.L, a.a - b.a, a.b - b.b);
 }
 
 function themeContrastRatio(first: ThemeRgbColor, second: ThemeRgbColor): number {
@@ -1140,7 +1289,7 @@ export function createManagedThemeColors(
 
   return {
     ...defaults,
-    ...standardStatusColors(canvas),
+    ...createThemeStatusColors(themeRgbToThemeColor(canvas)),
     update: themeRgbToThemeColor(accent),
     updateForeground: themeRgbToThemeColor(updateForeground),
     updateSurface: themeRgbToThemeColor(updateSurface),

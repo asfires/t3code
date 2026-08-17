@@ -404,7 +404,7 @@ describe("Open VSX themes", () => {
     expect(paired.label).toBe("Demo");
     expect(themeColorToHex(paired.colors.canvas)).toBe("#fafafa");
     expect(themeColorToHex(getThemeColorsForMode(paired, "dark")!.canvas)).toBe("#111111");
-    expect(themeColorToHex(getThemeColorsForMode(paired, "dark")!.text)).toBe("#eeeeee");
+    expect(themeColorToHex(getThemeColorsForMode(paired, "dark")!.text)).toBe("#f3f3f3");
 
     packagedManifest.contributes.themes[0]!.label = "Renamed Dark";
     packagedManifest.contributes.themes[1]!.label = "Renamed Light";
