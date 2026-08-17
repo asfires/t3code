@@ -27,6 +27,12 @@ T3 Code works with the platforms your team already uses:
 - Use the **Publish Repository** action to create a new hosted repository (GitHub, GitLab, Bitbucket, or Azure DevOps), add it as your origin remote, and push, in one flow
 - If the local repository has no commits yet, publishing creates the remote and wires it up but does not push. Make a commit, then push normally.
 
+### Keep Worktree Branches Project-Scoped
+
+New worktree threads use the selected project's directory name as their branch namespace. For
+example, a project in `Code/dashboard` starts with a temporary `dashboard/worktree-…` branch and
+then replaces it with a readable `dashboard/…` name generated from the first message.
+
 ### Manage Code Reviews Without Context Switching
 
 **Create pull requests while you work**
