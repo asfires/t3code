@@ -85,6 +85,25 @@ export function resolveTimelineMinimapIndexFromPointer(input: {
   return Math.max(0, Math.min(input.itemCount - 1, Math.round(progress * (input.itemCount - 1))));
 }
 
+export function resolveTimelineMinimapWheelIndex(input: {
+  readonly currentIndex: number;
+  readonly itemCount: number;
+  readonly deltaY: number;
+}): number | null {
+  if (
+    input.itemCount <= 0 ||
+    !Number.isFinite(input.currentIndex) ||
+    !Number.isFinite(input.deltaY) ||
+    input.deltaY === 0
+  ) {
+    return null;
+  }
+
+  const currentIndex = Math.max(0, Math.min(input.itemCount - 1, Math.round(input.currentIndex)));
+  const direction = input.deltaY > 0 ? 1 : -1;
+  return Math.max(0, Math.min(input.itemCount - 1, currentIndex + direction));
+}
+
 export function resolveTimelineMinimapHasPersistentGutter(viewportWidth: number): boolean {
   if (!Number.isFinite(viewportWidth) || viewportWidth <= 0) {
     return false;

@@ -5,8 +5,34 @@ import {
   deriveMessagesTimelineRows,
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
+  resolveTimelineMinimapWheelIndex,
   shouldPreserveAssistantLineBreaks,
 } from "./MessagesTimeline.logic";
+
+describe("resolveTimelineMinimapWheelIndex", () => {
+  it("moves exactly one message in the wheel direction", () => {
+    expect(resolveTimelineMinimapWheelIndex({ currentIndex: 2, itemCount: 5, deltaY: 120 })).toBe(
+      3,
+    );
+    expect(resolveTimelineMinimapWheelIndex({ currentIndex: 2, itemCount: 5, deltaY: -120 })).toBe(
+      1,
+    );
+  });
+
+  it("clamps at the first and last message", () => {
+    expect(resolveTimelineMinimapWheelIndex({ currentIndex: 0, itemCount: 5, deltaY: -1 })).toBe(0);
+    expect(resolveTimelineMinimapWheelIndex({ currentIndex: 4, itemCount: 5, deltaY: 1 })).toBe(4);
+  });
+
+  it("ignores wheel events that cannot express vertical navigation", () => {
+    expect(
+      resolveTimelineMinimapWheelIndex({ currentIndex: 2, itemCount: 5, deltaY: 0 }),
+    ).toBeNull();
+    expect(
+      resolveTimelineMinimapWheelIndex({ currentIndex: 2, itemCount: 0, deltaY: 1 }),
+    ).toBeNull();
+  });
+});
 
 describe("shouldPreserveAssistantLineBreaks", () => {
   it("preserves Claude insight formatting without changing regular markdown", () => {
