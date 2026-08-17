@@ -871,6 +871,63 @@ it.effect(
 );
 
 routing.layer("ProviderServiceLive routing", (it) => {
+  it.effect("persists the provider resume cursor after relative rollback", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const threadId = asThreadId("thread-relative-rollback-cursor");
+      const session = yield* provider.startSession(threadId, {
+        provider: CLAUDE_AGENT_DRIVER,
+        providerInstanceId: claudeAgentInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const rolledBackCursor = {
+        threadId,
+        resume: "resume-after-relative-rollback",
+        resumeSessionAt: "assistant-before-relative-target",
+        pinResumeSessionAt: true,
+        turnCount: 21,
+      };
+      routing.claude.rollbackThread.mockImplementationOnce((adapterThreadId) =>
+        Effect.sync(() => {
+          routing.claude.updateSession(adapterThreadId, (existing) => ({
+            ...existing,
+            status: "ready",
+            resumeCursor: rolledBackCursor,
+          }));
+          return { threadId: adapterThreadId, turns: [] };
+        }),
+      );
+
+      yield* provider.rollbackConversation({
+        threadId: session.threadId,
+        numTurns: 1,
+      });
+
+      const persisted = yield* directory.getBinding(threadId);
+      assert.equal(Option.isSome(persisted), true);
+      if (Option.isSome(persisted)) {
+        assert.deepEqual(persisted.value.resumeCursor, rolledBackCursor);
+        const runtimePayload = persisted.value.runtimePayload;
+        assert.equal(
+          runtimePayload !== null &&
+            typeof runtimePayload === "object" &&
+            !Array.isArray(runtimePayload) &&
+            "lastRuntimeEvent" in runtimePayload
+            ? runtimePayload.lastRuntimeEvent
+            : undefined,
+          "provider.rollbackConversation",
+        );
+      }
+      assert.deepEqual(routing.claude.rollbackThread.mock.calls.at(-1), [threadId, 1]);
+      yield* provider.stopSession({ threadId });
+      routing.claude.startSession.mockClear();
+      routing.claude.rollbackThread.mockClear();
+      routing.claude.stopSession.mockClear();
+    }),
+  );
+
   it.effect("persists the provider resume cursor after absolute rollback", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;

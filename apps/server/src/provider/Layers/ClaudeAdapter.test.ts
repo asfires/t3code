@@ -3850,7 +3850,7 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("passes Claude resume ids and assistant checkpoint to the SDK", () => {
+  it.effect("resumes with a persisted cursor from Claude's transcript leaf", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
@@ -3878,6 +3878,41 @@ describe("ClaudeAdapterLive", () => {
       const createInput = harness.getLastCreateQueryInput();
       assert.equal(createInput?.options.resume, "550e8400-e29b-41d4-a716-446655440000");
       assert.equal(createInput?.options.sessionId, undefined);
+      assert.equal(createInput?.options.resumeSessionAt, undefined);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("passes a pinned assistant checkpoint to the Claude SDK", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const session = yield* adapter.startSession({
+        threadId: RESUME_THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        resumeCursor: {
+          threadId: "resume-thread-1",
+          resume: "550e8400-e29b-41d4-a716-446655440000",
+          resumeSessionAt: "assistant-99",
+          pinResumeSessionAt: true,
+          turnCount: 3,
+        },
+        runtimeMode: "full-access",
+      });
+
+      assert.deepEqual(session.resumeCursor, {
+        threadId: RESUME_THREAD_ID,
+        resume: "550e8400-e29b-41d4-a716-446655440000",
+        resumeSessionAt: "assistant-99",
+        pinResumeSessionAt: true,
+        turnCount: 3,
+      });
+
+      const createInput = harness.getLastCreateQueryInput();
+      assert.equal(createInput?.options.resume, "550e8400-e29b-41d4-a716-446655440000");
       assert.equal(createInput?.options.resumeSessionAt, "assistant-99");
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
@@ -4126,6 +4161,7 @@ describe("ClaudeAdapterLive", () => {
         threadId: THREAD_ID,
         resume: "550e8400-e29b-41d4-a716-446655440000",
         resumeSessionAt: "assistant-first",
+        pinResumeSessionAt: true,
         turnCount: 1,
       });
 
@@ -4200,6 +4236,7 @@ describe("ClaudeAdapterLive", () => {
         threadId: THREAD_ID,
         resume: resumeSessionId,
         resumeSessionAt: "assistant-before-restart",
+        pinResumeSessionAt: true,
         turnCount: 4,
       });
     }).pipe(
@@ -4207,6 +4244,444 @@ describe("ClaudeAdapterLive", () => {
       Effect.provide(harness.layer),
     );
   });
+
+  it.effect("pins a rollback restart until Claude advances the transcript", () => {
+    const harness = makeHarness({
+      queryFactory: () => new FakeClaudeQuery(),
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const resumeSessionId = "550e8400-e29b-41d4-a716-446655440000";
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        resumeCursor: {
+          threadId: THREAD_ID,
+          resume: resumeSessionId,
+          resumeSessionAt: "assistant-before-restart",
+          turnCount: 4,
+        },
+      });
+      const firstQuery = harness.queries[0];
+      assert.isDefined(firstQuery);
+      if (!firstQuery) return;
+
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "discarded fifth turn",
+        attachments: [],
+      });
+      const discardedCompletedFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "turn.completed",
+      ).pipe(Stream.runHead, Effect.forkChild);
+      firstQuery.emit({
+        type: "assistant",
+        session_id: resumeSessionId,
+        uuid: "assistant-discarded",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-discarded",
+          content: [{ type: "text", text: "discarded response" }],
+        },
+      } as unknown as SDKMessage);
+      firstQuery.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: resumeSessionId,
+        uuid: "result-discarded",
+      } as unknown as SDKMessage);
+      yield* Fiber.join(discardedCompletedFiber);
+
+      assert.isDefined(adapter.rollbackThreadTo);
+      if (!adapter.rollbackThreadTo) return;
+      yield* adapter.rollbackThreadTo(session.threadId, 4);
+      assert.deepEqual((yield* adapter.listSessions())[0]?.resumeCursor, {
+        threadId: THREAD_ID,
+        resume: resumeSessionId,
+        resumeSessionAt: "assistant-before-restart",
+        pinResumeSessionAt: true,
+        turnCount: 4,
+      });
+
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "replacement fifth turn",
+        attachments: [],
+      });
+
+      assert.equal(harness.queries.length, 2);
+      assert.equal(firstQuery.closeCalls, 1);
+      const pinnedRestartInput = harness.getCreateQueryInputs()[1];
+      assert.equal(pinnedRestartInput?.options.resume, resumeSessionId);
+      assert.equal(pinnedRestartInput?.options.resumeSessionAt, "assistant-before-restart");
+
+      const replacementQuery = harness.queries[1];
+      assert.isDefined(replacementQuery);
+      if (!replacementQuery) return;
+      const replacementCompletedFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "turn.completed",
+      ).pipe(Stream.runHead, Effect.forkChild);
+      replacementQuery.emit({
+        type: "assistant",
+        session_id: resumeSessionId,
+        uuid: "assistant-after-rollback",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-after-rollback",
+          content: [{ type: "text", text: "replacement response" }],
+        },
+      } as unknown as SDKMessage);
+      replacementQuery.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: resumeSessionId,
+        uuid: "result-after-rollback",
+      } as unknown as SDKMessage);
+      yield* Fiber.join(replacementCompletedFiber);
+
+      const unpinnedCursor = (yield* adapter.listSessions())[0]?.resumeCursor;
+      assert.deepEqual(unpinnedCursor, {
+        threadId: THREAD_ID,
+        resume: resumeSessionId,
+        resumeSessionAt: "assistant-after-rollback",
+        turnCount: 5,
+      });
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        resumeCursor: unpinnedCursor,
+      });
+      assert.equal(harness.queries.length, 3);
+      const unpinnedRestartInput = harness.getCreateQueryInputs()[2];
+      assert.equal(unpinnedRestartInput?.options.resume, resumeSessionId);
+      assert.equal(unpinnedRestartInput?.options.resumeSessionAt, undefined);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("ignores stale query frames after rollback until the recycled query starts", () => {
+    const harness = makeHarness({
+      queryFactory: () => new FakeClaudeQuery(),
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const resumeSessionId = "550e8400-e29b-41d4-a716-446655440000";
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        resumeCursor: {
+          threadId: THREAD_ID,
+          resume: resumeSessionId,
+          resumeSessionAt: "assistant-before-restart",
+          turnCount: 4,
+        },
+      });
+      const staleQuery = harness.queries[0];
+      assert.isDefined(staleQuery);
+      if (!staleQuery) return;
+
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "discarded fifth turn",
+        attachments: [],
+      });
+      const discardedCompletedFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "turn.completed",
+      ).pipe(Stream.runHead, Effect.forkChild);
+      staleQuery.emit({
+        type: "assistant",
+        session_id: resumeSessionId,
+        uuid: "assistant-discarded",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-discarded",
+          content: [{ type: "text", text: "discarded response" }],
+        },
+      } as unknown as SDKMessage);
+      staleQuery.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: resumeSessionId,
+        uuid: "result-discarded",
+      } as unknown as SDKMessage);
+      yield* Fiber.join(discardedCompletedFiber);
+
+      assert.isDefined(adapter.rollbackThreadTo);
+      if (!adapter.rollbackThreadTo) return;
+      yield* adapter.rollbackThreadTo(session.threadId, 4);
+
+      const staleFramesConsumedFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) =>
+          event.type === "session.state.changed" && event.payload.reason === "status:requesting",
+      ).pipe(Stream.runHead, Effect.forkChild);
+      staleQuery.emit({
+        type: "assistant",
+        session_id: resumeSessionId,
+        uuid: "assistant-late-parent",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-late-parent",
+          content: [{ type: "text", text: "late parent response" }],
+        },
+      } as unknown as SDKMessage);
+      staleQuery.emit({
+        type: "assistant",
+        session_id: resumeSessionId,
+        uuid: "assistant-late-subagent",
+        parent_tool_use_id: "toolu_stale_subagent",
+        message: {
+          id: "assistant-message-late-subagent",
+          content: [{ type: "text", text: "late subagent response" }],
+        },
+      } as unknown as SDKMessage);
+      staleQuery.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: resumeSessionId,
+        uuid: "result-late",
+      } as unknown as SDKMessage);
+      staleQuery.emit({
+        type: "system",
+        subtype: "status",
+        status: "requesting",
+        session_id: resumeSessionId,
+        uuid: "status-stale-frames-consumed",
+      } as unknown as SDKMessage);
+      yield* Fiber.join(staleFramesConsumedFiber);
+
+      const retainedCursor = {
+        threadId: THREAD_ID,
+        resume: resumeSessionId,
+        resumeSessionAt: "assistant-before-restart",
+        pinResumeSessionAt: true,
+        turnCount: 4,
+      };
+      assert.deepEqual((yield* adapter.listSessions())[0]?.resumeCursor, retainedCursor);
+
+      staleQuery.finish();
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      assert.equal(yield* adapter.hasSession(session.threadId), true);
+      assert.deepEqual((yield* adapter.listSessions())[0]?.resumeCursor, retainedCursor);
+
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "replacement fifth turn",
+        attachments: [],
+      });
+
+      assert.equal(harness.queries.length, 2);
+      const recycledInput = harness.getCreateQueryInputs()[1];
+      assert.equal(recycledInput?.options.resume, resumeSessionId);
+      assert.equal(recycledInput?.options.resumeSessionAt, "assistant-before-restart");
+      assert.deepEqual((yield* adapter.listSessions())[0]?.resumeCursor, retainedCursor);
+
+      const replacementQuery = harness.queries[1];
+      assert.isDefined(replacementQuery);
+      if (!replacementQuery) return;
+      const replacementAssistantConsumedFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) =>
+          event.type === "session.state.changed" && event.payload.reason === "status:requesting",
+      ).pipe(Stream.runHead, Effect.forkChild);
+      replacementQuery.emit({
+        type: "assistant",
+        session_id: resumeSessionId,
+        uuid: "assistant-replacement",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-replacement",
+          content: [{ type: "text", text: "replacement response" }],
+        },
+      } as unknown as SDKMessage);
+      replacementQuery.emit({
+        type: "system",
+        subtype: "status",
+        status: "requesting",
+        session_id: resumeSessionId,
+        uuid: "status-replacement-assistant-consumed",
+      } as unknown as SDKMessage);
+      yield* Fiber.join(replacementAssistantConsumedFiber);
+
+      assert.deepEqual((yield* adapter.listSessions())[0]?.resumeCursor, {
+        threadId: THREAD_ID,
+        resume: resumeSessionId,
+        resumeSessionAt: "assistant-replacement",
+        turnCount: 4,
+      });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect(
+    "records the last parent assistant checkpoint when a subagent frame arrives last",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const resumeSessionId = "550e8400-e29b-41d4-a716-446655440000";
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+          resumeCursor: {
+            threadId: THREAD_ID,
+            resume: resumeSessionId,
+            turnCount: 3,
+          },
+        });
+        yield* adapter.sendTurn({
+          threadId: session.threadId,
+          input: "delegate this",
+          attachments: [],
+        });
+        const completedFiber = yield* Stream.filter(
+          adapter.streamEvents,
+          (event) => event.type === "turn.completed",
+        ).pipe(Stream.runHead, Effect.forkChild);
+
+        harness.query.emit({
+          type: "assistant",
+          session_id: resumeSessionId,
+          uuid: "assistant-parent-checkpoint",
+          parent_tool_use_id: null,
+          message: {
+            id: "assistant-message-parent-checkpoint",
+            content: [{ type: "text", text: "parent response" }],
+          },
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "assistant",
+          session_id: resumeSessionId,
+          uuid: "assistant-subagent-sidechain",
+          parent_tool_use_id: "toolu_subagent_sidechain",
+          message: {
+            id: "assistant-message-subagent-sidechain",
+            content: [{ type: "text", text: "subagent response" }],
+          },
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          errors: [],
+          session_id: resumeSessionId,
+          uuid: "result-parent-checkpoint",
+        } as unknown as SDKMessage);
+        yield* Fiber.join(completedFiber);
+
+        assert.deepEqual((yield* adapter.listSessions())[0]?.resumeCursor, {
+          threadId: THREAD_ID,
+          resume: resumeSessionId,
+          resumeSessionAt: "assistant-parent-checkpoint",
+          turnCount: 4,
+        });
+
+        assert.isDefined(adapter.rollbackThreadTo);
+        if (!adapter.rollbackThreadTo) return;
+        yield* adapter.rollbackThreadTo(session.threadId, 4);
+        assert.deepEqual((yield* adapter.listSessions())[0]?.resumeCursor, {
+          threadId: THREAD_ID,
+          resume: resumeSessionId,
+          resumeSessionAt: "assistant-parent-checkpoint",
+          pinResumeSessionAt: true,
+          turnCount: 4,
+        });
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect(
+    "clears a rollback pin when a restarted turn completes without an assistant frame",
+    () => {
+      const harness = makeHarness({
+        queryFactory: () => new FakeClaudeQuery(),
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const resumeSessionId = "550e8400-e29b-41d4-a716-446655440000";
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+          resumeCursor: {
+            threadId: THREAD_ID,
+            resume: resumeSessionId,
+            resumeSessionAt: "assistant-retained",
+            pinResumeSessionAt: true,
+            turnCount: 4,
+          },
+        });
+        yield* adapter.sendTurn({
+          threadId: session.threadId,
+          input: "/compact",
+          attachments: [],
+        });
+        const completedFiber = yield* Stream.filter(
+          adapter.streamEvents,
+          (event) => event.type === "turn.completed",
+        ).pipe(Stream.runHead, Effect.forkChild);
+        const query = harness.queries[0];
+        assert.isDefined(query);
+        if (!query) return;
+        query.emit({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          errors: [],
+          session_id: resumeSessionId,
+          uuid: "result-without-assistant",
+        } as unknown as SDKMessage);
+        yield* Fiber.join(completedFiber);
+
+        const unpinnedCursor = (yield* adapter.listSessions())[0]?.resumeCursor;
+        assert.deepEqual(unpinnedCursor, {
+          threadId: THREAD_ID,
+          resume: resumeSessionId,
+          resumeSessionAt: "assistant-retained",
+          turnCount: 5,
+        });
+
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+          resumeCursor: unpinnedCursor,
+        });
+        assert.equal(harness.queries.length, 2);
+        const restartInput = harness.getCreateQueryInputs()[1];
+        assert.equal(restartInput?.options.resume, resumeSessionId);
+        assert.equal(restartInput?.options.resumeSessionAt, undefined);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
 
   it.effect("rolls a concrete target across a stale logical turn boundary", () => {
     const harness = makeHarness();
@@ -4301,6 +4776,7 @@ describe("ClaudeAdapterLive", () => {
         threadId: THREAD_ID,
         resume: resumeSessionId,
         resumeSessionAt: "assistant-retained",
+        pinResumeSessionAt: true,
         turnCount: 22,
       });
 

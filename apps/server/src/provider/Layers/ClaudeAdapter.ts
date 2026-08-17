@@ -128,6 +128,7 @@ interface ClaudeResumeState {
   readonly threadId?: ThreadId;
   readonly resume?: string;
   readonly resumeSessionAt?: string;
+  readonly pinResumeSessionAt?: boolean;
   readonly turnCount?: number;
 }
 
@@ -297,6 +298,7 @@ interface ClaudeSessionContext {
   lastKnownTokenUsage: ThreadTokenUsageSnapshot | undefined;
   lastKnownTotalProcessedTokens: number | undefined;
   lastAssistantUuid: string | undefined;
+  pinResumeSessionAt: boolean;
   lastThreadStartedId: string | undefined;
   restartInput: ProviderSessionStartInput;
   recycleBeforeNextTurn: boolean;
@@ -687,6 +689,7 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
     resume?: unknown;
     sessionId?: unknown;
     resumeSessionAt?: unknown;
+    pinResumeSessionAt?: unknown;
     turnCount?: unknown;
   };
 
@@ -704,12 +707,14 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
   const resume = resumeCandidate && isUuid(resumeCandidate) ? resumeCandidate : undefined;
   const resumeSessionAt =
     typeof cursor.resumeSessionAt === "string" ? cursor.resumeSessionAt : undefined;
+  const pinResumeSessionAt = cursor.pinResumeSessionAt === true;
   const turnCountValue = typeof cursor.turnCount === "number" ? cursor.turnCount : undefined;
 
   return {
     ...(threadId ? { threadId } : {}),
     ...(resume ? { resume } : {}),
     ...(resumeSessionAt ? { resumeSessionAt } : {}),
+    ...(pinResumeSessionAt ? { pinResumeSessionAt: true } : {}),
     ...(turnCountValue !== undefined && Number.isInteger(turnCountValue) && turnCountValue >= 0
       ? { turnCount: turnCountValue }
       : {}),
@@ -1907,6 +1912,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       threadId,
       ...(context.resumeSessionId ? { resume: context.resumeSessionId } : {}),
       ...(context.lastAssistantUuid ? { resumeSessionAt: context.lastAssistantUuid } : {}),
+      ...(context.pinResumeSessionAt && context.lastAssistantUuid
+        ? { pinResumeSessionAt: true }
+        : {}),
       turnCount: context.sessionBaseTurnCount + context.turns.length,
     };
 
@@ -3034,8 +3042,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       if (owningAgent && snapshotModel) {
         owningAgent.model = snapshotModel;
       }
-      context.lastAssistantUuid = message.uuid;
-      yield* updateResumeCursor(context);
       return;
     }
 
@@ -3116,6 +3122,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     context.lastAssistantUuid = message.uuid;
+    context.pinResumeSessionAt = false;
     yield* updateResumeCursor(context);
   });
 
@@ -3129,6 +3136,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     const status = turnStatusFromResult(message);
     const errorMessage = resultUserFacingError(message);
+
+    if (context.turnState) {
+      context.pinResumeSessionAt = false;
+      yield* updateResumeCursor(context);
+    }
 
     if (status === "failed") {
       yield* emitRuntimeError(context, errorMessage ?? "Claude turn failed.");
@@ -3687,6 +3699,21 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     message: SDKMessage,
   ) {
     yield* logNativeSdkMessage(context, message);
+
+    if (context.recycleBeforeNextTurn) {
+      switch (message.type) {
+        case "assistant":
+        case "result":
+        case "user":
+        case "stream_event":
+        case "tool_progress":
+        case "tool_use_summary":
+        case "auth_status":
+        case "rate_limit_event":
+          return;
+      }
+    }
+
     yield* ensureThreadId(context, message);
 
     // Wire-only command bookkeeping has no user-facing T3 lifecycle.
@@ -3822,6 +3849,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   ) {
     if (context.stopped) {
       return;
+    }
+
+    if (context.recycleBeforeNextTurn) {
+      if (Exit.isSuccess(exit)) {
+        return;
+      }
+      if (isClaudeInterruptedCause(exit.cause)) {
+        return;
+      }
     }
 
     if (Exit.isFailure(exit)) {
@@ -4390,7 +4426,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           : {}),
         ...(Object.keys(settings).length > 0 ? { settings } : {}),
         ...(existingResumeSessionId ? { resume: existingResumeSessionId } : {}),
-        ...(existingResumeSessionId && resumeState?.resumeSessionAt
+        ...(existingResumeSessionId &&
+        resumeState?.pinResumeSessionAt === true &&
+        resumeState.resumeSessionAt
           ? { resumeSessionAt: resumeState.resumeSessionAt }
           : {}),
         ...(newSessionId ? { sessionId: newSessionId } : {}),
@@ -4424,6 +4462,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "claude.resume.thread_id": resumeState?.threadId ?? "",
         "claude.resume.session_id": existingResumeSessionId ?? "",
         "claude.resume.session_at": resumeState?.resumeSessionAt ?? "",
+        "claude.resume.pinned": resumeState?.pinResumeSessionAt === true,
         "claude.resume.turn_count": resumeState?.turnCount ?? -1,
         "claude.query.cwd": input.cwd ?? "",
         "claude.query.model": apiModelId ?? "",
@@ -4468,6 +4507,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ...(threadId ? { threadId } : {}),
           ...(sessionId ? { resume: sessionId } : {}),
           ...(resumeState?.resumeSessionAt ? { resumeSessionAt: resumeState.resumeSessionAt } : {}),
+          ...(resumeState?.pinResumeSessionAt === true ? { pinResumeSessionAt: true } : {}),
           turnCount: resumeState?.turnCount ?? 0,
         },
         createdAt: startedAt,
@@ -4499,6 +4539,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         lastKnownTokenUsage: undefined,
         lastKnownTotalProcessedTokens: undefined,
         lastAssistantUuid: resumeState?.resumeSessionAt,
+        pinResumeSessionAt: resumeState?.pinResumeSessionAt === true,
         lastThreadStartedId: undefined,
         restartInput: input,
         recycleBeforeNextTurn: false,
@@ -4804,6 +4845,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const retainedTurn = context.turns.at(-1);
     const sessionBase = readClaudeResumeState(context.restartInput.resumeCursor);
     context.lastAssistantUuid = retainedTurn?.lastAssistantUuid ?? sessionBase?.resumeSessionAt;
+    context.pinResumeSessionAt = context.lastAssistantUuid !== undefined;
     context.resumeSessionId = retainedTurn ? context.resumeSessionId : sessionBase?.resume;
     context.recycleBeforeNextTurn = true;
     yield* updateResumeCursor(context);
