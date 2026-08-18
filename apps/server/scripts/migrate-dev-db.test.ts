@@ -5,7 +5,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
-import { runMigrations } from "../src/persistence/Migrations.ts";
+import { runAllMigrations } from "../src/persistence/ForkMigrations.ts";
 import * as NodeSqliteClient from "../src/persistence/NodeSqliteClient.ts";
 import { runMigrateDevDb } from "./migrate-dev-db.ts";
 
@@ -28,7 +28,7 @@ const createFixtureSource = Effect.fn("createMigrateDevDbFixtureSource")(functio
     databasePath,
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations();
+      yield* runAllMigrations();
       // The real shared db carries this column from a branch build without a
       // matching migration; reproduce that drift so the filter is exercised.
       yield* sql`ALTER TABLE projection_threads ADD COLUMN monitor_json TEXT`;
@@ -128,6 +128,36 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
       if (error._tag === "MigrateDevDbSlotCollisionError") {
         assert.equal(error.slot, 1);
         assert.equal(error.appliedName, "SomebodyElsesMigration");
+      }
+    }),
+  );
+
+  it.effect("fails loudly on a fork migration slot collision", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const sourceDir = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-fork-slot-" });
+      const destDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "migrate-dev-db-fork-slot-dest-",
+      });
+      const source = yield* createFixtureSource(sourceDir);
+      yield* withDatabase(
+        source,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`UPDATE effect_sql_migrations_fork
+            SET name = 'SomebodyElsesForkMigration' WHERE migration_id = 1`;
+        }),
+      );
+
+      const error = yield* runMigrateDevDb(
+        { baseDir: destDir, source, projects: 5, threadsPerProject: 10 },
+        { sharedHome: sourceDir },
+      ).pipe(Effect.flip);
+      assert.equal(error._tag, "MigrateDevDbSlotCollisionError");
+      if (error._tag === "MigrateDevDbSlotCollisionError") {
+        assert.equal(error.ledger, "effect_sql_migrations_fork");
+        assert.equal(error.slot, 1);
+        assert.equal(error.appliedName, "SomebodyElsesForkMigration");
       }
     }),
   );

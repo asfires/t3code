@@ -195,6 +195,12 @@ section by keeping the fork's version.
   does not extend to browsers or computer use. For changes that aren't
   visible in the web app, state concretely how to observe the result
   instead (command to run, log to tail, or the mobile test flow).
+- Fork-only database migrations live in
+  `apps/server/src/persistence/ForkMigrations/` with their own IDs (001, 002,
+  ...) and their own ledger table, run by `runAllMigrations` after upstream's.
+  Never add a fork migration to `Migrations.ts`: the Effect Migrator is a
+  high-water mark, so a fork ID in upstream's sequence either skips upstream's
+  next migration or crashes on it at the following sync.
 - Upstream syncs are explicit and discretionary, done as a
   `sync-upstream-<date>` branch PR'd into fork `main` — never a bare pull of
   upstream into `main`.
