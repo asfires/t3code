@@ -7,6 +7,7 @@ import {
   resolveAssistantMessageCopyState,
   resolveTimelineMinimapWheelIndex,
   shouldPreserveAssistantLineBreaks,
+  timelineMinimapWheelTargetsHitStrip,
 } from "./MessagesTimeline.logic";
 
 describe("resolveTimelineMinimapWheelIndex", () => {
@@ -31,6 +32,28 @@ describe("resolveTimelineMinimapWheelIndex", () => {
     expect(
       resolveTimelineMinimapWheelIndex({ currentIndex: 2, itemCount: 0, deltaY: 1 }),
     ).toBeNull();
+  });
+});
+
+describe("timelineMinimapWheelTargetsHitStrip", () => {
+  it("accepts wheel events over the minimap bars", () => {
+    expect(
+      timelineMinimapWheelTargetsHitStrip({
+        pointerX: 24,
+        hitStripLeft: 12,
+        hitStripWidth: 40,
+      }),
+    ).toBe(true);
+  });
+
+  it("rejects wheel events over the expanded preview", () => {
+    expect(
+      timelineMinimapWheelTargetsHitStrip({
+        pointerX: 100,
+        hitStripLeft: 12,
+        hitStripWidth: 40,
+      }),
+    ).toBe(false);
   });
 });
 
