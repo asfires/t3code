@@ -37,10 +37,9 @@ browser session cookie. The cookie is an HTTP transport adapter for the same
 scoped session model; the response never exposes the session secret to browser
 JavaScript.
 
-Loopback development servers use a per-instance cookie name containing the
-server port and a base64url-encoded state directory, so parallel worktrees do
-not overwrite each other's sessions. Pairing also expires cookies whose encoded
-state directories no longer exist, while preserving live sibling worktrees.
+Dev servers are served at `<worktree>.localhost`, so each worktree keeps its own
+browser cookie jar. Hosted and daily-driver servers use plain hosts and the
+stable `t3_session` cookie name.
 
 ### Bearer Access Token
 

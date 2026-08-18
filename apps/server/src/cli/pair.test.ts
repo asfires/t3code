@@ -54,6 +54,12 @@ describe("pair tailscale local target", () => {
     expect(resolveTailscaleLocalTarget({ ...baseState, devUrl: "http://localhost:5733/" })).toEqual(
       { localPort: 5_733 },
     );
+    expect(
+      resolveTailscaleLocalTarget({
+        ...baseState,
+        devUrl: "http://feature-worktree.localhost:5733/",
+      }),
+    ).toEqual({ localPort: 5_733 });
     // A dev server on a non-loopback interface must be proxied at that
     // interface; tailscale serve defaults to 127.0.0.1 otherwise.
     expect(
