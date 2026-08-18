@@ -2,6 +2,8 @@ import type { EnvironmentThreadStatus } from "@t3tools/client-runtime/state/thre
 
 export type ThreadSyncPhase = "loading" | "syncing";
 
+export const THREAD_SYNC_STATUS_REVEAL_DELAY_MS = 300;
+
 export function resolveThreadSyncPhase(input: {
   readonly detailExists: boolean;
   readonly shellExists: boolean;
@@ -24,4 +26,9 @@ export function resolveThreadSyncPhase(input: {
 
 export function threadSyncLabel(phase: ThreadSyncPhase): string {
   return phase === "loading" ? "Loading messages..." : "Syncing messages...";
+}
+
+export function scheduleThreadSyncStatusReveal(reveal: () => void): () => void {
+  const timeoutId = globalThis.setTimeout(reveal, THREAD_SYNC_STATUS_REVEAL_DELAY_MS);
+  return () => globalThis.clearTimeout(timeoutId);
 }
