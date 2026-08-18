@@ -22,6 +22,9 @@ const SESSION_COOKIE_NAME = "t3_session";
  * - **Desktop**, which scans upward from 3773 for a free port and binds
  *   127.0.0.1, so a second instance lands on a different port and the same host.
  *
+ * Dev names encode the state directory so a server can recognize and expire
+ * cookies belonging to worktrees whose state directories no longer exist.
+ *
  * Hosted deployments keep the stable production name: their public port can
  * change between releases, and scoping it would log every user out.
  */
@@ -40,14 +43,68 @@ export function resolveSessionCookieName(input: {
     return SESSION_COOKIE_NAME;
   }
 
-  // Cookies are scoped by host, not port. Loopback development servers need an
-  // instance-specific name or parallel agents overwrite each other's session,
-  // and a server that later reuses the port receives a token signed elsewhere.
-  const instanceHash = NodeCrypto.createHash("sha256")
-    .update(input.instanceKey)
-    .digest("hex")
-    .slice(0, 12);
-  return `${SESSION_COOKIE_NAME}_${input.port}_${instanceHash}`;
+  return `${SESSION_COOKIE_NAME}_${input.port}_${base64UrlEncode(input.instanceKey)}`;
+}
+
+export type DevelopmentSessionCookieName =
+  | { readonly port: number; readonly stateDir: string }
+  | { readonly port: number; readonly legacyHash: string };
+
+export function decodeDevelopmentSessionCookieName(
+  name: string,
+): DevelopmentSessionCookieName | null {
+  const match = /^t3_session_(\d+)_([A-Za-z0-9_-]+)$/.exec(name);
+  const port = Number(match?.[1]);
+  const suffix = match?.[2];
+  if (!Number.isSafeInteger(port) || suffix === undefined) {
+    return null;
+  }
+
+  if (/^[0-9a-f]{12}$/.test(suffix)) {
+    return { port, legacyHash: suffix };
+  }
+
+  const decoded = Encoding.decodeBase64UrlString(suffix);
+  if (Result.isFailure(decoded) || !isAbsolutePathLike(decoded.success)) {
+    return null;
+  }
+  return { port, stateDir: decoded.success };
+}
+
+// POSIX root, Windows drive, or UNC. Format only: the sweep decides existence.
+function isAbsolutePathLike(value: string): boolean {
+  return value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\");
+}
+
+/**
+ * Plans cookie expiry from already-observed directory existence. Encoding the
+ * path creates a localhost-only path-existence oracle for pages that craft
+ * cookie names and observe expiry. This is accepted for development servers,
+ * where such a page already runs code on the same machine.
+ */
+export function planStaleDevelopmentSessionCookieSweep(input: {
+  readonly ownCookieName: string;
+  readonly ownPort: number;
+  readonly requestCookieNames: Iterable<string>;
+  readonly stateDirExists: (stateDir: string) => boolean;
+}): ReadonlyArray<string> {
+  const namesToExpire: Array<string> = [];
+  for (const name of input.requestCookieNames) {
+    if (name === input.ownCookieName) {
+      continue;
+    }
+    const decoded = decodeDevelopmentSessionCookieName(name);
+    if (decoded === null) {
+      continue;
+    }
+    if (
+      ("legacyHash" in decoded && decoded.port === input.ownPort) ||
+      ("stateDir" in decoded && !input.stateDirExists(decoded.stateDir))
+    ) {
+      namesToExpire.push(name);
+    }
+  }
+  return namesToExpire;
 }
 
 export function isRemoteReachableHost(host: string | undefined): boolean {
