@@ -4,22 +4,23 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
+import { runForkMigrations } from "../ForkMigrations.ts";
 import * as NodeSqliteClient from "../NodeSqliteClient.ts";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
 
-layer("041_ProjectionTurnRetractions", (it) => {
+layer("fork/001_ProjectionTurnRetractions", (it) => {
   it.effect("upgrades an existing schema with durable, startup-indexed retraction rows", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
 
-      yield* runMigrations({ toMigrationInclusive: 40 });
+      yield* runMigrations();
       const existingTables = yield* sql<{ readonly name: string }>`
         SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'projection_threads'
       `;
       assert.equal(existingTables.length, 1);
 
-      yield* runMigrations({ toMigrationInclusive: 41 });
+      yield* runForkMigrations({ toMigrationInclusive: 1 });
 
       const columns = yield* sql<{ readonly name: string }>`
         PRAGMA table_info(projection_turn_retractions)

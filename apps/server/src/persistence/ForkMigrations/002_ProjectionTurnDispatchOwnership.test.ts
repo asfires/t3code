@@ -4,16 +4,18 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
+import { runForkMigrations } from "../ForkMigrations.ts";
 import * as NodeSqliteClient from "../NodeSqliteClient.ts";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
 
-layer("042_ProjectionTurnDispatchOwnership", (it) => {
+layer("fork/002_ProjectionTurnDispatchOwnership", (it) => {
   it.effect("adds durable provider-send ownership and claim storage", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
 
-      yield* runMigrations({ toMigrationInclusive: 41 });
+      yield* runMigrations();
+      yield* runForkMigrations({ toMigrationInclusive: 1 });
       yield* sql`
         INSERT INTO projection_turn_retractions (
           request_id, thread_id, message_id, baseline_turn_count,
@@ -26,7 +28,7 @@ layer("042_ProjectionTurnDispatchOwnership", (it) => {
         )
       `;
 
-      yield* runMigrations({ toMigrationInclusive: 42 });
+      yield* runForkMigrations({ toMigrationInclusive: 2 });
 
       const columns = yield* sql<{ readonly name: string }>`
         PRAGMA table_info(projection_turn_retractions)

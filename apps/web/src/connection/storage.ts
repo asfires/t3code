@@ -58,12 +58,12 @@ const StoredShellSnapshotJson = Schema.fromJsonString(StoredShellSnapshot);
 // v4 invalidates snapshots cached before the wire projection retained tool
 // output fields (result/aggregatedOutput); a warm cache resumes via
 // `afterSequence` and would otherwise show stripped payloads forever.
-// v5 invalidates snapshots cached before server migration 044 deleted
+// v5 invalidates snapshots cached before server fork migration 004 deleted
 // orphaned retracted messages out-of-band: the deletion emits no events, so
 // a warm cache resuming via `afterSequence` would render the ghost messages
 // forever. Any server-side row surgery needs a bump here to reach clients.
-// v6 pairs with server migration 045's full projection rebuild.
-// v7 pairs with server migration 046, which rebuilds again now that the
+// v6 pairs with server fork migration 005's full projection rebuild.
+// v7 pairs with server fork migration 006, which rebuilds again now that the
 // turns projector retains checkpointless turns across replayed reverts.
 const StoredThreadSnapshot = Schema.Struct({
   schemaVersion: Schema.Literal(7),

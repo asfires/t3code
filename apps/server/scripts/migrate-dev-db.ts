@@ -38,7 +38,8 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { Command, Flag } from "effect/unstable/cli";
 
-import { migrationManifest, runMigrations } from "../src/persistence/Migrations.ts";
+import { runAllMigrations } from "../src/persistence/ForkMigrations.ts";
+import { migrationManifest } from "../src/persistence/Migrations.ts";
 import * as NodeSqliteClient from "../src/persistence/NodeSqliteClient.ts";
 
 export class MigrateDevDbNotInWorktreeError extends Schema.TaggedErrorClass<MigrateDevDbNotInWorktreeError>()(
@@ -436,7 +437,11 @@ export const runMigrateDevDb = Effect.fn("runMigrateDevDb")(function* (
       const sql = yield* SqlClient.SqlClient;
       // Mirror server boot (persistence/Layers/Sqlite.ts).
       yield* sql.unsafe("PRAGMA foreign_keys = ON").unprepared;
-      return yield* runMigrations();
+      const { upstream, fork } = yield* runAllMigrations();
+      return [
+        ...upstream.map(([id, name]) => `${id}_${name}`),
+        ...fork.map(([id, name]) => `fork/${id}_${name}`),
+      ];
     }).pipe(
       Effect.provide(NodeSqliteClient.layer({ filename: snapshotPath })),
       wrapPhase("migrate", snapshotPath),
@@ -495,7 +500,7 @@ export const runMigrateDevDb = Effect.fn("runMigrateDevDb")(function* (
     sizeBytes: Number(size),
     projects: pruned.projects,
     eventCount: pruned.eventCount,
-    executedMigrations: executedMigrations.map(([id, name]) => `${id}_${name}`),
+    executedMigrations,
   };
 });
 
