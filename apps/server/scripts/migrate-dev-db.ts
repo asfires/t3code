@@ -38,7 +38,11 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { Command, Flag } from "effect/unstable/cli";
 
-import { runAllMigrations } from "../src/persistence/ForkMigrations.ts";
+import {
+  forkMigrationManifest,
+  forkMigrationsTable,
+  runAllMigrations,
+} from "../src/persistence/ForkMigrations.ts";
 import { migrationManifest } from "../src/persistence/Migrations.ts";
 import * as NodeSqliteClient from "../src/persistence/NodeSqliteClient.ts";
 
@@ -119,13 +123,14 @@ export class MigrateDevDbDestinationBusyError extends Schema.TaggedErrorClass<Mi
 export class MigrateDevDbSlotCollisionError extends Schema.TaggedErrorClass<MigrateDevDbSlotCollisionError>()(
   "MigrateDevDbSlotCollisionError",
   {
+    ledger: Schema.String,
     slot: Schema.Number,
     codeName: Schema.String,
     appliedName: Schema.String,
   },
 ) {
   override get message(): string {
-    return `Migration slot collision at ${this.slot}: this checkout registers '${this.codeName}' but the database already applied '${this.appliedName}' in that slot. Renumber the new migration to a free slot.`;
+    return `Migration slot collision at ${this.ledger} ${this.slot}: this checkout registers '${this.codeName}' but the database already applied '${this.appliedName}' in that slot. Renumber the new migration to a free slot.`;
   }
 }
 
@@ -337,15 +342,22 @@ const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigra
 /** Compare this checkout's migration registry against what the cloned
  * database recorded: same slot under a different name means the migration
  * was skipped, not applied. */
+const migrationLedgers = [
+  ["effect_sql_migrations", migrationManifest],
+  [forkMigrationsTable, forkMigrationManifest],
+] as const;
+
 const verifyMigrationSlots = Effect.fn("verifyMigrationSlots")(function* () {
   const sql = yield* SqlClient.SqlClient;
-  const applied = yield* sql<{ migration_id: number; name: string }>`
-    SELECT migration_id, name FROM effect_sql_migrations`;
-  const appliedById = new Map(applied.map((row) => [Number(row.migration_id), row.name]));
-  for (const [slot, codeName] of migrationManifest) {
-    const appliedName = appliedById.get(slot);
-    if (appliedName !== undefined && appliedName !== codeName) {
-      return yield* new MigrateDevDbSlotCollisionError({ slot, codeName, appliedName });
+  for (const [ledger, manifest] of migrationLedgers) {
+    const applied = yield* sql<{ migration_id: number; name: string }>`
+      SELECT migration_id, name FROM ${sql(ledger)}`;
+    const appliedById = new Map(applied.map((row) => [Number(row.migration_id), row.name]));
+    for (const [slot, codeName] of manifest) {
+      const appliedName = appliedById.get(slot);
+      if (appliedName !== undefined && appliedName !== codeName) {
+        return yield* new MigrateDevDbSlotCollisionError({ ledger, slot, codeName, appliedName });
+      }
     }
   }
 });

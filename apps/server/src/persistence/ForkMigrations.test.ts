@@ -119,7 +119,7 @@ freshLayer()(
         yield* applyLegacyForkMigrations;
         const takenId = legacyForkRow(forkMigrationEntries.length);
         yield* sql`
-        UPDATE effect_sql_migrations SET name = 'OrchestrationV2' WHERE migration_id = ${takenId}
+        UPDATE effect_sql_migrations SET name = 'ApplicationEventSource' WHERE migration_id = ${takenId}
       `;
 
         const result = yield* runAllMigrations();
@@ -142,3 +142,36 @@ freshLayer()(
     );
   },
 );
+
+freshLayer()("ForkMigrations when the fork ledger already holds a different migration", (it) => {
+  it.effect("refuses to adopt rather than dropping the legacy row", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* applyLegacyForkMigrations;
+      yield* sql`
+        CREATE TABLE ${sql(forkMigrationsTable)} (
+          migration_id integer PRIMARY KEY NOT NULL,
+          created_at datetime NOT NULL DEFAULT current_timestamp,
+          name VARCHAR(255) NOT NULL
+        )
+      `;
+      yield* sql`
+        INSERT INTO ${sql(forkMigrationsTable)} (migration_id, name)
+        VALUES (${forkMigrationEntries.length}, 'DifferentMigration')
+      `;
+
+      const error = yield* runAllMigrations().pipe(Effect.flip);
+
+      assert.equal(error._tag, "MigrationError");
+      if (error._tag === "MigrationError") {
+        assert.equal(error.kind, "BadState");
+      }
+      // The transaction rolled back: every legacy row is still in place.
+      assert.deepEqual(yield* readIds("effect_sql_migrations"), [
+        ...migrationManifest.map(([id]) => id),
+        ...forkMigrationManifest.map(([id]) => legacyForkRow(id)),
+      ]);
+      assert.deepEqual(yield* readIds(forkMigrationsTable), [forkMigrationEntries.length]);
+    }),
+  );
+});

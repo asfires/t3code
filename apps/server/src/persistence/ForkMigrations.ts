@@ -82,12 +82,30 @@ const adoptLegacyForkLedgerRows = Effect.fn("adoptLegacyForkLedgerRows")(functio
       ([id, name]) => {
         const legacyId = legacyUpstreamIdOffset + id;
         return Effect.gen(function* () {
-          yield* sql`
-            INSERT OR IGNORE INTO ${sql(forkMigrationsTable)} (migration_id, created_at, name)
-            SELECT ${id}, created_at, name
+          const legacy = yield* sql<{ readonly createdAt: string }>`
+            SELECT created_at AS "createdAt"
             FROM ${sql(upstreamMigrationsTable)}
             WHERE migration_id = ${legacyId} AND name = ${name}
           `;
+          if (legacy.length === 0) {
+            return;
+          }
+          const existing = yield* sql<{ readonly name: string }>`
+            SELECT name FROM ${sql(forkMigrationsTable)} WHERE migration_id = ${id}
+          `;
+          if (existing.length === 0) {
+            yield* sql`
+              INSERT INTO ${sql(forkMigrationsTable)} (migration_id, created_at, name)
+              VALUES (${id}, ${legacy[0]!.createdAt}, ${name})
+            `;
+          } else if (existing[0]!.name !== name) {
+            // Deleting the legacy row here would lose the only record that the
+            // fork migration ran; refuse instead of silently skipping it.
+            return yield* new Migrator.MigrationError({
+              kind: "BadState",
+              message: `Fork migration ledger slot ${id} holds "${existing[0]!.name}" but upstream ledger row ${legacyId} records "${name}"`,
+            });
+          }
           yield* sql`
             DELETE FROM ${sql(upstreamMigrationsTable)}
             WHERE migration_id = ${legacyId} AND name = ${name}
