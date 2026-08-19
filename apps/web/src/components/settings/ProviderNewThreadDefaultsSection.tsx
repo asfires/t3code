@@ -12,6 +12,7 @@ import {
 import { Badge } from "../ui/badge";
 import { RUNTIME_MODE_CONFIG, RUNTIME_MODE_OPTIONS } from "../chat/runtimeModeConfig";
 import { TraitsPicker } from "../chat/TraitsPicker";
+import { useClientSettings } from "../../hooks/useSettings";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { resolveNewThreadDefaultModelForInstance } from "./ProviderSettingsPanel.logic";
 import { SettingResetButton } from "./settingsLayout";
@@ -62,6 +63,7 @@ export function ProviderNewThreadDefaultsSection({
   newThreadModel,
   onNewThreadDefaultsChange,
 }: ProviderNewThreadDefaultsSectionProps) {
+  const planModeEnabled = useClientSettings((settings) => settings.planModeEnabled);
   const representativeModelSlug = resolveNewThreadDefaultModelForInstance({
     instanceId,
     configuredModel: newThreadModel,
@@ -105,6 +107,7 @@ export function ProviderNewThreadDefaultsSection({
                 onPromptChange={() => {}}
                 modelOptions={newThreadDefaults?.modelOptions ?? []}
                 allowPromptInjectedEffort={false}
+                planModeEnabled={planModeEnabled}
                 triggerVariant="outline"
                 triggerClassName="min-w-0 max-w-none shrink-0 text-foreground/90 hover:text-foreground"
                 onModelOptionsChange={(nextOptions) => {

@@ -44,6 +44,7 @@ import {
   shouldCollapseExpandedComposer,
   shouldSubmitComposerOnEnter,
 } from "../../composer-logic";
+import { DISCONNECTED_COMPOSER_PLACEHOLDER } from "../../composerPlaceholder";
 import { deriveComposerSendState, readFileAsDataUrl } from "../ChatView.logic";
 import {
   dataTransferHasComposerMention,
@@ -842,6 +843,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         models: selectedProviderModels,
         promptInjectionState: composerPromptInjectionState,
         modelOptions: composerModelOptions?.[selectedInstanceId],
+        planModeEnabled: settings.planModeEnabled,
       }),
     [
       composerModelOptions,
@@ -850,6 +852,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       selectedModel,
       selectedProvider,
       selectedProviderModels,
+      settings.planModeEnabled,
     ],
   );
 
@@ -1193,6 +1196,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     modelOptions: composerModelOptions?.[selectedInstanceId],
     prompt,
     onPromptChange: setPromptFromTraits,
+    planModeEnabled: settings.planModeEnabled,
   });
   const providerTraitsPicker = renderProviderTraitsPicker({
     provider: selectedProvider,
@@ -1204,6 +1208,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     modelOptions: composerModelOptions?.[selectedInstanceId],
     prompt,
     onPromptChange: setPromptFromTraits,
+    planModeEnabled: settings.planModeEnabled,
   });
   const pendingPrimaryAction = useMemo(
     () =>
@@ -3135,7 +3140,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                           : noProviderAvailable
                             ? "Enable a provider in Settings to send a message"
                             : phase === "disconnected"
-                              ? "Ask for follow-up changes or attach images"
+                              ? DISCONNECTED_COMPOSER_PLACEHOLDER
                               : (latestPromptSuggestion ??
                                 "Ask anything, @tag files/folders, $use skills, or / for commands")
                 }
