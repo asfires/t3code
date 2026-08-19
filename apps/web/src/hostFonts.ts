@@ -8,7 +8,8 @@ const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
 export function canUseHostFontEnumeration(): boolean {
   if (typeof window === "undefined") return false;
   if (window.desktopBridge !== undefined) return true;
-  return LOOPBACK_HOSTNAMES.has(window.location.hostname.toLowerCase());
+  const hostname = window.location.hostname.toLowerCase();
+  return LOOPBACK_HOSTNAMES.has(hostname) || hostname.endsWith(".localhost");
 }
 
 /**

@@ -70,27 +70,47 @@ export const SETTINGS_SEARCH_ITEMS = [
   },
   {
     id: "interface-font",
-    title: "Interface font",
+    title: "Interface typeface",
     to: "/settings/appearance",
   },
   {
     id: "prompt-font",
-    title: "Prompt font",
+    title: "Prompt typeface",
     to: "/settings/appearance",
   },
   {
     id: "code-font",
-    title: "Code font",
-    to: "/settings/appearance",
-  },
-  {
-    id: "tool-output-font",
-    title: "Tool output",
+    title: "Monospace typeface",
     to: "/settings/appearance",
   },
   {
     id: "terminal-font",
-    title: "Terminal font",
+    title: "Terminal typeface",
+    to: "/settings/appearance",
+  },
+  {
+    id: "interface-size",
+    title: "Interface and response size",
+    to: "/settings/appearance",
+  },
+  {
+    id: "prompt-size",
+    title: "Prompt size",
+    to: "/settings/appearance",
+  },
+  {
+    id: "code-size",
+    title: "Diff and file size",
+    to: "/settings/appearance",
+  },
+  {
+    id: "tool-output-font",
+    title: "Tool output size",
+    to: "/settings/appearance",
+  },
+  {
+    id: "terminal-size",
+    title: "Terminal size",
     to: "/settings/appearance",
   },
   {

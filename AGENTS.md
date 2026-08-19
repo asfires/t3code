@@ -78,7 +78,7 @@ The most common defect in this repo is a change that works on the path you teste
 
 - `vp i` installs. Worktrees get this from the t3.json setup script; if module resolution looks broken, it probably did not run.
 - `vp run dev` starts server and web. In a worktree, state defaults to that worktree's gitignored `.t3`, which deliberately outranks an ambient `T3CODE_HOME` so you cannot land on shared state by accident. An explicit `--home-dir` still wins.
-- Ports derive from the worktree path and are stable across restarts, but read the real ones from the `[dev-runner]` line since occupied ports shift.
+- Ports derive from the worktree path and are stable across restarts, and the host is `<worktree>.localhost` so every dev server keeps its own cookie jar; read the real origin from the `[dev-runner]` line since occupied ports shift.
 - Sharing over the tailnet is three steps: run `vp run dev --share` in the background, wait for the `pairingUrl:` line in its output, paste that full URL (token included) in your reply. Do not wire up `tailscale serve` by hand for this, and do not open the URL yourself.
 - The web app requires pairing. Hand over the pairing URL, not the bare origin. A URL without its token is useless to whoever you gave it to. If the token got consumed, mint a fresh one with `node apps/server/src/bin.ts pair` — note it carries standard scopes, while the startup URL carries admin scopes (needed for Settings → Connections management).
 - Stop what you started, by the PID you tracked. See rule 1.
@@ -195,6 +195,12 @@ section by keeping the fork's version.
   does not extend to browsers or computer use. For changes that aren't
   visible in the web app, state concretely how to observe the result
   instead (command to run, log to tail, or the mobile test flow).
+- Fork-only database migrations live in
+  `apps/server/src/persistence/ForkMigrations/` with their own IDs (001, 002,
+  ...) and their own ledger table, run by `runAllMigrations` after upstream's.
+  Never add a fork migration to `Migrations.ts`: the Effect Migrator is a
+  high-water mark, so a fork ID in upstream's sequence either skips upstream's
+  next migration or crashes on it at the following sync.
 - Upstream syncs are explicit and discretionary, done as a
   `sync-upstream-<date>` branch PR'd into fork `main` — never a bare pull of
   upstream into `main`.

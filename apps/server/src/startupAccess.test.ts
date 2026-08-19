@@ -3,11 +3,18 @@ import { assert, expect, it } from "@effect/vitest";
 import {
   buildPairingUrl,
   formatHeadlessServeOutput,
+  isLoopbackHost,
   renderTerminalQrCode,
   resolveHeadlessConnectionHost,
   resolveHeadlessConnectionString,
   resolveListeningPort,
 } from "./startupAccess.ts";
+
+it("recognizes localhost subdomains as loopback hosts", () => {
+  expect(isLoopbackHost("feature-worktree.localhost")).toBe(true);
+  expect(isLoopbackHost("FEATURE-WORKTREE.LOCALHOST")).toBe(true);
+  expect(isLoopbackHost("localhost.example.com")).toBe(false);
+});
 
 it("prefers localhost when no explicit host is configured", () => {
   expect(resolveHeadlessConnectionHost(undefined)).toBe("localhost");

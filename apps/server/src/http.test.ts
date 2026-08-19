@@ -9,12 +9,15 @@ describe("http dev routing", () => {
     expect(isLoopbackHostname("localhost")).toBe(true);
     expect(isLoopbackHostname("::1")).toBe(true);
     expect(isLoopbackHostname("[::1]")).toBe(true);
+    expect(isLoopbackHostname("feature-worktree.localhost")).toBe(true);
+    expect(isLoopbackHostname("FEATURE-WORKTREE.LOCALHOST")).toBe(true);
   });
 
   it("does not treat LAN addresses as local", () => {
     expect(isLoopbackHostname("192.168.86.35")).toBe(false);
     expect(isLoopbackHostname("10.0.0.24")).toBe(false);
     expect(isLoopbackHostname("example.local")).toBe(false);
+    expect(isLoopbackHostname("localhost.example.com")).toBe(false);
   });
 
   it("preserves path and query when redirecting to the dev server", () => {

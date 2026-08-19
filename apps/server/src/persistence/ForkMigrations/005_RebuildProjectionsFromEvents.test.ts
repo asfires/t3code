@@ -3,15 +3,16 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
-import { migrationManifest, runMigrations } from "../Migrations.ts";
+import { runMigrations } from "../Migrations.ts";
+import { forkMigrationManifest, runForkMigrations } from "../ForkMigrations.ts";
 import rebuildProjectionsFromEvents, {
   projectionTableNames,
-} from "./045_RebuildProjectionsFromEvents.ts";
+} from "./005_RebuildProjectionsFromEvents.ts";
 import * as NodeSqliteClient from "../NodeSqliteClient.ts";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
 
-layer("045_RebuildProjectionsFromEvents", (it) => {
+layer("fork/005_RebuildProjectionsFromEvents", (it) => {
   it.effect("clears every event-derived projection and resets cursors idempotently", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
@@ -54,21 +55,22 @@ layer("045_RebuildProjectionsFromEvents", (it) => {
 
       yield* sql`DROP TABLE projection_thread_proposed_plans`;
       yield* rebuildProjectionsFromEvents;
-      // The manifest must end on a full rebuild so boot replays every event
-      // through the current projectors after the wipe.
-      assert.deepEqual(migrationManifest.at(-1), [46, "RebuildProjectionsWithRetainedTurns"]);
+      // The fork manifest must end on a full rebuild so boot replays every
+      // event through the current projectors after the wipe.
+      assert.deepEqual(forkMigrationManifest.at(-1), [6, "RebuildProjectionsWithRetainedTurns"]);
     }),
   );
 });
 
 it.layer(Layer.fresh(Layer.mergeAll(NodeSqliteClient.layerMemory())))(
-  "045_RebuildProjectionsFromEvents registration",
+  "fork/005_RebuildProjectionsFromEvents registration",
   (it) => {
-    it.effect("runs after migration 044 against the full projection schema", () =>
+    it.effect("runs after fork migration 004 against the full projection schema", () =>
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
 
-        yield* runMigrations({ toMigrationInclusive: 44 });
+        yield* runMigrations();
+        yield* runForkMigrations({ toMigrationInclusive: 4 });
         yield* sql`
           INSERT INTO projection_thread_messages (
             message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at
@@ -82,8 +84,8 @@ it.layer(Layer.fresh(Layer.mergeAll(NodeSqliteClient.layerMemory())))(
           VALUES ('projection.thread-messages', 99, '2026-01-01T00:00:00.000Z')
         `;
 
-        const migrations = yield* runMigrations({ toMigrationInclusive: 45 });
-        assert.deepEqual(migrations, [[45, "RebuildProjectionsFromEvents"]]);
+        const migrations = yield* runForkMigrations({ toMigrationInclusive: 5 });
+        assert.deepEqual(migrations, [[5, "RebuildProjectionsFromEvents"]]);
 
         const messageRows = yield* sql<{ readonly count: number }>`
           SELECT COUNT(*) AS count

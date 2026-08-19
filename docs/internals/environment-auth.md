@@ -37,6 +37,10 @@ browser session cookie. The cookie is an HTTP transport adapter for the same
 scoped session model; the response never exposes the session secret to browser
 JavaScript.
 
+Dev servers are served at `<worktree>.localhost`, so each worktree keeps its own
+browser cookie jar. Hosted and daily-driver servers use plain hosts and the
+stable `t3_session` cookie name.
+
 ### Bearer Access Token
 
 Non-browser clients use `POST /oauth/token` with an

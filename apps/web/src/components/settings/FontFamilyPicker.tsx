@@ -190,7 +190,14 @@ export function FontFamilyPicker({
     return candidate;
   }, [families, query, requireMonospace]);
 
-  const items = useMemo(() => {
+  const collectionItems = useMemo(() => {
+    const result = [DEFAULT_FONT_VALUE];
+    if (manualFamily !== null) result.push(manualFamily);
+    result.push(...families);
+    return result;
+  }, [families, manualFamily]);
+
+  const filteredItems = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
     const result: string[] = [];
     if (normalizedQuery.length === 0) result.push(DEFAULT_FONT_VALUE);
@@ -239,8 +246,8 @@ export function FontFamilyPicker({
 
   return (
     <Combobox
-      items={items}
-      filteredItems={items}
+      items={collectionItems}
+      filteredItems={filteredItems}
       autoHighlight
       virtualized
       open={open}
@@ -301,12 +308,17 @@ export function FontFamilyPicker({
             <ComboboxListVirtualized className="size-full min-w-0 p-0">
               <LegendList<string>
                 ref={listRef}
-                data={items}
+                data={filteredItems}
+                // LegendList only re-renders a row when its item or extraData
+                // changes, so a font that stays visible while the filter shifts
+                // its position would keep a stale `index`. Base UI highlights and
+                // Enter-selects by index, so every filter change must re-render.
+                extraData={filteredItems}
                 keyExtractor={(item) => item}
                 renderItem={({ item, index }) => renderItem(item, index)}
                 estimatedItemSize={30}
                 drawDistance={360}
-                style={{ height: Math.min(items.length * 30, 288) }}
+                style={{ height: Math.min(filteredItems.length * 30, 288) }}
               />
             </ComboboxListVirtualized>
           </div>

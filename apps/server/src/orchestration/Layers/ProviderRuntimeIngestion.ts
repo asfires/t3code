@@ -26,6 +26,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
@@ -51,39 +52,93 @@ import { canReplaceThreadTitle } from "../threadTitles.ts";
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
 const providerTaskKey = (threadId: ThreadId, taskId: string) => `${threadId}:${taskId}`;
 
-// Fallback when the in-memory description cache no longer has the task name
-// (server restart, session-exit sweep, TTL/capacity eviction): earlier
-// task.started/task.progress activities for the task are persisted with it.
-function findTaskTitleInActivities(
+const TASK_IDENTITY_KEYS = [
+  "agentKind",
+  "taskType",
+  "agentId",
+  "title",
+  "role",
+  "model",
+  "effort",
+  "toolUseId",
+  "parentAgentId",
+  "workflowName",
+  "agentIndex",
+  "phaseIndex",
+  "phaseTitle",
+  "phases",
+  "attempt",
+  "runHandles",
+  "outputFile",
+  "agentPath",
+  "timelineBypass",
+] as const;
+
+// Fallback when provider-local task state no longer exists (server restart,
+// session recycle, TTL/capacity eviction): earlier task lifecycle activities
+// persist the identity needed to classify and label a later sparse event.
+// The first retained start is authoritative for classification; later rows
+// may be recovery notifications that lost their provider-local linkage.
+export function inheritTaskIdentityFromActivities(
+  payload: Record<string, unknown>,
   activities: ReadonlyArray<OrchestrationThreadActivity> | undefined,
-  taskId: string,
-): string | undefined {
-  if (!activities) {
-    return undefined;
+): Record<string, unknown> {
+  const taskId = Predicate.isString(payload.taskId) ? payload.taskId : undefined;
+  if (!taskId || !activities) {
+    return payload;
   }
+  const inherited: Record<string, unknown> = {};
+  let startedClassification: Record<string, unknown> | undefined;
+
   for (let index = activities.length - 1; index >= 0; index -= 1) {
     const activity = activities[index];
-    if (!activity || (activity.kind !== "task.started" && activity.kind !== "task.progress")) {
-      continue;
+    if (!activity || !activity.kind.startsWith("task.")) continue;
+    const activityPayload = Predicate.isObject(activity.payload)
+      ? (activity.payload as Record<string, unknown>)
+      : undefined;
+    if (activityPayload?.taskId !== taskId) continue;
+    for (const key of TASK_IDENTITY_KEYS) {
+      if (inherited[key] === undefined && activityPayload[key] !== undefined) {
+        inherited[key] = activityPayload[key];
+      }
     }
-    const payload =
-      activity.payload && typeof activity.payload === "object"
-        ? (activity.payload as { taskId?: unknown; title?: unknown; detail?: unknown })
-        : undefined;
-    if (payload?.taskId !== taskId) {
-      continue;
+    if (
+      activity.kind === "task.started" &&
+      startedClassification === undefined &&
+      (activityPayload.agentKind === "agent" || activityPayload.agentKind === "background")
+    ) {
+      startedClassification = {
+        agentKind: activityPayload.agentKind,
+        ...(activityPayload.taskType !== undefined ? { taskType: activityPayload.taskType } : {}),
+        ...(activityPayload.agentId !== undefined ? { agentId: activityPayload.agentId } : {}),
+      };
     }
-    const title =
-      typeof payload.title === "string"
-        ? payload.title
-        : activity.kind === "task.started" && typeof payload.detail === "string"
-          ? payload.detail
-          : undefined;
-    if (title && title.trim().length > 0) {
-      return title;
+    if (
+      inherited.title === undefined &&
+      activity.kind === "task.started" &&
+      Predicate.isString(activityPayload.detail)
+    ) {
+      inherited.title = activityPayload.detail;
     }
   }
-  return undefined;
+
+  return { ...inherited, ...payload, ...startedClassification };
+}
+
+function taskPayloadLacksClassification(payload: Record<string, unknown>): boolean {
+  return (
+    payload.agentKind !== "agent" &&
+    payload.agentKind !== "background" &&
+    !Predicate.isString(payload.taskType) &&
+    !Predicate.isString(payload.agentId) &&
+    !Predicate.isString(payload.parentAgentId) &&
+    payload.timelineBypass !== true
+  );
+}
+
+function taskTitleFromPayload(payload: Record<string, unknown>): string | undefined {
+  const title = payload.title;
+  return Predicate.isString(title) && title.trim().length > 0 ? title : undefined;
 }
 
 interface AssistantSegmentState {
@@ -370,6 +425,7 @@ function taskLinkageActivityFields(payload: Record<string, unknown>): Record<str
 export function runtimeEventToActivities(
   event: ProviderRuntimeEvent,
   taskTitle?: string,
+  resolvedTaskPayload?: Record<string, unknown>,
 ): ReadonlyArray<OrchestrationThreadActivity> {
   const maybeSequence = (() => {
     const eventWithSequence = event as ProviderRuntimeEvent & { sessionSequence?: number };
@@ -587,7 +643,9 @@ export function runtimeEventToActivities(
             ...(event.payload.description
               ? { detail: truncateDetail(event.payload.description) }
               : {}),
-            ...taskLinkageActivityFields(event.payload as Record<string, unknown>),
+            ...taskLinkageActivityFields(
+              resolvedTaskPayload ?? (event.payload as Record<string, unknown>),
+            ),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -596,7 +654,9 @@ export function runtimeEventToActivities(
     }
 
     case "task.progress": {
-      const linkage = taskLinkageActivityFields(event.payload as Record<string, unknown>);
+      const linkage = taskLinkageActivityFields(
+        resolvedTaskPayload ?? (event.payload as Record<string, unknown>),
+      );
       // Usage and activity are independent latest-state streams. Keeping them
       // under separate stable ids prevents a command/reasoning update from
       // replacing the last known token count (and prevents a usage-only tick
@@ -695,7 +755,9 @@ export function runtimeEventToActivities(
             ...(event.payload.isBackgrounded !== undefined
               ? { isBackgrounded: event.payload.isBackgrounded }
               : {}),
-            ...taskLinkageActivityFields(event.payload as Record<string, unknown>),
+            ...taskLinkageActivityFields(
+              resolvedTaskPayload ?? (event.payload as Record<string, unknown>),
+            ),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -763,7 +825,9 @@ export function runtimeEventToActivities(
                 }
               : {}),
             ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
-            ...taskLinkageActivityFields(event.payload as Record<string, unknown>),
+            ...taskLinkageActivityFields(
+              resolvedTaskPayload ?? (event.payload as Record<string, unknown>),
+            ),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -2003,6 +2067,32 @@ const make = Effect.gen(function* () {
           yield* rememberTaskDescription(thread.id, event.payload.taskId, description);
         }
       }
+      let taskTitle: string | undefined;
+      let resolvedTaskPayload: Record<string, unknown> | undefined;
+      if (
+        event.type === "task.progress" ||
+        event.type === "task.updated" ||
+        event.type === "task.completed"
+      ) {
+        const payload = event.payload as Record<string, unknown>;
+        resolvedTaskPayload = payload;
+        if (event.type === "task.completed") {
+          taskTitle =
+            taskTitleFromPayload(payload) ??
+            (yield* lookupTaskDescription(thread.id, event.payload.taskId));
+        }
+        if (
+          (event.type === "task.completed" && !taskTitle) ||
+          taskPayloadLacksClassification(payload)
+        ) {
+          const threadDetail = yield* getLoadedThreadDetail();
+          resolvedTaskPayload = inheritTaskIdentityFromActivities(
+            payload,
+            threadDetail?.activities,
+          );
+          taskTitle = taskTitle ?? taskTitleFromPayload(resolvedTaskPayload);
+        }
+      }
       // Working-indicator plan progress: current step while the turn runs,
       // cleared on settle so a finished plan never lingers as stale UI.
       // Events carrying a turn id that conflicts with the active turn are
@@ -2025,7 +2115,7 @@ const make = Effect.gen(function* () {
         case "task.progress":
         case "task.updated":
         case "task.completed": {
-          const payload = event.payload as {
+          const payload = (resolvedTaskPayload ?? event.payload) as {
             taskId: string;
             taskType?: string;
             status?: string;
@@ -2057,16 +2147,7 @@ const make = Effect.gen(function* () {
           break;
       }
 
-      let taskTitle: string | undefined;
-      if (event.type === "task.completed") {
-        taskTitle = yield* lookupTaskDescription(thread.id, event.payload.taskId);
-        if (!taskTitle) {
-          const threadDetail = yield* getLoadedThreadDetail();
-          taskTitle = findTaskTitleInActivities(threadDetail?.activities, event.payload.taskId);
-        }
-      }
-
-      const activities = runtimeEventToActivities(event, taskTitle);
+      const activities = runtimeEventToActivities(event, taskTitle, resolvedTaskPayload);
       yield* Effect.forEach(activities, (activity) =>
         providerCommandId(event, "thread-activity-append").pipe(
           Effect.flatMap((commandId) =>

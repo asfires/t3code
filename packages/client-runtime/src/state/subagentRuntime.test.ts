@@ -622,6 +622,25 @@ describe("background task exclusion", () => {
     expect(agents.map((agent) => agent.id)).toEqual(["agent-1"]);
   });
 
+  it("never promotes a background task from a contradictory recovery completion", () => {
+    const agents = fold([
+      activity("task.started", {
+        taskId: "dev-server",
+        taskType: "local_bash",
+        agentKind: "background",
+        title: "Start dev server in background",
+      }),
+      activity("task.completed", {
+        taskId: "dev-server",
+        agentKind: "agent",
+        status: "stopped",
+        title: "Start dev server in background",
+      }),
+    ]);
+
+    expect(agents).toHaveLength(0);
+  });
+
   it("includes an explicitly promoted external agent even when its SDK task is a shell", () => {
     const agents = fold([
       activity("task.started", {

@@ -20,12 +20,14 @@ export const isLoopbackHost = (host: string | undefined): boolean => {
     return true;
   }
 
+  const normalizedHost = host.toLowerCase();
   return (
-    host === "localhost" ||
-    host === "127.0.0.1" ||
-    host === "::1" ||
-    host === "[::1]" ||
-    host.startsWith("127.")
+    normalizedHost === "localhost" ||
+    normalizedHost.endsWith(".localhost") ||
+    normalizedHost === "127.0.0.1" ||
+    normalizedHost === "::1" ||
+    normalizedHost === "[::1]" ||
+    normalizedHost.startsWith("127.")
   );
 };
 

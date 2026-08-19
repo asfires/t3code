@@ -86,6 +86,7 @@ import {
   resolveTimelineMinimapTopPercent,
   resolveTimelineMinimapWheelIndex,
   shouldPreserveAssistantLineBreaks,
+  timelineMinimapWheelTargetsHitStrip,
   type StableMessagesTimelineRowsState,
   type MessagesTimelineRow,
   TIMELINE_MINIMAP_MIN_ITEMS,
@@ -787,6 +788,16 @@ function TimelineMinimap({
       }
 
       const rect = button.getBoundingClientRect();
+      if (
+        !timelineMinimapWheelTargetsHitStrip({
+          pointerX: event.clientX,
+          hitStripLeft: rect.left,
+          hitStripWidth,
+        })
+      ) {
+        return;
+      }
+
       const pointerIndex = resolveTimelineMinimapIndexFromPointer({
         itemCount: items.length,
         railTop: rect.top,
@@ -815,7 +826,7 @@ function TimelineMinimap({
       wheelIndexRef.current = nextIndex;
       onSelect(nextItem);
     },
-    [items, onSelect],
+    [hitStripWidth, items, onSelect],
   );
 
   useEffect(() => {

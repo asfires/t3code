@@ -4,16 +4,18 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
+import { runForkMigrations } from "../ForkMigrations.ts";
 import * as NodeSqliteClient from "../NodeSqliteClient.ts";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
 
-layer("044_CleanupCompletedRetractionMessages", (it) => {
+layer("fork/004_CleanupCompletedRetractionMessages", (it) => {
   it.effect("removes only messages belonging to completed retractions and is idempotent", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
 
-      yield* runMigrations({ toMigrationInclusive: 43 });
+      yield* runMigrations();
+      yield* runForkMigrations({ toMigrationInclusive: 3 });
       yield* sql`
         INSERT INTO projection_thread_messages (
           message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at
@@ -50,8 +52,8 @@ layer("044_CleanupCompletedRetractionMessages", (it) => {
           )
       `;
 
-      const firstRun = yield* runMigrations({ toMigrationInclusive: 44 });
-      assert.deepEqual(firstRun, [[44, "CleanupCompletedRetractionMessages"]]);
+      const firstRun = yield* runForkMigrations({ toMigrationInclusive: 4 });
+      assert.deepEqual(firstRun, [[4, "CleanupCompletedRetractionMessages"]]);
 
       const rowsAfterFirstRun = yield* sql<{ readonly messageId: string }>`
         SELECT message_id AS "messageId"
@@ -63,7 +65,7 @@ layer("044_CleanupCompletedRetractionMessages", (it) => {
         { messageId: "message-unrelated" },
       ]);
 
-      const secondRun = yield* runMigrations({ toMigrationInclusive: 44 });
+      const secondRun = yield* runForkMigrations({ toMigrationInclusive: 4 });
       assert.deepEqual(secondRun, []);
 
       const rowsAfterSecondRun = yield* sql<{ readonly messageId: string }>`

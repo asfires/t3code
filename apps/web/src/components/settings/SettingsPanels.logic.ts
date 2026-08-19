@@ -88,27 +88,33 @@ type TypographySettings = Pick<
   | "fontSizeTerminal"
 >;
 
-/** Labels the font rows whose family or size differs from the defaults. */
+/** Labels each typography control whose value differs from the defaults. */
 export function getChangedTypographySettingLabels(settings: TypographySettings): string[] {
   return [
-    ...(settings.fontFamilySans !== DEFAULT_UNIFIED_SETTINGS.fontFamilySans ||
-    settings.fontSizeInterface !== DEFAULT_UNIFIED_SETTINGS.fontSizeInterface
-      ? ["Interface font"]
+    ...(settings.fontFamilySans !== DEFAULT_UNIFIED_SETTINGS.fontFamilySans
+      ? ["Interface typeface"]
       : []),
-    ...(settings.fontFamilyComposer !== DEFAULT_UNIFIED_SETTINGS.fontFamilyComposer ||
-    settings.fontSizePrompt !== DEFAULT_UNIFIED_SETTINGS.fontSizePrompt
-      ? ["Prompt font"]
+    ...(settings.fontFamilyComposer !== DEFAULT_UNIFIED_SETTINGS.fontFamilyComposer
+      ? ["Prompt typeface"]
       : []),
-    ...(settings.fontFamilyCode !== DEFAULT_UNIFIED_SETTINGS.fontFamilyCode ||
-    settings.fontSizeCode !== DEFAULT_UNIFIED_SETTINGS.fontSizeCode
-      ? ["Code font"]
+    ...(settings.fontFamilyCode !== DEFAULT_UNIFIED_SETTINGS.fontFamilyCode
+      ? ["Monospace typeface"]
+      : []),
+    ...(settings.fontFamilyTerminal !== DEFAULT_UNIFIED_SETTINGS.fontFamilyTerminal
+      ? ["Terminal typeface"]
+      : []),
+    ...(settings.fontSizeInterface !== DEFAULT_UNIFIED_SETTINGS.fontSizeInterface
+      ? ["Interface and response size"]
+      : []),
+    ...(settings.fontSizePrompt !== DEFAULT_UNIFIED_SETTINGS.fontSizePrompt ? ["Prompt size"] : []),
+    ...(settings.fontSizeCode !== DEFAULT_UNIFIED_SETTINGS.fontSizeCode
+      ? ["Diff and file size"]
       : []),
     ...(settings.fontSizeToolOutput !== DEFAULT_UNIFIED_SETTINGS.fontSizeToolOutput
-      ? ["Tool output"]
+      ? ["Tool output size"]
       : []),
-    ...(settings.fontFamilyTerminal !== DEFAULT_UNIFIED_SETTINGS.fontFamilyTerminal ||
-    settings.fontSizeTerminal !== DEFAULT_UNIFIED_SETTINGS.fontSizeTerminal
-      ? ["Terminal font"]
+    ...(settings.fontSizeTerminal !== DEFAULT_UNIFIED_SETTINGS.fontSizeTerminal
+      ? ["Terminal size"]
       : []),
   ];
 }

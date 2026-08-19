@@ -18,13 +18,24 @@ describe("newPreviewTabId", () => {
 });
 
 describe("isLoopbackHost", () => {
-  it.each(["localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"])("%s is loopback", (host) => {
+  it.each([
+    "localhost",
+    "feature-worktree.localhost",
+    "FEATURE-WORKTREE.LOCALHOST",
+    "127.0.0.1",
+    "0.0.0.0",
+    "::1",
+    "[::1]",
+  ])("%s is loopback", (host) => {
     expect(isLoopbackHost(host)).toBe(true);
   });
 
-  it.each(["example.com", "192.168.1.10", "10.0.0.1", ""])("%s is not loopback", (host) => {
-    expect(isLoopbackHost(host)).toBe(false);
-  });
+  it.each(["example.com", "localhost.example.com", "192.168.1.10", "10.0.0.1", ""])(
+    "%s is not loopback",
+    (host) => {
+      expect(isLoopbackHost(host)).toBe(false);
+    },
+  );
 });
 
 describe("isPreviewableUrl", () => {
