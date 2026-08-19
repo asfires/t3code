@@ -461,6 +461,32 @@ export function foldSubagentActivities(
   options?: { readonly sessionLive?: boolean },
 ): ReadonlyArray<RuntimeSubagent> {
   const agents = new Map<string, MutableAgent>();
+  const taskClassifications = new Map<
+    string,
+    { readonly kind: "agent" | "background"; readonly fromStart: boolean }
+  >();
+
+  // Classification belongs to task identity, not to an individual lifecycle
+  // row. Prefer task.started even when it arrives late; otherwise keep the
+  // first retained stamp. This prevents sparse restart-recovery completions
+  // from promoting a known shell into the agent roster.
+  for (const activity of activities) {
+    if (!activity.kind.startsWith("task.")) continue;
+    if (typeof activity.payload !== "object" || activity.payload === null) continue;
+    const payload = activity.payload as Record<string, unknown>;
+    const taskId = asString(payload.taskId);
+    if (!taskId) continue;
+    const fromStart = activity.kind === "task.started";
+    const existing = taskClassifications.get(taskId);
+    if (existing?.fromStart || (!fromStart && existing)) continue;
+    taskClassifications.set(taskId, {
+      kind: isBackgroundTaskActivity(payload) ? "background" : "agent",
+      fromStart,
+    });
+  }
+
+  const isAgentTask = (taskId: string): boolean =>
+    taskClassifications.get(taskId)?.kind === "agent";
 
   for (const activity of activities) {
     if (typeof activity.payload !== "object" || activity.payload === null) {
@@ -476,7 +502,7 @@ export function foldSubagentActivities(
         // Only real agents join the roster. Shells, monitors, and plan-mode
         // tasks are background work — they render in the ordinary work log,
         // not the Agents surface (a "Run 12s stall" shell is not a subagent).
-        if (isBackgroundTaskActivity(payload)) break;
+        if (!isAgentTask(taskId)) break;
         const agent = getOrCreate(agents, taskId, payload, at);
         fillMetadata(agent, payload);
         // Order-robustness: a start row arriving after a terminal state is a
@@ -505,7 +531,7 @@ export function foldSubagentActivities(
         // rows often carry only taskId+status, no marker fields) inherit the
         // first row's classification instead of being re-judged.
         const existed = agents.has(taskId);
-        if (!existed && isBackgroundTaskActivity(payload)) break;
+        if (!isAgentTask(taskId)) break;
         const agent = getOrCreate(agents, taskId, payload, at);
         fillMetadata(agent, payload);
         if (agent.activationCount === 0) agent.activationCount = 1;
@@ -543,7 +569,7 @@ export function foldSubagentActivities(
         // Membership is sticky per taskId: rows after the first (terminal
         // rows often carry only taskId+status, no marker fields) inherit the
         // first row's classification instead of being re-judged.
-        if (!agents.has(taskId) && isBackgroundTaskActivity(payload)) break;
+        if (!isAgentTask(taskId)) break;
         const agent = getOrCreate(agents, taskId, payload, at);
         fillMetadata(agent, payload);
         // A task first seen via task.updated (start row aged out) has run at
@@ -571,7 +597,7 @@ export function foldSubagentActivities(
         // Membership is sticky per taskId: rows after the first (terminal
         // rows often carry only taskId+status, no marker fields) inherit the
         // first row's classification instead of being re-judged.
-        if (!agents.has(taskId) && isBackgroundTaskActivity(payload)) break;
+        if (!isAgentTask(taskId)) break;
         const agent = getOrCreate(agents, taskId, payload, at);
         fillMetadata(agent, payload);
         if (agent.activationCount === 0) agent.activationCount = 1;

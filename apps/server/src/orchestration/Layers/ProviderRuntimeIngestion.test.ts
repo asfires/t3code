@@ -51,6 +51,7 @@ import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQu
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
 import {
+  inheritTaskIdentityFromActivities,
   ProviderRuntimeIngestionLive,
   runtimeEventToActivities,
 } from "./ProviderRuntimeIngestion.ts";
@@ -114,6 +115,64 @@ describe("runtimeEventToActivities", () => {
     expect(launcherActivity?.payload).toMatchObject({
       itemType: "command_execution",
       timelineBypass: true,
+    });
+  });
+
+  it("recovers background identity for a sparse completion after restart", () => {
+    const createdAt = "2026-08-17T22:16:52.640Z";
+    const [started] = runtimeEventToActivities({
+      type: "task.started",
+      eventId: asEventId("evt-dev-server-started"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-1"),
+      payload: {
+        taskId: RuntimeTaskId.make("dev-server"),
+        description: "Start dev server in background",
+        taskType: "local_bash",
+        title: "Start dev server in background",
+      },
+    });
+    expect(started?.payload).toMatchObject({
+      taskId: "dev-server",
+      taskType: "local_bash",
+      agentKind: "background",
+    });
+
+    const contradictoryRecovery = {
+      ...started!,
+      id: asEventId("evt-bad-recovery"),
+      kind: "task.completed",
+      payload: { taskId: "dev-server", status: "stopped", agentKind: "agent" },
+    };
+    const sparsePayload = { taskId: "dev-server", status: "stopped", agentKind: "agent" };
+    const resolvedPayload = inheritTaskIdentityFromActivities(sparsePayload, [
+      started!,
+      contradictoryRecovery,
+    ]);
+    const [completed] = runtimeEventToActivities(
+      {
+        type: "task.completed",
+        eventId: asEventId("evt-dev-server-completed"),
+        provider: ProviderDriverKind.make("claudeAgent"),
+        createdAt: "2026-08-18T17:52:10.469Z",
+        threadId: asThreadId("thread-1"),
+        payload: {
+          taskId: RuntimeTaskId.make("dev-server"),
+          status: "stopped",
+        },
+      },
+      undefined,
+      resolvedPayload,
+    );
+
+    expect(completed?.payload).toMatchObject({
+      taskId: "dev-server",
+      status: "stopped",
+      taskType: "local_bash",
+      agentKind: "background",
+      title: "Start dev server in background",
     });
   });
 
