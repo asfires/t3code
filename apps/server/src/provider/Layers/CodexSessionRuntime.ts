@@ -341,6 +341,7 @@ function buildCodexCollaborationMode(input: {
   readonly interactionMode?: ProviderInteractionMode;
   readonly model?: string;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort;
+  readonly browserToolsAvailable?: boolean;
 }): EffectCodexSchema.V2TurnStartParams__CollaborationMode | undefined {
   if (input.interactionMode === undefined) {
     return undefined;
@@ -352,10 +353,11 @@ function buildCodexCollaborationMode(input: {
     settings: {
       model,
       reasoning_effort: reasoningEffort,
-      developer_instructions: buildCodexDeveloperInstructions(input.interactionMode, {
-        model,
-        reasoningEffort,
-      }),
+      developer_instructions: buildCodexDeveloperInstructions(
+        input.interactionMode,
+        { model, reasoningEffort },
+        input.browserToolsAvailable ?? true,
+      ),
     },
   };
 }
@@ -372,6 +374,8 @@ export function buildTurnStartParams(input: {
   readonly serviceTier?: CodexServiceTier;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort;
   readonly interactionMode?: ProviderInteractionMode;
+  /** Defaults to true so callers that predate the agent-access gate are unchanged. */
+  readonly browserToolsAvailable?: boolean;
 }): Effect.Effect<
   CodexTurnStartParamsWithCollaborationMode,
   CodexErrors.CodexAppServerProtocolParseError
@@ -392,6 +396,7 @@ export function buildTurnStartParams(input: {
     ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
     ...(input.model ? { model: input.model } : {}),
     ...(input.effort ? { effort: input.effort } : {}),
+    browserToolsAvailable: input.browserToolsAvailable ?? true,
   });
 
   return decodeCodexTurnStartParamsWithCollaborationMode({
@@ -1839,6 +1844,10 @@ export const makeCodexSessionRuntime = (
             ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
             ...(input.effort ? { effort: input.effort } : {}),
             ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
+            // Derived from the session's own MCP configuration rather than the
+            // setting, so the prompt describes the tools this turn actually
+            // has even if the setting changed after the session started.
+            browserToolsAvailable: hasConfiguredMcpServer(options.appServerArgs),
           });
           const rawResponse = yield* client.raw.request("turn/start", params);
           const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
