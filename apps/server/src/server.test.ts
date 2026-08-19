@@ -60,7 +60,6 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { ChildProcessSpawner } from "effect/unstable/process";
-import * as Cookies from "effect/unstable/http/Cookies";
 import {
   FetchHttpClient,
   HttpBody,
@@ -142,7 +141,6 @@ import * as ReviewService from "./review/ReviewService.ts";
 import * as SourceControlRepositoryService from "./sourceControl/SourceControlRepositoryService.ts";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
-import { resolveSessionCookieName } from "./auth/utils.ts";
 import * as CloudManagedEndpointRuntime from "./cloud/ManagedEndpointRuntime.ts";
 import * as CloudCliTokenManager from "./cloud/CliTokenManager.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
@@ -1593,80 +1591,6 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(sessionResponse.status, 200);
       assert.equal(sessionBody.authenticated, true);
       assert.equal(sessionBody.sessionMethod, "browser-session-cookie");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
-  );
-
-  it.effect("sweeps stale development session cookies when pairing", () =>
-    Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
-      const liveStateDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-live-dev-cookie-",
-      });
-      const staleStateDir = yield* fileSystem.makeTempDirectory({
-        prefix: "t3-stale-dev-cookie-",
-      });
-      yield* fileSystem.remove(staleStateDir, { recursive: true });
-
-      const config = yield* buildAppUnderTest({
-        config: {
-          mode: "web",
-          port: 5775,
-          devUrl: new URL("http://127.0.0.1:5173"),
-        },
-      });
-      const ownCookieName = resolveSessionCookieName({
-        mode: config.mode,
-        port: config.port,
-        host: config.host,
-        instanceKey: config.stateDir,
-        development: true,
-      });
-      const staleCookieName = resolveSessionCookieName({
-        mode: "web",
-        port: 5776,
-        host: "127.0.0.1",
-        instanceKey: staleStateDir,
-        development: true,
-      });
-      const liveCookieName = resolveSessionCookieName({
-        mode: "web",
-        port: 5777,
-        host: "127.0.0.1",
-        instanceKey: liveStateDir,
-        development: true,
-      });
-      const legacyCookieName = `t3_session_${config.port}_0123456789ab`;
-
-      const { response } = yield* bootstrapBrowserSession(defaultDesktopBootstrapToken, {
-        headers: {
-          cookie: [
-            `${staleCookieName}=stale-token`,
-            `${liveCookieName}=live-token`,
-            `${legacyCookieName}=legacy-token`,
-          ].join("; "),
-        },
-      });
-      const setCookieHeaders = Cookies.toSetCookieHeaders(response.cookies);
-      const ownSetCookie = setCookieHeaders.find((header) =>
-        header.startsWith(`${ownCookieName}=`),
-      );
-      const staleSetCookie = setCookieHeaders.find((header) =>
-        header.startsWith(`${staleCookieName}=`),
-      );
-      const legacySetCookie = setCookieHeaders.find((header) =>
-        header.startsWith(`${legacyCookieName}=`),
-      );
-
-      assert.equal(response.status, 200);
-      assert.isDefined(ownSetCookie);
-      assert.notInclude(ownSetCookie ?? "", "Max-Age=0");
-      for (const expiredCookie of [staleSetCookie, legacySetCookie]) {
-        assert.isDefined(expiredCookie);
-        assert.include(expiredCookie ?? "", "Max-Age=0");
-        assert.include(expiredCookie ?? "", "Path=/");
-        assert.include(expiredCookie ?? "", "HttpOnly");
-      }
-      assert.notInclude(setCookieHeaders.join("\n"), liveCookieName);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

@@ -27,10 +27,8 @@ import { parseAllowedOAuthScope } from "@t3tools/shared/oauthScope";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
 import { identity } from "effect/Function";
 import * as Layer from "effect/Layer";
-import * as Result from "effect/Result";
 import * as Cookies from "effect/unstable/http/Cookies";
 import * as HttpEffect from "effect/unstable/http/HttpEffect";
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
@@ -39,12 +37,7 @@ import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import * as SessionStore from "./SessionStore.ts";
 import { traceAuthenticatedRelayRequest, traceRelayRequest } from "../cloud/traceRelayRequest.ts";
-import * as ServerConfig from "../config.ts";
-import {
-  decodeDevelopmentSessionCookieName,
-  deriveAuthClientMetadata,
-  planStaleDevelopmentSessionCookieSweep,
-} from "./utils.ts";
+import { deriveAuthClientMetadata } from "./utils.ts";
 import { verifyRequestDpopProof } from "./dpop.ts";
 
 const CREDENTIAL_RESPONSE_HEADERS = {
@@ -210,8 +203,6 @@ export const authHttpApiLayer = HttpApiBuilder.group(
   Effect.fnUntraced(function* (handlers) {
     const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
     const sessions = yield* SessionStore.SessionStore;
-    const serverConfig = yield* ServerConfig.ServerConfig;
-    const fileSystem = yield* FileSystem.FileSystem;
 
     return handlers
       .handle(
@@ -237,52 +228,13 @@ export const authHttpApiLayer = HttpApiBuilder.group(
               args.payload.credential,
               deriveAuthClientMetadata({ request }),
             );
-            const requestCookieNames = Object.keys(request.cookies);
-            const cookieNamesToExpire =
-              serverConfig.devUrl === undefined
-                ? []
-                : yield* Effect.gen(function* () {
-                    const stateDirs = new Set(
-                      requestCookieNames.flatMap((name) => {
-                        const decoded = decodeDevelopmentSessionCookieName(name);
-                        return decoded !== null && "stateDir" in decoded ? [decoded.stateDir] : [];
-                      }),
-                    );
-                    const stateDirExistence = new Map(
-                      yield* Effect.all(
-                        Array.from(stateDirs, (stateDir) =>
-                          fileSystem.exists(stateDir).pipe(
-                            Effect.orElseSucceed(() => true),
-                            Effect.map((exists) => [stateDir, exists] as const),
-                          ),
-                        ),
-                        { concurrency: "unbounded" },
-                      ),
-                    );
-                    return planStaleDevelopmentSessionCookieSweep({
-                      ownCookieName: sessions.cookieName,
-                      ownPort: serverConfig.port,
-                      requestCookieNames,
-                      stateDirExists: (stateDir) => stateDirExistence.get(stateDir) ?? true,
-                    });
-                  });
             const sessionCookies = yield* Effect.fromResult(
-              cookieNamesToExpire.reduce(
-                (cookies, name) =>
-                  Result.flatMap(cookies, (current) =>
-                    Cookies.expireCookie(current, name, {
-                      httpOnly: true,
-                      path: "/",
-                      sameSite: "lax",
-                    }),
-                  ),
-                Cookies.set(Cookies.empty, sessions.cookieName, result.sessionToken, {
-                  expires: DateTime.toDate(result.response.expiresAt),
-                  httpOnly: true,
-                  path: "/",
-                  sameSite: "lax",
-                }),
-              ),
+              Cookies.set(Cookies.empty, sessions.cookieName, result.sessionToken, {
+                expires: DateTime.toDate(result.response.expiresAt),
+                httpOnly: true,
+                path: "/",
+                sameSite: "lax",
+              }),
             ).pipe(Effect.catch(() => failEnvironmentInternal("browser_session_cookie_failed")));
 
             yield* HttpEffect.appendPreResponseHandler((_request, response) =>

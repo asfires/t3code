@@ -1,11 +1,8 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
-  base64UrlEncode,
-  decodeDevelopmentSessionCookieName,
   deriveAuthClientMetadata,
   isRemoteReachableHost,
-  planStaleDevelopmentSessionCookieSweep,
   resolveSessionCookieName,
 } from "./utils.ts";
 
@@ -61,34 +58,24 @@ describe("deriveAuthClientMetadata", () => {
 });
 
 describe("session cookie isolation", () => {
-  it("isolates loopback web servers by port and encoded server state", () => {
-    const firstStateDir = "/tmp/t3-agent-one";
-    const secondStateDir = "/tmp/t3-agent-two";
+  it("isolates loopback web servers by port and server state", () => {
     const first = resolveSessionCookieName({
       mode: "web",
       port: 5775,
       host: "127.0.0.1",
-      instanceKey: firstStateDir,
+      instanceKey: "/tmp/t3-agent-one",
       development: true,
     });
     const second = resolveSessionCookieName({
       mode: "web",
       port: 5775,
       host: "127.0.0.1",
-      instanceKey: secondStateDir,
+      instanceKey: "/tmp/t3-agent-two",
       development: true,
     });
 
-    expect(first).toBe(`t3_session_5775_${base64UrlEncode(firstStateDir)}`);
-    expect(second).toBe(`t3_session_5775_${base64UrlEncode(secondStateDir)}`);
-    expect(decodeDevelopmentSessionCookieName(first)).toEqual({
-      port: 5775,
-      stateDir: firstStateDir,
-    });
-    expect(decodeDevelopmentSessionCookieName(second)).toEqual({
-      port: 5775,
-      stateDir: secondStateDir,
-    });
+    expect(first).toMatch(/^t3_session_5775_[a-f0-9]{12}$/);
+    expect(second).toMatch(/^t3_session_5775_[a-f0-9]{12}$/);
     expect(first).not.toBe(second);
   });
 
@@ -126,16 +113,15 @@ describe("session cookie isolation", () => {
   });
 
   it("isolates development servers even when they bind a wildcard host", () => {
-    const stateDir = "/tmp/t3-wildcard-dev";
     expect(
       resolveSessionCookieName({
         mode: "web",
         port: 5775,
         host: "0.0.0.0",
-        instanceKey: stateDir,
+        instanceKey: "/tmp/t3-wildcard-dev",
         development: true,
       }),
-    ).toBe(`t3_session_5775_${base64UrlEncode(stateDir)}`);
+    ).toMatch(/^t3_session_5775_[a-f0-9]{12}$/);
   });
 
   it("classifies loopback aliases separately from remotely reachable hosts", () => {
@@ -145,52 +131,5 @@ describe("session cookie isolation", () => {
     expect(isRemoteReachableHost("[::1]")).toBe(false);
     expect(isRemoteReachableHost("0.0.0.0")).toBe(true);
     expect(isRemoteReachableHost("192.168.1.50")).toBe(true);
-  });
-});
-
-describe("development session cookie decoding", () => {
-  it("classifies encoded state directories, legacy hashes, and unrelated names", () => {
-    const stateDir = "/tmp/t3-agent-state";
-
-    expect(
-      decodeDevelopmentSessionCookieName(`t3_session_5775_${base64UrlEncode(stateDir)}`),
-    ).toEqual({ port: 5775, stateDir });
-    expect(decodeDevelopmentSessionCookieName("t3_session_5775_0123456789ab")).toEqual({
-      port: 5775,
-      legacyHash: "0123456789ab",
-    });
-    expect(decodeDevelopmentSessionCookieName("t3_session")).toBeNull();
-    expect(decodeDevelopmentSessionCookieName("t3_session_5775")).toBeNull();
-    expect(
-      decodeDevelopmentSessionCookieName(`t3_session_5775_${base64UrlEncode("relative/state")}`),
-    ).toBeNull();
-    expect(decodeDevelopmentSessionCookieName("other_5775_0123456789ab")).toBeNull();
-  });
-});
-
-describe("stale development session cookie sweep", () => {
-  it("expires only dead encoded siblings and same-port legacy cookies", () => {
-    const ownCookieName = `t3_session_5775_${base64UrlEncode("/tmp/own")}`;
-    const liveSibling = `t3_session_5776_${base64UrlEncode("/tmp/live")}`;
-    const staleSibling = `t3_session_5777_${base64UrlEncode("/tmp/stale")}`;
-    const samePortLegacy = "t3_session_5775_0123456789ab";
-    const otherPortLegacy = "t3_session_5778_abcdef012345";
-
-    expect(
-      planStaleDevelopmentSessionCookieSweep({
-        ownCookieName,
-        ownPort: 5775,
-        requestCookieNames: [
-          ownCookieName,
-          liveSibling,
-          staleSibling,
-          samePortLegacy,
-          otherPortLegacy,
-          "t3_session",
-          "t3_session_3773",
-        ],
-        stateDirExists: (stateDir) => stateDir === "/tmp/live",
-      }),
-    ).toEqual([staleSibling, samePortLegacy]);
   });
 });
