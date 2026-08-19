@@ -208,11 +208,6 @@ import {
   Maximize2Icon,
   Minimize2Icon,
   PencilRulerIcon,
-  type LucideIcon,
-  LockIcon,
-  LockOpenIcon,
-  PenLineIcon,
-  SparklesIcon,
   XIcon,
 } from "lucide-react";
 import { proposedPlanTitle } from "../../proposedPlan";
@@ -237,34 +232,10 @@ import { searchProviderSkills } from "../../providerSkillSearch";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import type { ReviewCommentContext } from "../../reviewCommentContext";
 import { deriveLatestPromptSuggestion } from "../../lib/promptSuggestion";
+import { RUNTIME_MODE_CONFIG, RUNTIME_MODE_OPTIONS } from "./runtimeModeConfig";
 
-const runtimeModeConfig: Record<
-  RuntimeMode,
-  { label: string; description: string; icon: LucideIcon }
-> = {
-  "approval-required": {
-    label: "Supervised",
-    description: "Ask before commands and file changes.",
-    icon: LockIcon,
-  },
-  "auto-accept-edits": {
-    label: "Auto-accept edits",
-    description: "Auto-approve edits, ask before other actions.",
-    icon: PenLineIcon,
-  },
-  auto: {
-    label: "Auto",
-    description: "Supported providers approve routine actions; others still ask.",
-    icon: SparklesIcon,
-  },
-  "full-access": {
-    label: "Full access",
-    description: "Allow commands and edits without prompts.",
-    icon: LockOpenIcon,
-  },
-};
-
-const runtimeModeOptions = Object.keys(runtimeModeConfig) as RuntimeMode[];
+const runtimeModeConfig = RUNTIME_MODE_CONFIG;
+const runtimeModeOptions = RUNTIME_MODE_OPTIONS;
 const extendReplacementRangeForTrailingSpace = (
   text: string,
   rangeEnd: number,

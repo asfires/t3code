@@ -4,7 +4,14 @@ import {
   scopeProjectRef,
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
-import { DEFAULT_RUNTIME_MODE, type ScopedProjectRef, type ThreadId } from "@t3tools/contracts";
+import {
+  DEFAULT_RUNTIME_MODE,
+  type ModelSelection,
+  type ScopedProjectRef,
+  type ServerProvider,
+  type ServerSettings,
+  type ThreadId,
+} from "@t3tools/contracts";
 import { useParams, useRouter } from "@tanstack/react-router";
 import { useCallback, useMemo } from "react";
 import {
@@ -23,7 +30,12 @@ import {
   selectProjectGroupingSettings,
 } from "../logicalProject";
 import { resolveDefaultThreadEnvMode } from "@t3tools/shared/threadEnvMode";
-import { readThreadShell, useProjects, useThread } from "../state/entities";
+import {
+  createModelSelection,
+  resolveConfiguredProviderOptionDefaults,
+  resolveConfiguredRuntimeMode,
+} from "@t3tools/shared/model";
+import { readThreadShell, useProjects, useServerConfigs, useThread } from "../state/entities";
 import { resolveNewDraftStartFromOrigin } from "../lib/chatThreadActions";
 import { readT3ProjectFileDefaultThreadEnvMode } from "../lib/t3ProjectFileDefaults";
 import { primaryServerSettingsAtom } from "../state/server";
@@ -36,6 +48,78 @@ interface NewThreadWorkspaceOptions {
   worktreePath?: string | null;
   envMode?: DraftThreadEnvMode;
   startFromOrigin?: boolean;
+}
+
+function resolveSelectableNewThreadSelection(
+  selection: ModelSelection | null | undefined,
+  providers: ReadonlyArray<ServerProvider>,
+): ModelSelection | null {
+  if (!selection) return null;
+  const provider = providers.find((candidate) => candidate.instanceId === selection.instanceId);
+  if (
+    !provider?.enabled ||
+    !provider.installed ||
+    provider.availability === "unavailable" ||
+    provider.auth.status === "unauthenticated" ||
+    !provider.models.some((model) => model.slug === selection.model && model.isLegacy !== true)
+  ) {
+    return null;
+  }
+  return createModelSelection(selection.instanceId, selection.model);
+}
+
+function resolveAdapterDefaultSelection(
+  providers: ReadonlyArray<ServerProvider>,
+): ModelSelection | null {
+  for (const provider of providers) {
+    if (
+      !provider.enabled ||
+      !provider.installed ||
+      provider.availability === "unavailable" ||
+      provider.auth.status === "unauthenticated"
+    ) {
+      continue;
+    }
+    const model =
+      provider.models.find((candidate) => candidate.isDefault && candidate.isLegacy !== true) ??
+      provider.models.find((candidate) => candidate.isLegacy !== true);
+    if (model) return createModelSelection(provider.instanceId, model.slug);
+  }
+  return null;
+}
+
+export function resolveNewThreadConfiguredState(input: {
+  configuredModel: ModelSelection | null | undefined;
+  carryModel: ModelSelection | null | undefined;
+  stickyActiveProvider: ModelSelection | null | undefined;
+  providers: ReadonlyArray<ServerProvider>;
+  settings: Pick<ServerSettings, "providerNewThreadDefaults">;
+}) {
+  const modelSelection =
+    resolveSelectableNewThreadSelection(input.configuredModel, input.providers) ??
+    resolveSelectableNewThreadSelection(input.carryModel, input.providers) ??
+    resolveSelectableNewThreadSelection(input.stickyActiveProvider, input.providers) ??
+    resolveAdapterDefaultSelection(input.providers);
+  if (!modelSelection) {
+    return { modelSelection: null, runtimeMode: DEFAULT_RUNTIME_MODE };
+  }
+  const provider = input.providers.find(
+    (candidate) => candidate.instanceId === modelSelection.instanceId,
+  );
+  const model = provider?.models.find((candidate) => candidate.slug === modelSelection.model);
+  const options = resolveConfiguredProviderOptionDefaults({
+    settings: input.settings,
+    instanceId: modelSelection.instanceId,
+    descriptors: model?.capabilities?.optionDescriptors ?? [],
+  });
+  return {
+    modelSelection: createModelSelection(modelSelection.instanceId, modelSelection.model, options),
+    // Permission mode is provider-bound: the provider's configured default,
+    // else the app default. It never carries over from the viewed thread.
+    runtimeMode:
+      resolveConfiguredRuntimeMode(input.settings, modelSelection.instanceId) ??
+      DEFAULT_RUNTIME_MODE,
+  };
 }
 
 // The workspace options the caller passed explicitly, shaped for the draft
@@ -52,6 +136,7 @@ function pickExplicitWorkspaceOptions(options: NewThreadWorkspaceOptions | undef
 
 export function useNewThreadHandler() {
   const projects = useProjects();
+  const serverConfigs = useServerConfigs();
   // New-thread defaults are a user preference, and the settings UI only ever
   // edits the primary environment's settings.json. Reading the target
   // environment's own settings here would silently reset remote projects to
@@ -97,12 +182,15 @@ export function useNewThreadHandler() {
         setDraftThreadContext,
         setLogicalProjectDraftThreadId,
         setModelSelection,
+        setRuntimeMode,
+        stickyActiveProvider,
+        stickyModelSelectionByProvider,
       } = useComposerDraftStore.getState();
       const currentRouteTarget = getCurrentRouteTarget();
-      // A new thread carries the user's *working mode* from the thread being
-      // viewed: model (including options like reasoning effort and context
-      // window), permission mode, and interaction mode. Branch, worktree, and
-      // env mode never carry implicitly — those come from the configured
+      // A new thread can carry the viewed provider/model and interaction
+      // mode. Model options and permission mode come from the selected
+      // provider's configured new-thread defaults instead. Branch, worktree,
+      // and env mode never carry implicitly — those come from the configured
       // defaults unless the caller passes them explicitly.
       const carrySourceShell =
         currentRouteTarget?.kind === "server"
@@ -125,11 +213,6 @@ export function useNewThreadHandler() {
         : null;
       const carryModelSelection =
         composerModelSelection ?? carrySourceShell?.modelSelection ?? null;
-      const carryRuntimeMode =
-        carrySourceComposer?.runtimeMode ??
-        carrySourceShell?.runtimeMode ??
-        carrySourceDraft?.runtimeMode ??
-        null;
       const carryInteractionMode =
         carrySourceComposer?.interactionMode ??
         carrySourceShell?.interactionMode ??
@@ -161,6 +244,19 @@ export function useNewThreadHandler() {
           candidate.id === projectRef.projectId &&
           candidate.environmentId === projectRef.environmentId,
       );
+      const targetServerConfig = serverConfigs.get(projectRef.environmentId);
+      const targetProviders = targetServerConfig?.providers ?? [];
+      const targetSettings = targetServerConfig?.settings ?? primaryServerSettings;
+      const stickyModelSelection = stickyActiveProvider
+        ? stickyModelSelectionByProvider[stickyActiveProvider]
+        : null;
+      const newThreadState = resolveNewThreadConfiguredState({
+        configuredModel: targetSettings.newThreadModel,
+        carryModel: carryModelSelection,
+        stickyActiveProvider: stickyModelSelection,
+        providers: targetProviders,
+        settings: targetSettings,
+      });
       // The shared resolver owns the priority order. The t3.json read is
       // skipped entirely when a higher-priority source decides, and its
       // query atom caches per project after the first call.
@@ -270,18 +366,19 @@ export function useNewThreadHandler() {
           if (workspaceContext) {
             setDraftThreadContext(emptyStoredDraftThread.draftId, {
               ...workspaceContext,
-              ...(carryRuntimeMode ? { runtimeMode: carryRuntimeMode } : {}),
+              runtimeMode: newThreadState.runtimeMode,
               ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
             });
-            if (carryModelSelection) {
-              // The carried selection is a complete snapshot of the viewed
-              // thread's model state: absent options mean "no options", not
-              // "keep the stale draft's options".
-              setModelSelection(emptyStoredDraftThread.draftId, carryModelSelection, {
-                replaceOptions: true,
-              });
-            }
           }
+          // "New thread" always means current defaults for model, traits, and
+          // permission mode, even when the reused draft is already open and
+          // its workspace context is left alone above.
+          if (newThreadState.modelSelection) {
+            setModelSelection(emptyStoredDraftThread.draftId, newThreadState.modelSelection, {
+              replaceOptions: true,
+            });
+          }
+          setRuntimeMode(emptyStoredDraftThread.draftId, newThreadState.runtimeMode);
           // The workspace context must also ride along here: when projectRef
           // targets a different physical member of the logical project,
           // createDraftThreadState treats the remap as a project change and
@@ -293,7 +390,7 @@ export function useNewThreadHandler() {
             {
               threadId: emptyStoredDraftThread.threadId,
               ...workspaceContext,
-              ...(carryRuntimeMode ? { runtimeMode: carryRuntimeMode } : {}),
+              runtimeMode: newThreadState.runtimeMode,
               ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
             },
           );
@@ -405,17 +502,12 @@ export function useNewThreadHandler() {
               envMode: initialEnvMode,
               newWorktreesStartFromOrigin: primaryServerSettings.newWorktreesStartFromOrigin,
             }),
-          runtimeMode: carryRuntimeMode ?? DEFAULT_RUNTIME_MODE,
+          runtimeMode: newThreadState.runtimeMode,
           ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
         });
         applyStickyState(draftId);
-        if (carryModelSelection) {
-          // After sticky state so the viewed thread's exact selection
-          // (model + options like effort and context window) wins over the
-          // globally sticky one. replaceOptions: the carried selection is a
-          // complete snapshot — absent options mean "no options", not "keep
-          // whatever sticky state just wrote".
-          setModelSelection(draftId, carryModelSelection, { replaceOptions: true });
+        if (newThreadState.modelSelection) {
+          setModelSelection(draftId, newThreadState.modelSelection, { replaceOptions: true });
         }
         carryComposerContentTo(draftId);
 
@@ -427,7 +519,14 @@ export function useNewThreadHandler() {
         return { draftId, threadId };
       })();
     },
-    [getCurrentRouteTarget, primaryServerSettings, projectGroupingSettings, projects, router],
+    [
+      getCurrentRouteTarget,
+      primaryServerSettings,
+      projectGroupingSettings,
+      projects,
+      router,
+      serverConfigs,
+    ],
   );
 }
 

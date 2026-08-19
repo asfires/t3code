@@ -187,6 +187,10 @@ export function applyServerSettingsPatch(
     ...(patch.providerInstances !== undefined
       ? { providerInstances: patch.providerInstances }
       : {}),
+    ...(patch.providerNewThreadDefaults !== undefined
+      ? { providerNewThreadDefaults: patch.providerNewThreadDefaults }
+      : {}),
+    ...(patch.newThreadModel !== undefined ? { newThreadModel: patch.newThreadModel } : {}),
     ...(patch.sourceControlWriterModelSelection !== undefined
       ? { sourceControlWriterModelSelection: patch.sourceControlWriterModelSelection }
       : {}),

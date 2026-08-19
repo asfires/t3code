@@ -6,6 +6,7 @@ import { QuitHoldOverlay } from "./components/QuitHoldOverlay";
 import { AppAtomRegistryProvider } from "./rpc/atomRegistry";
 import type { AppRouter } from "./router";
 import { ServerBootReload } from "./components/ServerBootReload";
+import { DraftDefaultsSync } from "./draftDefaultsSync";
 
 /**
  * Owns renderer-wide providers. The Electron browser host intentionally sits
@@ -16,6 +17,7 @@ export function AppRoot({ router }: { readonly router: AppRouter }) {
   return (
     <AppAtomRegistryProvider>
       <ServerBootReload />
+      <DraftDefaultsSync />
       <RouterProvider router={router} />
       <PreviewAutomationHosts />
       <ElectronBrowserHost />

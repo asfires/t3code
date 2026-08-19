@@ -243,7 +243,6 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
       setProviderModelOptions(threadTarget, provider, nextOptions, {
         ...(instanceId ? { instanceId } : {}),
         model,
-        persistSticky: true,
       });
     },
     [instanceId, model, persistence, provider, setProviderModelOptions],
@@ -330,14 +329,9 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
                   >
                     <span className="flex w-full min-w-0 flex-col">
                       <span className="flex w-full min-w-0 items-center justify-between gap-3">
-                        <span className="min-w-0 truncate">
-                          {option.label}
-                          {option.isDefault ? (
-                            <>
-                              {" "}
-                              <DefaultBadge />
-                            </>
-                          ) : null}
+                        <span className="flex min-w-0 items-center gap-1.5">
+                          <span className="min-w-0 truncate">{option.label}</span>
+                          {option.isDefault ? <DefaultBadge /> : null}
                         </span>
                       </span>
                       {option.description ? (

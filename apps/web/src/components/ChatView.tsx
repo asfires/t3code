@@ -42,6 +42,8 @@ import {
 import {
   applyClaudePromptEffortPrefix,
   createModelSelection,
+  resolveConfiguredProviderOptionDefaults,
+  resolveConfiguredRuntimeMode,
   resolvePromptInjectedEffort,
 } from "@t3tools/shared/model";
 import { CHAT_LIST_ANCHOR_OFFSET } from "@t3tools/shared/chatList";
@@ -6104,6 +6106,10 @@ function ChatViewContent(props: ChatViewProps) {
       // are rejected by returning early; the server remains authoritative too.
       const entry = providerStatuses.find((snapshot) => snapshot.instanceId === instanceId);
       const resolvedDriverKind = entry?.driver ?? null;
+      if (!entry) {
+        scheduleComposerFocus();
+        return;
+      }
       if (
         lockedProvider !== null &&
         resolvedDriverKind !== null &&
@@ -6135,10 +6141,19 @@ function ChatViewContent(props: ChatViewProps) {
         scheduleComposerFocus();
         return;
       }
-      const nextModelSelection: ModelSelection = {
-        instanceId,
-        model: resolvedModel,
-      };
+      const existingDraftSelection = useComposerDraftStore
+        .getState()
+        .getComposerDraft(composerDraftTarget)?.modelSelectionByProvider[instanceId];
+      const configuredOptions = existingDraftSelection
+        ? undefined
+        : resolveConfiguredProviderOptionDefaults({
+            settings,
+            instanceId,
+            descriptors:
+              getProviderModelCapabilities(entry.models, resolvedModel, entry.driver)
+                .optionDescriptors ?? [],
+          });
+      const nextModelSelection = createModelSelection(instanceId, resolvedModel, configuredOptions);
       const modelChangeBlockReason = getStartedThreadModelChangeBlockReason({
         providers: providerStatuses,
         hasStartedSession: activeThread.session !== null,
@@ -6159,14 +6174,28 @@ function ChatViewContent(props: ChatViewProps) {
         scopeThreadRef(activeThread.environmentId, activeThread.id),
         nextModelSelection,
       );
-      setStickyComposerModelSelection(nextModelSelection);
+      setStickyComposerModelSelection(createModelSelection(instanceId, resolvedModel));
+      const previousInstanceId = composerActiveProvider ?? activeThread.modelSelection.instanceId;
+      const configuredRuntimeMode =
+        resolveConfiguredRuntimeMode(settings, instanceId) ?? DEFAULT_RUNTIME_MODE;
+      if (activeThread.session === null && instanceId !== previousInstanceId) {
+        setComposerDraftRuntimeMode(composerDraftTarget, configuredRuntimeMode);
+        if (isLocalDraftThread) {
+          setDraftThreadContext(composerDraftTarget, { runtimeMode: configuredRuntimeMode });
+        }
+      }
       scheduleComposerFocus();
     },
     [
       activeThread,
+      composerActiveProvider,
+      composerDraftTarget,
+      isLocalDraftThread,
       lockedProvider,
       scheduleComposerFocus,
       setComposerDraftModelSelection,
+      setComposerDraftRuntimeMode,
+      setDraftThreadContext,
       setStickyComposerModelSelection,
       providerStatuses,
       settings,

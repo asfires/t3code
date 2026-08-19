@@ -1,11 +1,16 @@
 import type {
   ModelCapabilities,
   ModelSelection,
+  RuntimeMode,
   ServerConfig as T3ServerConfig,
 } from "@t3tools/contracts";
+import { DEFAULT_RUNTIME_MODE } from "@t3tools/contracts";
 import {
   buildProviderOptionSelectionsFromDescriptors,
+  createModelSelection,
   getProviderOptionDescriptors,
+  resolveConfiguredProviderOptionDefaults,
+  resolveConfiguredRuntimeMode,
 } from "@t3tools/shared/model";
 
 export type ModelOption = {
@@ -165,6 +170,52 @@ export function buildModelOptions(
   }
 
   return [...options.values()];
+}
+
+export function resolveNewTaskModelSelection(input: {
+  readonly config: T3ServerConfig | null | undefined;
+  readonly draftSelection: ModelSelection | null;
+}): ModelSelection | null {
+  const draftSelection = resolveSelectableModelSelection(input.config, input.draftSelection);
+  const configuredSelection = resolveDefaultableModelSelection(
+    input.config,
+    input.config?.settings.newThreadModel ?? null,
+  );
+  const modelOptions = buildModelOptions(input.config, draftSelection ?? configuredSelection);
+  const base =
+    draftSelection ??
+    configuredSelection ??
+    modelOptions.find((option) => option.isDefault)?.selection ??
+    modelOptions[0]?.selection ??
+    null;
+  if (!base) return null;
+  const provider = input.config?.providers.find(
+    (candidate) => candidate.instanceId === base.instanceId,
+  );
+  const model = provider?.models.find((candidate) => candidate.slug === base.model);
+  if (draftSelection?.options && draftSelection.options.length > 0) {
+    return normalizeSelectionOptions(draftSelection, model?.capabilities ?? null);
+  }
+  const options = resolveConfiguredProviderOptionDefaults({
+    settings: input.config?.settings ?? { providerNewThreadDefaults: {} },
+    instanceId: base.instanceId,
+    descriptors: model?.capabilities?.optionDescriptors ?? [],
+  });
+  return createModelSelection(base.instanceId, base.model, options);
+}
+
+export function resolveNewTaskRuntimeMode(input: {
+  readonly config: T3ServerConfig | null | undefined;
+  readonly selectedModel: ModelSelection | null;
+  readonly draftRuntimeMode: RuntimeMode | undefined;
+}): RuntimeMode {
+  return (
+    input.draftRuntimeMode ??
+    (input.config && input.selectedModel
+      ? resolveConfiguredRuntimeMode(input.config.settings, input.selectedModel.instanceId)
+      : null) ??
+    DEFAULT_RUNTIME_MODE
+  );
 }
 
 export function groupByProvider(options: ReadonlyArray<ModelOption>): ReadonlyArray<ProviderGroup> {

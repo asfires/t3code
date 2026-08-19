@@ -870,6 +870,20 @@ export function EnvironmentProviderSettings({
                     modelOrder,
                   })
                 }
+                newThreadDefaults={settings.providerNewThreadDefaults[row.instanceId]}
+                newThreadModel={settings.newThreadModel}
+                onNewThreadDefaultsChange={(next) => {
+                  const rest = withoutProviderInstanceKey(
+                    settings.providerNewThreadDefaults,
+                    row.instanceId,
+                  );
+                  updateSettings({
+                    providerNewThreadDefaults:
+                      next.modelOptions === undefined && next.runtimeMode === undefined
+                        ? rest
+                        : { ...rest, [row.instanceId]: next },
+                  });
+                }}
                 onRunUpdate={
                   showInlineUpdateButton && updateCandidate
                     ? () => {

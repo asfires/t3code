@@ -91,6 +91,33 @@ describe("searchSettings", () => {
     });
   });
 
+  it("keeps new-thread settings beside their owning sections", () => {
+    const catalogItems: ReadonlyArray<SettingsSearchItem> = SETTINGS_SEARCH_ITEMS;
+    const workspaceIndex = SETTINGS_SEARCH_ITEMS.findIndex((item) => item.id === "new-threads");
+    const originIndex = SETTINGS_SEARCH_ITEMS.findIndex((item) => item.id === "start-from-origin");
+    const modelIndex = SETTINGS_SEARCH_ITEMS.findIndex((item) => item.id === "new-thread-model");
+
+    expect(SETTINGS_SEARCH_ITEMS[workspaceIndex]).toMatchObject({
+      title: "New thread workspace",
+      to: "/settings/general",
+    });
+    expect([workspaceIndex, originIndex, modelIndex]).toEqual([
+      workspaceIndex,
+      workspaceIndex + 1,
+      workspaceIndex + 2,
+    ]);
+    expect(searchSettings("provider new thread defaults")[0]).toMatchObject({
+      id: "provider-new-thread-defaults",
+      to: "/settings/providers",
+      targetId: "providers",
+    });
+    expect(
+      catalogItems.some(
+        (item) => item.id === "new-thread-defaults" || item.id === "new-threads-start-with",
+      ),
+    ).toBe(false);
+  });
+
   it("indexes typography typefaces and sizes as separate settings", () => {
     expect(searchSettings("typeface").map((item) => item.id)).toEqual([
       "interface-font",
