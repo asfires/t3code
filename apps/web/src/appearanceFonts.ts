@@ -122,7 +122,6 @@ export function applyAppearanceFontVariables(
   root.style.fontSize = `${clampInterfaceFontSize(preferences.sizeInterface)}px`;
   root.style.setProperty("--font-size-prompt", `${clampPromptFontSize(preferences.sizePrompt)}px`);
   const code = clampCodeFontSize(preferences.sizeCode);
-  root.style.setProperty("--font-size-code", `${code}px`);
   root.style.setProperty(
     "--font-size-tool-output",
     `${clampToolOutputFontSize(preferences.sizeToolOutput)}px`,

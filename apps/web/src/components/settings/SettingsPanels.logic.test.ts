@@ -20,7 +20,7 @@ import {
 } from "./SettingsPanels.logic";
 
 describe("typography settings restore", () => {
-  it("detects family and size changes by font row", () => {
+  it("detects family and size changes as separate controls", () => {
     expect(getChangedTypographySettingLabels(DEFAULT_UNIFIED_SETTINGS)).toEqual([]);
     expect(
       getChangedTypographySettingLabels({
@@ -29,7 +29,7 @@ describe("typography settings restore", () => {
         fontFamilyCode: "Fira Code",
         fontSizeToolOutput: 12,
       }),
-    ).toEqual(["Interface font", "Code font", "Tool output"]);
+    ).toEqual(["Monospace typeface", "Interface and response size", "Tool output size"]);
   });
 });
 
