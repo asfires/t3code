@@ -18,6 +18,31 @@ import {
 } from "./serverSettings.ts";
 
 describe("serverSettings helpers", () => {
+  it("replaces new-thread defaults so resets remove stale instance entries", () => {
+    const codexId = ProviderInstanceId.make("codex");
+    const claudeId = ProviderInstanceId.make("claudeAgent");
+    const current = {
+      ...DEFAULT_SERVER_SETTINGS,
+      newThreadModel: createModelSelection(codexId, "gpt-5.6-sol"),
+      providerNewThreadDefaults: {
+        [codexId]: { runtimeMode: "approval-required" as const },
+        [claudeId]: { modelOptions: [{ id: "effort", value: "high" }] },
+      },
+    };
+
+    const next = applyServerSettingsPatch(current, {
+      newThreadModel: null,
+      providerNewThreadDefaults: {
+        [claudeId]: { modelOptions: [{ id: "effort", value: "low" }] },
+      },
+    });
+
+    expect(next.newThreadModel).toBeNull();
+    expect(next.providerNewThreadDefaults).toEqual({
+      [claudeId]: { modelOptions: [{ id: "effort", value: "low" }] },
+    });
+  });
+
   it("normalizes optional persisted strings", () => {
     expect(normalizePersistedServerSettingString(undefined)).toBeUndefined();
     expect(normalizePersistedServerSettingString("   ")).toBeUndefined();

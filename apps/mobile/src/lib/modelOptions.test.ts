@@ -1,15 +1,102 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { ProviderInstanceId, type ServerConfig } from "@t3tools/contracts";
+import { DEFAULT_SERVER_SETTINGS, ProviderInstanceId, type ServerConfig } from "@t3tools/contracts";
 
 import {
   buildModelOptions,
   groupByProvider,
   resolveDefaultableModelSelection,
+  resolveNewTaskModelSelection,
+  resolveNewTaskRuntimeMode,
   resolveSelectableModelSelection,
 } from "./modelOptions";
 
 describe("mobile model options", () => {
+  it("resolves configured new-thread defaults with configured options", () => {
+    const codexId = ProviderInstanceId.make("codex");
+    const claudeId = ProviderInstanceId.make("claudeAgent");
+    const config = {
+      settings: {
+        ...DEFAULT_SERVER_SETTINGS,
+        newThreadModel: { instanceId: claudeId, model: "claude" },
+        providerNewThreadDefaults: {
+          [claudeId]: {
+            modelOptions: [{ id: "effort", value: "high" }],
+            runtimeMode: "approval-required",
+          },
+        },
+      },
+      providers: [
+        {
+          instanceId: codexId,
+          driver: "codex",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          models: [
+            {
+              slug: "gpt",
+              name: "GPT",
+              isCustom: false,
+              isDefault: true,
+              capabilities: null,
+            },
+          ],
+        },
+        {
+          instanceId: claudeId,
+          driver: "claudeAgent",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          models: [
+            {
+              slug: "claude",
+              name: "Claude",
+              isCustom: false,
+              capabilities: {
+                optionDescriptors: [
+                  {
+                    id: "effort",
+                    label: "Effort",
+                    type: "select",
+                    options: [
+                      { id: "low", label: "Low", isDefault: true },
+                      { id: "high", label: "High" },
+                    ],
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    } as unknown as ServerConfig;
+
+    const configured = resolveNewTaskModelSelection({
+      config,
+      draftSelection: null,
+    });
+    expect(configured).toEqual({
+      instanceId: claudeId,
+      model: "claude",
+      options: [{ id: "effort", value: "high" }],
+    });
+    expect(
+      resolveNewTaskRuntimeMode({ config, selectedModel: configured, draftRuntimeMode: undefined }),
+    ).toBe("approval-required");
+    expect(
+      resolveNewTaskModelSelection({
+        config,
+        draftSelection: {
+          instanceId: claudeId,
+          model: "claude",
+          options: [{ id: "effort", value: "low" }],
+        },
+      })?.options,
+    ).toEqual([{ id: "effort", value: "low" }]);
+  });
+
   it("groups models by provider and flags legacy entries", () => {
     const config = {
       providers: [

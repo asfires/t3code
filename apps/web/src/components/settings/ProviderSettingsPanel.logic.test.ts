@@ -5,9 +5,34 @@ import {
   buildProviderEnvironmentOptions,
   classifyProviderEnvironmentAccess,
   resolvePrimaryOperateAccess,
+  resolveNewThreadDefaultModelForInstance,
   resolveRemoteOperateAccess,
   resolveSelectedProviderEnvironmentId,
 } from "./ProviderSettingsPanel.logic";
+
+describe("new-thread provider row model", () => {
+  const models = [
+    { slug: "default", name: "Default", isCustom: false, isDefault: true, capabilities: null },
+    { slug: "chosen", name: "Chosen", isCustom: false, capabilities: null },
+  ] as const;
+
+  it("uses the specific configured model only for its instance", () => {
+    expect(
+      resolveNewThreadDefaultModelForInstance({
+        instanceId: "codex",
+        configuredModel: { instanceId: "codex", model: "chosen" },
+        models,
+      }),
+    ).toBe("chosen");
+    expect(
+      resolveNewThreadDefaultModelForInstance({
+        instanceId: "codex_work",
+        configuredModel: { instanceId: "codex", model: "chosen" },
+        models,
+      }),
+    ).toBe("default");
+  });
+});
 
 const primaryId = EnvironmentId.make("primary");
 const relayId = EnvironmentId.make("relay");

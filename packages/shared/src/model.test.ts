@@ -12,6 +12,8 @@ import {
   getProviderOptionStringSelectionValue,
   normalizeCustomModelSlug,
   normalizeModelSlug,
+  resolveConfiguredProviderOptionDefaults,
+  resolveConfiguredRuntimeMode,
 } from "./model.ts";
 
 const codexCaps: ModelCapabilities = createModelCapabilities({
@@ -153,5 +155,62 @@ describe("model slug normalization", () => {
 
     expect(normalizeModelSlug("opus", claude)).toBe("claude-opus-5");
     expect(normalizeCustomModelSlug(" opus ")).toBe("opus");
+  });
+});
+
+describe("configured provider defaults", () => {
+  const instanceId = ProviderInstanceId.make("codex");
+  const descriptors = codexCaps.optionDescriptors ?? [];
+
+  it("uses valid configured values and drops unsupported option ids", () => {
+    expect(
+      resolveConfiguredProviderOptionDefaults({
+        settings: {
+          providerNewThreadDefaults: {
+            [instanceId]: {
+              modelOptions: [
+                { id: "reasoningEffort", value: "xhigh" },
+                { id: "fastMode", value: true },
+                { id: "unknown", value: "value" },
+              ],
+            },
+          },
+        },
+        instanceId,
+        descriptors,
+      }),
+    ).toEqual([
+      { id: "reasoningEffort", value: "xhigh" },
+      { id: "fastMode", value: true },
+    ]);
+  });
+
+  it("falls back per option for invalid values and unknown instances", () => {
+    const settings = {
+      providerNewThreadDefaults: {
+        [instanceId]: { modelOptions: [{ id: "reasoningEffort", value: "invalid" }] },
+      },
+    };
+
+    expect(resolveConfiguredProviderOptionDefaults({ settings, instanceId, descriptors })).toEqual([
+      { id: "reasoningEffort", value: "high" },
+    ]);
+    expect(
+      resolveConfiguredProviderOptionDefaults({
+        settings,
+        instanceId: ProviderInstanceId.make("codex_other"),
+        descriptors,
+      }),
+    ).toEqual([{ id: "reasoningEffort", value: "high" }]);
+  });
+
+  it("resolves configured runtime mode independently", () => {
+    const settings = {
+      providerNewThreadDefaults: { [instanceId]: { runtimeMode: "approval-required" as const } },
+    };
+    expect(resolveConfiguredRuntimeMode(settings, instanceId)).toBe("approval-required");
+    expect(
+      resolveConfiguredRuntimeMode(settings, ProviderInstanceId.make("claudeAgent")),
+    ).toBeNull();
   });
 });

@@ -19,6 +19,7 @@ import {
   type ProviderInstanceEnvironmentVariable,
   type ProviderInstanceId,
   type ProviderDriverKind,
+  type ModelSelection,
   type ServerProvider,
   type ServerProviderModel,
 } from "@t3tools/contracts";
@@ -40,6 +41,10 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { DriverOption } from "./providerDriverMeta";
 import { ProviderSettingsForm } from "./ProviderSettingsForm";
 import { ProviderModelsSection } from "./ProviderModelsSection";
+import {
+  ProviderNewThreadDefaultsSection,
+  type ProviderNewThreadDefaultsValue,
+} from "./ProviderNewThreadDefaultsSection";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
 import { RedactedSensitiveText } from "./RedactedSensitiveText";
@@ -347,6 +352,9 @@ interface ProviderInstanceCardProps {
   readonly onHiddenModelsChange: (next: ReadonlyArray<string>) => void;
   readonly onFavoriteModelsChange: (next: ReadonlyArray<string>) => void;
   readonly onModelOrderChange: (next: ReadonlyArray<string>) => void;
+  readonly newThreadDefaults: ProviderNewThreadDefaultsValue | undefined;
+  readonly newThreadModel: ModelSelection | null;
+  readonly onNewThreadDefaultsChange: (next: ProviderNewThreadDefaultsValue) => void;
   readonly onRunUpdate?: (() => void) | undefined;
   readonly isUpdating?: boolean | undefined;
 }
@@ -391,6 +399,9 @@ export function ProviderInstanceCard({
   onHiddenModelsChange,
   onFavoriteModelsChange,
   onModelOrderChange,
+  newThreadDefaults,
+  newThreadModel,
+  onNewThreadDefaultsChange,
   onRunUpdate,
   isUpdating = false,
 }: ProviderInstanceCardProps) {
@@ -797,6 +808,16 @@ export function ProviderInstanceCard({
                 </p>
               </div>
             )}
+
+            <ProviderNewThreadDefaultsSection
+              instanceId={instanceId}
+              displayName={displayName}
+              driverKind={driverKind}
+              models={modelsForDisplay}
+              newThreadDefaults={newThreadDefaults}
+              newThreadModel={newThreadModel}
+              onNewThreadDefaultsChange={onNewThreadDefaultsChange}
+            />
           </div>
         </CollapsibleContent>
       </Collapsible>

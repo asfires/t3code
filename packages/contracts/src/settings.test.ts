@@ -193,6 +193,63 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
   });
 });
 
+describe("ServerSettings new-thread defaults", () => {
+  it("decodes legacy settings with last-used model and no provider defaults", () => {
+    const decoded = decodeServerSettings({});
+
+    expect(decoded.newThreadModel).toBeNull();
+    expect(decoded.providerNewThreadDefaults).toEqual({});
+  });
+
+  it("round-trips configured model, options, and runtime mode through patches", () => {
+    const patch = decodeServerSettingsPatch({
+      newThreadModel: { instanceId: "codex_personal", model: "gpt-5.6-sol" },
+      providerNewThreadDefaults: {
+        codex_personal: {
+          modelOptions: [
+            { id: "reasoningEffort", value: "high" },
+            { id: "fastMode", value: true },
+          ],
+          runtimeMode: "auto-accept-edits",
+        },
+      },
+    });
+
+    expect(patch).toEqual({
+      newThreadModel: { instanceId: "codex_personal", model: "gpt-5.6-sol" },
+      providerNewThreadDefaults: {
+        codex_personal: {
+          modelOptions: [
+            { id: "reasoningEffort", value: "high" },
+            { id: "fastMode", value: true },
+          ],
+          runtimeMode: "auto-accept-edits",
+        },
+      },
+    });
+    const decoded = decodeServerSettings({
+      newThreadModel: patch.newThreadModel,
+      providerNewThreadDefaults: patch.providerNewThreadDefaults,
+    });
+    expect(encodeServerSettings(decoded).newThreadModel).toEqual(patch.newThreadModel);
+    expect(encodeServerSettings(decoded).providerNewThreadDefaults).toEqual(
+      patch.providerNewThreadDefaults,
+    );
+  });
+
+  it("strips options from the global model choice", () => {
+    expect(
+      decodeServerSettings({
+        newThreadModel: {
+          instanceId: "codex",
+          model: "gpt-5.6-sol",
+          options: [{ id: "reasoningEffort", value: "high" }],
+        },
+      }).newThreadModel,
+    ).toEqual({ instanceId: "codex", model: "gpt-5.6-sol" });
+  });
+});
+
 describe("ServerSettings worktree defaults", () => {
   it("defaults start-from-origin on for legacy configs", () => {
     expect(decodeServerSettings({}).newWorktreesStartFromOrigin).toBe(true);

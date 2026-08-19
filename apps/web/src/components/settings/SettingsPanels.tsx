@@ -74,6 +74,7 @@ import {
 import {
   applyProviderInstanceSettings,
   deriveProviderInstanceEntries,
+  resolveDefaultProviderModelSelection,
   sortProviderInstanceEntries,
 } from "../../providerInstances";
 import { ensureLocalApi, readLocalApi } from "../../localApi";
@@ -516,6 +517,9 @@ export function useSettingsRestore(onRestored?: () => void) {
       DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin
         ? ["New worktrees start from origin"]
         : []),
+      ...(settings.newThreadModel !== DEFAULT_UNIFIED_SETTINGS.newThreadModel
+        ? ["New thread model"]
+        : []),
       ...(settings.addProjectBaseDirectory !== DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory
         ? ["Add project base directory"]
         : []),
@@ -539,6 +543,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.addProjectBaseDirectory,
       settings.defaultThreadEnvMode,
       settings.newWorktreesStartFromOrigin,
+      settings.newThreadModel,
       settings.diffIgnoreWhitespace,
       settings.environmentIdentificationMode,
       settings.fontFamilyCode,
@@ -645,6 +650,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       providerHealthRefreshInterval: DEFAULT_UNIFIED_SETTINGS.providerHealthRefreshInterval,
       defaultThreadEnvMode: DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode,
       newWorktreesStartFromOrigin: DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin,
+      newThreadModel: DEFAULT_UNIFIED_SETTINGS.newThreadModel,
       addProjectBaseDirectory: DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory,
       confirmThreadArchive: DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive,
       confirmThreadDelete: DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete,
@@ -1721,10 +1727,10 @@ export function GeneralSettingsPanel() {
   const textGenInstanceId = textGenerationModelSelection.instanceId;
   const textGenModel = textGenerationModelSelection.model;
   const textGenModelOptions = textGenerationModelSelection.options;
-  const textGenerationModelInstanceEntries = sortProviderInstanceEntries(
+  const providerInstanceEntries = sortProviderInstanceEntries(
     applyProviderInstanceSettings(deriveProviderInstanceEntries(serverProviders), settings),
   );
-  const textGenInstanceEntry = textGenerationModelInstanceEntries.find(
+  const textGenInstanceEntry = providerInstanceEntries.find(
     (entry) => entry.instanceId === textGenInstanceId,
   );
   const textGenProvider: ProviderDriverKind =
@@ -1738,6 +1744,15 @@ export function GeneralSettingsPanel() {
   const isTextGenerationModelDirty = !Equal.equals(
     settings.textGenerationModelSelection ?? null,
     DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection ?? null,
+  );
+  // Only providers a new thread could actually start on: unavailable ones
+  // (not installed, unauthenticated) are skipped by the resolver anyway.
+  const newThreadModelInstanceEntries = providerInstanceEntries.filter(
+    (entry) => entry.enabled && entry.isAvailable,
+  );
+  const resolvedNewThreadModel = resolveDefaultProviderModelSelection(
+    serverProviders,
+    settings.newThreadModel,
   );
   const resolvedBackgroundActivity = resolveServerBackgroundActivitySettings(settings);
   const activeBackgroundActivityProfile = resolvedBackgroundActivity.profile;
@@ -2114,6 +2129,66 @@ export function GeneralSettingsPanel() {
         ) : null}
 
         <SettingsRow
+          {...searchableSetting("new-thread-model")}
+          description="Which model a new thread opens with. Traits and permission mode come from each provider's defaults in Providers."
+          resetAction={
+            settings.newThreadModel !== null ? (
+              <SettingResetButton
+                label="new thread model"
+                onClick={() => updateSettings({ newThreadModel: null })}
+              />
+            ) : null
+          }
+          control={
+            <div className="flex flex-wrap items-center justify-end gap-1.5">
+              <Select
+                value={settings.newThreadModel === null ? "last-used" : "specific"}
+                onValueChange={(value) => {
+                  if (value === "last-used") {
+                    updateSettings({ newThreadModel: null });
+                  } else if (resolvedNewThreadModel) {
+                    updateSettings({
+                      newThreadModel: createModelSelection(
+                        resolvedNewThreadModel.instanceId,
+                        resolvedNewThreadModel.model,
+                      ),
+                    });
+                  }
+                }}
+              >
+                <SelectTrigger className="w-40" aria-label="New thread model">
+                  <SelectValue>
+                    {settings.newThreadModel === null ? "Last used model" : "A specific model"}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  <SelectItem hideIndicator value="last-used">
+                    Last used model
+                  </SelectItem>
+                  <SelectItem hideIndicator value="specific">
+                    A specific model
+                  </SelectItem>
+                </SelectPopup>
+              </Select>
+              {settings.newThreadModel !== null && resolvedNewThreadModel ? (
+                <ProviderModelPicker
+                  activeInstanceId={resolvedNewThreadModel.instanceId}
+                  model={resolvedNewThreadModel.model}
+                  lockedProvider={null}
+                  instanceEntries={newThreadModelInstanceEntries}
+                  modelOptionsByInstance={textGenerationModelOptionsByInstance}
+                  triggerVariant="outline"
+                  triggerClassName="min-w-0 max-w-none shrink-0 text-foreground/90 hover:text-foreground"
+                  onInstanceModelChange={(instanceId, model) =>
+                    updateSettings({ newThreadModel: createModelSelection(instanceId, model) })
+                  }
+                />
+              ) : null}
+            </div>
+          }
+        />
+
+        <SettingsRow
           {...searchableSetting("add-project-starts-in")}
           description='Leave empty to use "~/" when the Add Project browser opens.'
           resetAction={
@@ -2239,7 +2314,7 @@ export function GeneralSettingsPanel() {
                 activeInstanceId={textGenInstanceId}
                 model={textGenModel}
                 lockedProvider={null}
-                instanceEntries={textGenerationModelInstanceEntries}
+                instanceEntries={providerInstanceEntries}
                 modelOptionsByInstance={textGenerationModelOptionsByInstance}
                 triggerVariant="outline"
                 triggerClassName="min-w-0 max-w-none shrink-0 text-foreground/90 hover:text-foreground"

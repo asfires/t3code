@@ -8,6 +8,8 @@ import {
   ProviderInstanceId,
   type ProviderOptionDescriptor,
   type ProviderOptionSelection,
+  type RuntimeMode,
+  type ServerSettings,
 } from "@t3tools/contracts";
 
 const DEFAULT_PROVIDER_DRIVER_KIND = ProviderDriverKind.make("codex");
@@ -210,6 +212,41 @@ export function buildProviderOptionSelectionsFromDescriptors(
   }
 
   return nextSelections.length > 0 ? nextSelections : undefined;
+}
+
+export function resolveConfiguredProviderOptionDefaults(input: {
+  settings: Pick<ServerSettings, "providerNewThreadDefaults">;
+  instanceId: ProviderInstanceId;
+  descriptors: ReadonlyArray<ProviderOptionDescriptor>;
+}): ReadonlyArray<ProviderOptionSelection> {
+  const configured = input.settings.providerNewThreadDefaults[input.instanceId]?.modelOptions;
+  const configuredById = new Map(configured?.map((selection) => [selection.id, selection.value]));
+  const selections: ProviderOptionSelection[] = [];
+
+  for (const descriptor of input.descriptors) {
+    const configuredValue = configuredById.get(descriptor.id);
+    const value =
+      descriptor.type === "boolean"
+        ? typeof configuredValue === "boolean"
+          ? configuredValue
+          : getProviderOptionCurrentValue(descriptor)
+        : typeof configuredValue === "string" &&
+            descriptor.options.some((option) => option.id === configuredValue)
+          ? configuredValue
+          : getProviderOptionCurrentValue(descriptor);
+    if (typeof value === "string" || typeof value === "boolean") {
+      selections.push({ id: descriptor.id, value });
+    }
+  }
+
+  return selections;
+}
+
+export function resolveConfiguredRuntimeMode(
+  settings: Pick<ServerSettings, "providerNewThreadDefaults">,
+  instanceId: ProviderInstanceId,
+): RuntimeMode | null {
+  return settings.providerNewThreadDefaults[instanceId]?.runtimeMode ?? null;
 }
 
 export function getModelSelectionOptionDescriptors(

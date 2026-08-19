@@ -5,6 +5,7 @@ import type {
   ProviderInstanceConfig,
   ProviderInstanceId,
   ServerSettings,
+  ServerSettingsPatch,
   SidebarProjectGroupingMode,
   UnifiedSettings,
 } from "@t3tools/contracts";
@@ -205,7 +206,7 @@ export function buildProviderInstanceUpdatePatch(input: {
   readonly textGenerationModelSelection?:
     | ServerSettings["textGenerationModelSelection"]
     | undefined;
-}): Partial<UnifiedSettings> {
+}): Pick<ServerSettingsPatch, "providers" | "providerInstances" | "textGenerationModelSelection"> {
   type LegacyProviderSettings = ServerSettings["providers"][keyof ServerSettings["providers"]];
   const legacyProviderDefaults = DEFAULT_UNIFIED_SETTINGS.providers as Record<
     string,

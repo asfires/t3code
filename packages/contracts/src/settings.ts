@@ -7,9 +7,10 @@ import { ThreadEnvMode } from "./environment.ts";
 import {
   DEFAULT_TEXT_GENERATION_MODEL,
   DEFAULT_TEXT_GENERATION_REASONING_EFFORT,
+  ProviderOptionSelection,
   ProviderOptionSelections,
 } from "./model.ts";
-import { ModelSelection } from "./orchestration.ts";
+import { ModelSelection, RuntimeMode } from "./orchestration.ts";
 import { ProviderInstanceConfig, ProviderInstanceId } from "./providerInstance.ts";
 
 // ── Client Settings (local-only) ───────────────────────────────
@@ -561,6 +562,34 @@ export const BackgroundActivitySettings = Schema.Struct({
 }).pipe(Schema.withDecodingDefault(Effect.succeed({})));
 export type BackgroundActivitySettings = typeof BackgroundActivitySettings.Type;
 
+export const ProviderNewThreadDefaults = Schema.Struct({
+  modelOptions: Schema.optional(Schema.Array(ProviderOptionSelection)),
+  runtimeMode: Schema.optional(RuntimeMode),
+});
+export type ProviderNewThreadDefaults = typeof ProviderNewThreadDefaults.Type;
+
+const NewThreadModelSelectionWire = Schema.Struct({
+  instanceId: ProviderInstanceId,
+  model: TrimmedNonEmptyString,
+});
+const NewThreadModelSelection = ModelSelection.pipe(
+  Schema.decodeTo(
+    NewThreadModelSelectionWire,
+    SchemaTransformation.transformOrFail({
+      decode: (selection) =>
+        Effect.succeed({
+          instanceId: selection.instanceId,
+          model: selection.model,
+        } as typeof NewThreadModelSelectionWire.Encoded),
+      encode: (selection) =>
+        Effect.succeed({
+          instanceId: selection.instanceId,
+          model: selection.model,
+        } as ModelSelection),
+    }),
+  ),
+);
+
 export const ServerSettings = Schema.Struct({
   // Legacy token-by-token assistant output. Deliberately a fresh key (was
   // `enableAssistantStreaming`): decoding drops the old key, so everyone,
@@ -592,6 +621,12 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(true)),
   ),
   addProjectBaseDirectory: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  newThreadModel: Schema.NullOr(NewThreadModelSelection).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  providerNewThreadDefaults: Schema.Record(ProviderInstanceId, ProviderNewThreadDefaults).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
   textGenerationModelSelection: ModelSelection.pipe(
     Schema.withDecodingDefault(
       Effect.succeed({
@@ -747,6 +782,10 @@ export const ServerSettingsPatch = Schema.Struct({
   defaultThreadEnvMode: Schema.optionalKey(ThreadEnvMode),
   newWorktreesStartFromOrigin: Schema.optionalKey(Schema.Boolean),
   addProjectBaseDirectory: Schema.optionalKey(TrimmedString),
+  newThreadModel: Schema.optionalKey(Schema.NullOr(NewThreadModelSelection)),
+  providerNewThreadDefaults: Schema.optionalKey(
+    Schema.Record(ProviderInstanceId, ProviderNewThreadDefaults),
+  ),
   textGenerationModelSelection: Schema.optionalKey(ModelSelectionPatch),
   sourceControlWritingStyle: Schema.optionalKey(
     Schema.Struct({

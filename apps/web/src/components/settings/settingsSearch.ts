@@ -135,7 +135,7 @@ export const SETTINGS_SEARCH_ITEMS = [
   },
   {
     id: "new-threads",
-    title: "New threads",
+    title: "New thread workspace",
     to: "/settings/general",
   },
   {
@@ -143,6 +143,11 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: "Start from origin",
     to: "/settings/general",
     targetId: "new-threads",
+  },
+  {
+    id: "new-thread-model",
+    title: "New thread model",
+    to: "/settings/general",
   },
   {
     id: "add-project-starts-in",
@@ -199,6 +204,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "providers",
     title: "Providers",
     to: "/settings/providers",
+  },
+  {
+    id: "provider-new-thread-defaults",
+    title: "Provider new thread defaults",
+    to: "/settings/providers",
+    targetId: "providers",
   },
   {
     id: "source-control",

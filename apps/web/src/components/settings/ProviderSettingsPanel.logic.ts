@@ -3,7 +3,27 @@ import {
   AuthOrchestrationOperateScope,
   type AuthSessionState,
   type EnvironmentId,
+  type ServerProviderModel,
 } from "@t3tools/contracts";
+
+export function resolveNewThreadDefaultModelForInstance(input: {
+  readonly instanceId: string;
+  readonly configuredModel: { readonly instanceId: string; readonly model: string } | null;
+  readonly models: ReadonlyArray<ServerProviderModel>;
+}): string | null {
+  if (
+    input.configuredModel?.instanceId === input.instanceId &&
+    input.models.some((model) => model.slug === input.configuredModel?.model)
+  ) {
+    return input.configuredModel.model;
+  }
+  return (
+    input.models.find((model) => model.isDefault && model.isLegacy !== true)?.slug ??
+    input.models.find((model) => model.isLegacy !== true)?.slug ??
+    input.models[0]?.slug ??
+    null
+  );
+}
 
 export interface ProviderEnvironmentOptionLike {
   readonly environmentId: EnvironmentId;

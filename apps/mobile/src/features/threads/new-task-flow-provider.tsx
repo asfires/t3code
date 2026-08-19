@@ -19,6 +19,13 @@ import {
 } from "@t3tools/contracts";
 import { parseT3ProjectFile } from "@t3tools/shared/t3ProjectFile";
 import {
+  buildProviderOptionSelectionsFromDescriptors,
+  createModelSelection,
+  getProviderOptionDescriptors,
+  resolveConfiguredProviderOptionDefaults,
+  resolveConfiguredRuntimeMode,
+} from "@t3tools/shared/model";
+import {
   isDefaultThreadEnvModeSettled,
   resolveDefaultThreadEnvMode,
 } from "@t3tools/shared/threadEnvMode";
@@ -32,7 +39,8 @@ import type { ModelOption, ProviderGroup } from "../../lib/modelOptions";
 import {
   buildModelOptions,
   groupByProvider,
-  resolveDefaultableModelSelection,
+  resolveNewTaskModelSelection,
+  resolveNewTaskRuntimeMode,
   resolveSelectableModelSelection,
 } from "../../lib/modelOptions";
 import { scopedProjectKey } from "../../lib/scopedEntities";
@@ -400,7 +408,6 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     draftStartFromOrigin ??
     selectedEnvironmentServerConfig?.settings.newWorktreesStartFromOrigin ??
     true;
-  const runtimeMode = selectedProjectDraft.runtimeMode ?? DEFAULT_RUNTIME_MODE;
   const interactionMode = planModeEnabled
     ? (selectedProjectDraft.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE)
     : DEFAULT_PROVIDER_INTERACTION_MODE;
@@ -408,31 +415,25 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   // Stored selections only count while their provider is usable on the
   // server; otherwise the server's default model wins instead of silently
   // targeting a disabled provider. The draft selection is an explicit pick
-  // and passes through as-is; the project default (last used, possibly from
-  // desktop) is implicit and additionally never resolves to a legacy model.
-  const draftModelSelection = resolveSelectableModelSelection(
-    selectedEnvironmentServerConfig,
-    selectedProjectDraft.modelSelection ?? null,
-  );
-  const projectDefaultModelSelection = resolveDefaultableModelSelection(
-    selectedEnvironmentServerConfig,
-    selectedProject?.defaultModelSelection ?? null,
+  // and passes through as-is.
+  const draftModelSelection = selectedProjectDraft.modelSelection ?? null;
+  const selectedModel = useMemo(
+    () =>
+      resolveNewTaskModelSelection({
+        config: selectedEnvironmentServerConfig,
+        draftSelection: draftModelSelection,
+      }),
+    [selectedEnvironmentServerConfig, draftModelSelection],
   );
   const modelOptions = useMemo(
-    () =>
-      buildModelOptions(
-        selectedEnvironmentServerConfig,
-        draftModelSelection ?? projectDefaultModelSelection,
-      ),
-    [selectedEnvironmentServerConfig, draftModelSelection, projectDefaultModelSelection],
+    () => buildModelOptions(selectedEnvironmentServerConfig, selectedModel),
+    [selectedEnvironmentServerConfig, selectedModel],
   );
-
-  const selectedModel =
-    draftModelSelection ??
-    projectDefaultModelSelection ??
-    modelOptions.find((option) => option.isDefault)?.selection ??
-    modelOptions[0]?.selection ??
-    null;
+  const runtimeMode = resolveNewTaskRuntimeMode({
+    config: selectedEnvironmentServerConfig,
+    selectedModel,
+    draftRuntimeMode: selectedProjectDraft.runtimeMode,
+  });
   const selectedModelKey = selectedModel
     ? `${selectedModel.instanceId}:${selectedModel.model}`
     : null;
@@ -462,11 +463,55 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       if (!option) {
         return;
       }
+      const provider = selectedEnvironmentServerConfig?.providers.find(
+        (candidate) => candidate.instanceId === option.selection.instanceId,
+      );
+      const model = provider?.models.find((candidate) => candidate.slug === option.selection.model);
+      const existingOptions =
+        options ??
+        (selectedProjectDraft.modelSelection?.instanceId === option.selection.instanceId
+          ? selectedProjectDraft.modelSelection.options
+          : undefined);
+      const descriptors = model?.capabilities?.optionDescriptors ?? [];
+      const seededOptions =
+        existingOptions !== undefined
+          ? buildProviderOptionSelectionsFromDescriptors(
+              getProviderOptionDescriptors({
+                caps: { optionDescriptors: descriptors },
+                selections: existingOptions,
+              }),
+            )
+          : resolveConfiguredProviderOptionDefaults({
+              settings: selectedEnvironmentServerConfig?.settings ?? {
+                providerNewThreadDefaults: {},
+              },
+              instanceId: option.selection.instanceId,
+              descriptors,
+            });
+      const configuredRuntimeMode =
+        selectedProjectDraft.modelSelection?.instanceId !== option.selection.instanceId &&
+        selectedEnvironmentServerConfig
+          ? resolveConfiguredRuntimeMode(
+              selectedEnvironmentServerConfig.settings,
+              option.selection.instanceId,
+            )
+          : null;
       updateComposerDraftSettings(selectedProjectDraftKey, {
-        modelSelection: options ? { ...option.selection, options } : option.selection,
+        modelSelection: createModelSelection(
+          option.selection.instanceId,
+          option.selection.model,
+          seededOptions,
+        ),
+        ...(configuredRuntimeMode !== null ? { runtimeMode: configuredRuntimeMode } : {}),
       });
     },
-    [modelOptions, selectedProjectDraftKey],
+    [
+      modelOptions,
+      selectedEnvironmentServerConfig,
+      selectedProjectDraft.modelSelection,
+      selectedProjectDraft.runtimeMode,
+      selectedProjectDraftKey,
+    ],
   );
   const setSelectedModelOptions = useCallback(
     (options: ReadonlyArray<ProviderOptionSelection> | undefined) => {

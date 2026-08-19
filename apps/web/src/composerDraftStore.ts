@@ -29,7 +29,11 @@ import * as Schema from "effect/Schema";
 import * as Equal from "effect/Equal";
 import * as Effect from "effect/Effect";
 import { DeepMutable } from "effect/Types";
-import { createModelSelection, normalizeModelSlug } from "@t3tools/shared/model";
+import {
+  createModelSelection,
+  normalizeModelSlug,
+  resolveConfiguredProviderOptionDefaults,
+} from "@t3tools/shared/model";
 import { useMemo } from "react";
 import { getLocalStorageItem } from "./hooks/useLocalStorage";
 import { resolveAppModelSelection, resolveAppModelSelectionForInstance } from "./modelSelection";
@@ -479,7 +483,6 @@ interface ComposerDraftStoreState {
     options?: {
       instanceId?: ProviderInstanceId | null | undefined;
       model?: string | null | undefined;
-      persistSticky?: boolean;
     },
   ) => void;
   setRuntimeMode: (
@@ -1078,15 +1081,41 @@ export function deriveEffectiveComposerModelState(input: {
         activeSelection.model,
       ))
     : baseModel;
-  const modelOptions =
-    modelSelectionByProviderToOptions(input.draft?.modelSelectionByProvider) ??
-    providerSelectionsFromModelSelection(input.threadModelSelection) ??
-    providerSelectionsFromModelSelection(input.projectModelSelection) ??
-    null;
+  const draftOptions = modelSelectionByProviderToOptions(input.draft?.modelSelectionByProvider);
+  const threadOptions = providerSelectionsFromModelSelection(input.threadModelSelection);
+  const projectOptions = providerSelectionsFromModelSelection(input.projectModelSelection);
+  const combinedModelOptions = {
+    ...projectOptions,
+    ...threadOptions,
+    ...draftOptions,
+  };
+  const modelOptions = Object.keys(combinedModelOptions).length > 0 ? combinedModelOptions : null;
+  const activeInstanceId = input.selectedInstanceId ?? activeSelectionInstanceId;
+  const hasStoredActiveOptions =
+    modelOptions?.[activeInstanceId] !== undefined ||
+    (activeInstanceId !== ProviderInstanceId.make(input.selectedProvider) &&
+      modelOptions?.[ProviderInstanceId.make(input.selectedProvider)] !== undefined);
+  const selectedProviderSnapshot = input.providers.find(
+    (provider) => provider.instanceId === activeInstanceId,
+  );
+  const selectedModelSnapshot = selectedProviderSnapshot?.models.find(
+    (model) => model.slug === selectedModel,
+  );
+  const configuredOptions = hasStoredActiveOptions
+    ? undefined
+    : resolveConfiguredProviderOptionDefaults({
+        settings: input.settings,
+        instanceId: activeInstanceId,
+        descriptors: selectedModelSnapshot?.capabilities?.optionDescriptors ?? [],
+      });
+  const effectiveModelOptions =
+    configuredOptions && configuredOptions.length > 0
+      ? { ...modelOptions, [activeInstanceId]: configuredOptions }
+      : modelOptions;
 
   return {
     selectedModel,
-    modelOptions,
+    modelOptions: effectiveModelOptions,
   };
 }
 
@@ -2689,10 +2718,11 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                 // the typed lookup.
                 const instanceKey = provider as ProviderInstanceId;
                 const current = nextMap[instanceKey];
-                nextMap[instanceKey] = {
-                  ...selection,
-                  model: current?.model ?? selection.model,
-                };
+                nextMap[instanceKey] = createModelSelection(
+                  instanceKey,
+                  current?.model ?? selection.model,
+                  current?.options,
+                );
               }
             }
             if (
@@ -2891,35 +2921,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               nextMap[instanceKey] = rest as ModelSelection;
             }
 
-            // Handle sticky persistence
-            let nextStickyMap = state.stickyModelSelectionByProvider;
-            let nextStickyActiveProvider = state.stickyActiveProvider;
-            if (options?.persistSticky === true) {
-              nextStickyMap = { ...state.stickyModelSelectionByProvider };
-              const stickyBase =
-                nextStickyMap[instanceKey] ??
-                base.modelSelectionByProvider[instanceKey] ??
-                createModelSelection(instanceKey, fallbackModel);
-              if (providerOpts) {
-                nextStickyMap[instanceKey] = createModelSelection(
-                  instanceKey,
-                  stickyBase.model,
-                  providerOpts,
-                );
-              } else if ((stickyBase.options?.length ?? 0) > 0) {
-                const { options: _, ...rest } = stickyBase;
-                nextStickyMap[instanceKey] = rest as ModelSelection;
-              }
-              nextStickyActiveProvider = options.instanceId
-                ? instanceKey
-                : (base.activeProvider ?? instanceKey);
-            }
-
-            if (
-              Equal.equals(base.modelSelectionByProvider, nextMap) &&
-              Equal.equals(state.stickyModelSelectionByProvider, nextStickyMap) &&
-              state.stickyActiveProvider === nextStickyActiveProvider
-            ) {
+            if (Equal.equals(base.modelSelectionByProvider, nextMap)) {
               return state;
             }
 
@@ -2935,15 +2937,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               nextDraftsByThreadKey[threadKey] = nextDraft;
             }
 
-            return {
-              draftsByThreadKey: nextDraftsByThreadKey,
-              ...(options?.persistSticky === true
-                ? {
-                    stickyModelSelectionByProvider: nextStickyMap,
-                    stickyActiveProvider: nextStickyActiveProvider,
-                  }
-                : {}),
-            };
+            return { draftsByThreadKey: nextDraftsByThreadKey };
           });
         },
         setRuntimeMode: (threadRef, runtimeMode) => {
