@@ -191,7 +191,7 @@ describe("appearance font variables", () => {
       smoothing: true,
     });
 
-    expect(setProperty).toHaveBeenCalledWith("--font-size-code", "14px");
+    expect(setProperty).toHaveBeenCalledWith("--diffs-font-size", "14px");
     expect(setProperty).toHaveBeenCalledWith("--font-size-tool-output", "10px");
   });
 });
