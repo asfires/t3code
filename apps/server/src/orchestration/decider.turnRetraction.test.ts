@@ -301,7 +301,7 @@ it.layer(NodeServices.layer)("thread.turn.retract decider", (it) => {
     }),
   );
 
-  it.effect("rejects every assistant-visible output form", () =>
+  it.effect("silently ignores retraction after every assistant-visible output form", () =>
     Effect.gen(function* () {
       const variants: OrchestrationThread[] = [
         runningThread({
@@ -352,8 +352,30 @@ it.layer(NodeServices.layer)("thread.turn.retract decider", (it) => {
       ];
 
       for (const [index, thread] of variants.entries()) {
-        const error = yield* Effect.flip(retract(thread, `cmd-output-${index}`));
-        expect(invariantDetail(error)).toContain("assistant-visible output");
+        const event = firstEvent(yield* retract(thread, `cmd-output-${index}`));
+        expect(event).toMatchObject({
+          type: "thread.activity-appended",
+          payload: {
+            threadId: THREAD_ID,
+            activity: {
+              tone: "error",
+              kind: "turn.retract.failed",
+              summary: "Message retract failed",
+              payload: {
+                requestId: `cmd-output-${index}`,
+                messageId: MESSAGE_ID,
+                stage: "eligibility",
+                retryable: false,
+                silent: true,
+              },
+              turnId: TURN_ID,
+              createdAt: NOW,
+            },
+          },
+        });
+        expect(
+          (event.payload as { activity: { payload: { detail: string } } }).activity.payload.detail,
+        ).toContain("assistant-visible output");
       }
     }),
   );

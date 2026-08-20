@@ -1264,10 +1264,35 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         });
       }
       if (targetTurnId !== null && turnHasVisibleAssistantOutput(thread, targetTurnId)) {
-        return yield* new OrchestrationCommandInvariantError({
-          commandType: command.type,
-          detail: `Turn '${targetTurnId}' already has assistant-visible output and can no longer be retracted.`,
+        const eventBase = yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
         });
+        return {
+          ...eventBase,
+          type: "thread.activity-appended",
+          payload: {
+            threadId: command.threadId,
+            activity: {
+              id: eventBase.eventId,
+              tone: "error",
+              kind: "turn.retract.failed",
+              summary: "Message retract failed",
+              payload: {
+                requestId: command.commandId,
+                messageId: command.messageId,
+                stage: "eligibility",
+                retryable: false,
+                detail: `Turn '${targetTurnId}' already has assistant-visible output and can no longer be retracted.`,
+                silent: true,
+              },
+              turnId: targetTurnId,
+              createdAt: command.createdAt,
+            },
+          },
+        };
       }
 
       const baselineTurnCount = thread.checkpoints.reduce(
