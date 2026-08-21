@@ -1,6 +1,7 @@
 import { type ThreadId } from "@t3tools/contracts";
 
 import { extractTrailingElementContexts, type ParsedElementContextEntry } from "./elementContext";
+import { materializePastedText } from "@t3tools/shared/pastedText";
 
 export interface TerminalContextSelection {
   terminalId: string;
@@ -253,7 +254,7 @@ export function deriveDisplayedUserMessageState(prompt: string): DisplayedUserMe
   const extractedTerminal = extractTrailingTerminalContexts(extractedElement.promptText);
   return {
     visibleText: extractedTerminal.promptText,
-    copyText: prompt,
+    copyText: materializePastedText(prompt),
     contextCount: extractedTerminal.contextCount,
     previewTitle: extractedTerminal.previewTitle,
     contexts: extractedTerminal.contexts,

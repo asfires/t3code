@@ -7,6 +7,7 @@ import { OnChangePlugin } from "@lexical/react/LexicalOnChangePlugin";
 import { PlainTextPlugin } from "@lexical/react/LexicalPlainTextPlugin";
 import { type ServerProviderSkill } from "@t3tools/contracts";
 import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
+import { serializePastedText } from "@t3tools/shared/pastedText";
 import {
   $applyNodeReplacement,
   $createRangeSelectionFromDom,
@@ -52,6 +53,7 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
+  useState,
 } from "react";
 
 import {
@@ -72,7 +74,9 @@ import { cn, isMacPlatform } from "~/lib/utils";
 import { basenameOfPath } from "~/pierre-icons";
 import {
   COMPOSER_INLINE_CHIP_DECORATOR_CLASS_NAME,
+  COMPOSER_INLINE_CHIP_CLASS_NAME,
   COMPOSER_INLINE_CHIP_ICON_CLASS_NAME,
+  COMPOSER_INLINE_CHIP_LABEL_CLASS_NAME,
   COMPOSER_INLINE_SKILL_CHIP_CLASS_NAME,
   COMPOSER_INLINE_SKILL_CHIP_LABEL_CLASS_NAME,
   SKILL_CHIP_ICON_SVG,
@@ -124,6 +128,15 @@ type SerializedComposerTerminalContextNode = Spread<
   {
     context: TerminalContextDraft;
     type: "composer-terminal-context";
+    version: 1;
+  },
+  SerializedLexicalNode
+>;
+
+type SerializedComposerPastedTextNode = Spread<
+  {
+    text: string;
+    type: "composer-pasted-text";
     version: 1;
   },
   SerializedLexicalNode
@@ -425,16 +438,117 @@ function $createComposerTerminalContextNode(
   return $applyNodeReplacement(new ComposerTerminalContextNode(context));
 }
 
+function ComposerPastedTextDecorator(props: { text: string; ordinal: number }) {
+  const [expanded, setExpanded] = useState(false);
+  const label = `Pasted text #${props.ordinal}`;
+
+  return (
+    <span
+      className="inline-grid max-w-full gap-1 align-middle"
+      contentEditable={false}
+      spellCheck={false}
+      data-composer-pasted-text="true"
+      data-composer-pasted-text-expanded={expanded ? "true" : "false"}
+    >
+      <button
+        type="button"
+        className={cn(COMPOSER_INLINE_CHIP_CLASS_NAME, "cursor-pointer")}
+        aria-expanded={expanded}
+        aria-label={`${expanded ? "Hide" : "Show"} ${label}`}
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={() => setExpanded((value) => !value)}
+      >
+        <span className={COMPOSER_INLINE_CHIP_LABEL_CLASS_NAME}>{label}</span>
+        <span aria-hidden="true" className="text-[0.8em] text-muted-foreground">
+          {expanded ? "▲" : "▼"}
+        </span>
+      </button>
+      {expanded ? (
+        <span className="max-h-48 max-w-[min(40rem,calc(100vw-4rem))] overflow-auto whitespace-pre-wrap wrap-break-word rounded-md border border-border/70 bg-background/80 px-2 py-1.5 text-left font-mono text-[0.78em] leading-relaxed text-foreground shadow-sm">
+          {props.text}
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+class ComposerPastedTextNode extends DecoratorNode<React.ReactElement> {
+  __text: string;
+  __ordinal: number;
+
+  static override getType(): string {
+    return "composer-pasted-text";
+  }
+
+  static override clone(node: ComposerPastedTextNode): ComposerPastedTextNode {
+    return new ComposerPastedTextNode(node.__text, node.__ordinal, node.__key);
+  }
+
+  static override importJSON(
+    serializedNode: SerializedComposerPastedTextNode,
+  ): ComposerPastedTextNode {
+    return $createComposerPastedTextNode(serializedNode.text);
+  }
+
+  constructor(text: string, ordinal = 1, key?: NodeKey) {
+    super(key);
+    this.__text = text;
+    this.__ordinal = ordinal;
+  }
+
+  override exportJSON(): SerializedComposerPastedTextNode {
+    return {
+      ...super.exportJSON(),
+      text: this.__text,
+      type: "composer-pasted-text",
+      version: 1,
+    };
+  }
+
+  override createDOM(): HTMLElement {
+    const dom = document.createElement("span");
+    dom.className = COMPOSER_INLINE_CHIP_DECORATOR_CLASS_NAME;
+    return dom;
+  }
+
+  override updateDOM(): false {
+    return false;
+  }
+
+  override getTextContent(): string {
+    return serializePastedText(this.__text);
+  }
+
+  override isInline(): true {
+    return true;
+  }
+
+  setOrdinal(ordinal: number): void {
+    const writable = this.getWritable();
+    writable.__ordinal = ordinal;
+  }
+
+  override decorate(): React.ReactElement {
+    return <ComposerPastedTextDecorator text={this.__text} ordinal={this.__ordinal} />;
+  }
+}
+
+function $createComposerPastedTextNode(text: string, ordinal = 1): ComposerPastedTextNode {
+  return $applyNodeReplacement(new ComposerPastedTextNode(text, ordinal));
+}
+
 type ComposerInlineTokenNode =
   | ComposerMentionNode
   | ComposerSkillNode
-  | ComposerTerminalContextNode;
+  | ComposerTerminalContextNode
+  | ComposerPastedTextNode;
 
 function isComposerInlineTokenNode(candidate: unknown): candidate is ComposerInlineTokenNode {
   return (
     candidate instanceof ComposerMentionNode ||
     candidate instanceof ComposerSkillNode ||
-    candidate instanceof ComposerTerminalContextNode
+    candidate instanceof ComposerTerminalContextNode ||
+    candidate instanceof ComposerPastedTextNode
   );
 }
 
@@ -829,6 +943,7 @@ function $setComposerEditorPrompt(
   root.append(paragraph);
 
   const segments = splitPromptIntoComposerSegments(prompt, terminalContexts);
+  let pastedTextOrdinal = 0;
   for (const segment of segments) {
     if (segment.type === "mention") {
       paragraph.append($createComposerMentionNode(segment.path));
@@ -851,8 +966,23 @@ function $setComposerEditorPrompt(
       }
       continue;
     }
+    if (segment.type === "pasted-text") {
+      pastedTextOrdinal += 1;
+      paragraph.append($createComposerPastedTextNode(segment.text, pastedTextOrdinal));
+      continue;
+    }
     $appendTextWithLineBreaks(paragraph, segment.text);
   }
+}
+
+function collectPastedTextNodes(node: LexicalNode): ComposerPastedTextNode[] {
+  if (node instanceof ComposerPastedTextNode) {
+    return [node];
+  }
+  if ($isElementNode(node)) {
+    return node.getChildren().flatMap((child) => collectPastedTextNodes(child));
+  }
+  return [];
 }
 
 function collectTerminalContextIds(node: LexicalNode): string[] {
@@ -1263,10 +1393,44 @@ function ComposerInlineTokenPastePlugin() {
     () =>
       registerComposerInlineTokenPaste(editor, {
         createMentionNode: $createComposerMentionNode,
+        createPastedTextNode: $createComposerPastedTextNode,
         getExpandedAbsoluteOffsetForPoint,
       }),
     [editor],
   );
+
+  return null;
+}
+
+function ComposerPastedTextOrdinalPlugin() {
+  const [editor] = useLexicalComposerContext();
+
+  useEffect(() => {
+    let updateQueued = false;
+    return editor.registerUpdateListener(({ editorState }) => {
+      let needsUpdate = false;
+      editorState.read(() => {
+        needsUpdate = collectPastedTextNodes($getRoot()).some(
+          (node, index) => node.__ordinal !== index + 1,
+        );
+      });
+      if (!needsUpdate || updateQueued) return;
+      updateQueued = true;
+      queueMicrotask(() => {
+        updateQueued = false;
+        editor.update(
+          () => {
+            collectPastedTextNodes($getRoot()).forEach((node, index) => {
+              if (node.__ordinal !== index + 1) {
+                node.setOrdinal(index + 1);
+              }
+            });
+          },
+          { tag: HISTORY_MERGE_TAG },
+        );
+      });
+    });
+  }, [editor]);
 
   return null;
 }
@@ -1839,6 +2003,7 @@ function ComposerPromptEditorInner({
         <ComposerInlineTokenSelectionNormalizePlugin />
         <ComposerInlineTokenBackspacePlugin />
         <ComposerInlineTokenPastePlugin />
+        <ComposerPastedTextOrdinalPlugin />
         <ComposerChipSelectionPlugin />
         <HistoryPlugin />
       </div>
@@ -1869,7 +2034,12 @@ export function ComposerPromptEditor({
     () => ({
       namespace: "t3tools-composer-editor",
       editable: true,
-      nodes: [ComposerMentionNode, ComposerSkillNode, ComposerTerminalContextNode],
+      nodes: [
+        ComposerMentionNode,
+        ComposerSkillNode,
+        ComposerTerminalContextNode,
+        ComposerPastedTextNode,
+      ],
       editorState: () => {
         $setComposerEditorPrompt(
           initialValueRef.current,

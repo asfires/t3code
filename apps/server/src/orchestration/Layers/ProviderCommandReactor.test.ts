@@ -12,6 +12,7 @@ import {
   type VcsRef,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
+import { serializePastedText } from "@t3tools/shared/pastedText";
 import {
   ApprovalRequestId,
   CheckpointRef,
@@ -713,6 +714,7 @@ describe("ProviderCommandReactor", () => {
   it("reacts to thread.turn.start by ensuring session and sending provider turn", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
+    const storedMessageText = `hello ${serializePastedText("exact pasted body")} reactor`;
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -722,7 +724,7 @@ describe("ProviderCommandReactor", () => {
         message: {
           messageId: asMessageId("user-message-1"),
           role: "user",
-          text: "hello reactor",
+          text: storedMessageText,
           attachments: [],
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
@@ -742,12 +744,16 @@ describe("ProviderCommandReactor", () => {
       },
       runtimeMode: "approval-required",
     });
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+      input: "hello exact pasted body reactor",
+    });
 
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.status).toBe("starting");
     expect(thread?.session?.runtimeMode).toBe("approval-required");
+    expect(thread?.messages[0]?.text).toBe(storedMessageText);
   });
 
   it("recreates a pruned managed worktree before resuming a provider turn", async () => {

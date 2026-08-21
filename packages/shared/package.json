@@ -175,6 +175,10 @@
       "types": "./src/composerInlineTokens.ts",
       "import": "./src/composerInlineTokens.ts"
     },
+    "./pastedText": {
+      "types": "./src/pastedText.ts",
+      "import": "./src/pastedText.ts"
+    },
     "./terminalLabels": {
       "types": "./src/terminalLabels.ts",
       "import": "./src/terminalLabels.ts"

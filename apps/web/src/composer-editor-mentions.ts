@@ -6,6 +6,7 @@ import {
   collectComposerInlineTokens,
   type ComposerInlineToken,
 } from "@t3tools/shared/composerInlineTokens";
+import { splitPastedTextSegments } from "@t3tools/shared/pastedText";
 
 export type ComposerPromptSegment =
   | {
@@ -24,6 +25,11 @@ export type ComposerPromptSegment =
   | {
       type: "terminal-context";
       context: TerminalContextDraft | null;
+    }
+  | {
+      type: "pasted-text";
+      text: string;
+      source: string;
     };
 
 function rangeIncludesIndex(start: number, end: number, index: number): boolean {
@@ -52,41 +58,61 @@ function forEachPromptSegmentSlice(
       | {
           type: "terminal-context";
           promptOffset: number;
+        }
+      | {
+          type: "pasted-text";
+          text: string;
+          source: string;
+          promptOffset: number;
         },
   ) => boolean | void,
 ): boolean {
-  let textCursor = 0;
-
-  for (let index = 0; index < prompt.length; index += 1) {
-    if (prompt[index] !== INLINE_TERMINAL_CONTEXT_PLACEHOLDER) {
+  let promptOffset = 0;
+  for (const pastedTextSegment of splitPastedTextSegments(prompt)) {
+    if (pastedTextSegment.type === "pasted-text") {
+      if (visitor({ ...pastedTextSegment, promptOffset }) === true) {
+        return true;
+      }
+      promptOffset += pastedTextSegment.source.length;
       continue;
     }
 
+    let textCursor = 0;
+    for (let index = 0; index < pastedTextSegment.text.length; index += 1) {
+      if (pastedTextSegment.text[index] !== INLINE_TERMINAL_CONTEXT_PLACEHOLDER) {
+        continue;
+      }
+      if (
+        index > textCursor &&
+        visitor({
+          type: "text",
+          text: pastedTextSegment.text.slice(textCursor, index),
+          promptOffset: promptOffset + textCursor,
+        }) === true
+      ) {
+        return true;
+      }
+      if (
+        visitor({
+          type: "terminal-context",
+          promptOffset: promptOffset + index,
+        }) === true
+      ) {
+        return true;
+      }
+      textCursor = index + 1;
+    }
     if (
-      index > textCursor &&
+      textCursor < pastedTextSegment.text.length &&
       visitor({
         type: "text",
-        text: prompt.slice(textCursor, index),
-        promptOffset: textCursor,
+        text: pastedTextSegment.text.slice(textCursor),
+        promptOffset: promptOffset + textCursor,
       }) === true
     ) {
       return true;
     }
-    if (visitor({ type: "terminal-context", promptOffset: index }) === true) {
-      return true;
-    }
-    textCursor = index + 1;
-  }
-
-  if (
-    textCursor < prompt.length &&
-    visitor({
-      type: "text",
-      text: prompt.slice(textCursor),
-      promptOffset: textCursor,
-    }) === true
-  ) {
-    return true;
+    promptOffset += pastedTextSegment.text.length;
   }
 
   return false;
@@ -112,13 +138,19 @@ function forEachMentionMatch(
   ) => boolean | void,
 ): boolean {
   return forEachPromptTextSlice(prompt, (text, promptOffset) => {
-    for (const match of collectComposerInlineTokens(text)) {
-      if (match.type !== "mention") {
-        continue;
+    let segmentOffset = 0;
+    for (const segment of splitPastedTextSegments(text)) {
+      if (segment.type === "text") {
+        for (const match of collectComposerInlineTokens(segment.text)) {
+          if (match.type !== "mention") {
+            continue;
+          }
+          if (visitor(match, promptOffset + segmentOffset) === true) {
+            return true;
+          }
+        }
       }
-      if (visitor(match, promptOffset) === true) {
-        return true;
-      }
+      segmentOffset += segment.type === "text" ? segment.text.length : segment.source.length;
     }
     return false;
   });
@@ -130,32 +162,40 @@ function splitPromptTextIntoComposerSegments(text: string): ComposerPromptSegmen
     return segments;
   }
 
-  const tokenMatches = collectComposerInlineTokens(text);
-  let cursor = 0;
-  for (const match of tokenMatches) {
-    if (match.start < cursor) {
+  for (const pastedTextSegment of splitPastedTextSegments(text)) {
+    if (pastedTextSegment.type === "pasted-text") {
+      segments.push(pastedTextSegment);
       continue;
     }
 
-    if (match.start > cursor) {
-      pushTextSegment(segments, text.slice(cursor, match.start));
+    const plainText = pastedTextSegment.text;
+    const tokenMatches = collectComposerInlineTokens(plainText);
+    let cursor = 0;
+    for (const match of tokenMatches) {
+      if (match.start < cursor) {
+        continue;
+      }
+
+      if (match.start > cursor) {
+        pushTextSegment(segments, plainText.slice(cursor, match.start));
+      }
+
+      if (match.type === "mention") {
+        segments.push({
+          type: "mention",
+          path: match.value,
+          source: match.source,
+        });
+      } else {
+        segments.push({ type: "skill", name: match.value });
+      }
+
+      cursor = match.end;
     }
 
-    if (match.type === "mention") {
-      segments.push({
-        type: "mention",
-        path: match.value,
-        source: match.source,
-      });
-    } else {
-      segments.push({ type: "skill", name: match.value });
+    if (cursor < plainText.length) {
+      pushTextSegment(segments, plainText.slice(cursor));
     }
-
-    cursor = match.end;
-  }
-
-  if (cursor < text.length) {
-    pushTextSegment(segments, text.slice(cursor));
   }
 
   return segments;
@@ -208,6 +248,15 @@ export function splitPromptIntoComposerSegments(
   forEachPromptSegmentSlice(prompt, (slice) => {
     if (slice.type === "text") {
       segments.push(...splitPromptTextIntoComposerSegments(slice.text));
+      return false;
+    }
+
+    if (slice.type === "pasted-text") {
+      segments.push({
+        type: "pasted-text",
+        text: slice.text,
+        source: slice.source,
+      });
       return false;
     }
 

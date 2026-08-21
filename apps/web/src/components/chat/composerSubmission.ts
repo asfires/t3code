@@ -1,4 +1,5 @@
 import { PROVIDER_SEND_TURN_MAX_INPUT_CHARS } from "@t3tools/contracts";
+import { materializePastedText } from "@t3tools/shared/pastedText";
 
 type ComposerSubmitEvent = { preventDefault: () => void };
 
@@ -9,7 +10,8 @@ type ComposerSubmissionInput = {
 };
 
 export function getComposerPromptLengthValidationMessage(prompt: string): string | null {
-  const excessCharacters = prompt.trim().length - PROVIDER_SEND_TURN_MAX_INPUT_CHARS;
+  const excessCharacters =
+    materializePastedText(prompt).trim().length - PROVIDER_SEND_TURN_MAX_INPUT_CHARS;
   if (excessCharacters <= 0) return null;
 
   const characterLabel = excessCharacters === 1 ? "character" : "characters";

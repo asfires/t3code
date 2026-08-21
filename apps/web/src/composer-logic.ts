@@ -41,7 +41,8 @@ const isInlineTokenSegment = (
     | { type: "text"; text: string }
     | { type: "mention" }
     | { type: "skill" }
-    | { type: "terminal-context" },
+    | { type: "terminal-context" }
+    | { type: "pasted-text" },
 ): boolean => segment.type !== "text";
 
 function clampCursor(text: string, cursor: number): number {
@@ -104,6 +105,15 @@ export function expandCollapsedComposerCursor(text: string, cursorInput: number)
       expandedCursor += 1;
       continue;
     }
+    if (segment.type === "pasted-text") {
+      const expandedLength = segment.source.length;
+      if (remaining <= 1) {
+        return expandedCursor + (remaining === 0 ? 0 : expandedLength);
+      }
+      remaining -= 1;
+      expandedCursor += expandedLength;
+      continue;
+    }
 
     const segmentLength = segment.text.length;
     if (remaining <= segmentLength) {
@@ -121,7 +131,8 @@ function collapsedSegmentLength(
     | { type: "text"; text: string }
     | { type: "mention" }
     | { type: "skill" }
-    | { type: "terminal-context" },
+    | { type: "terminal-context" }
+    | { type: "pasted-text" },
 ): number {
   if (segment.type === "text") {
     return segment.text.length;
@@ -135,6 +146,7 @@ function clampCollapsedComposerCursorForSegments(
     | { type: "mention" }
     | { type: "skill" }
     | { type: "terminal-context" }
+    | { type: "pasted-text" }
   >,
   cursorInput: number,
 ): number {
@@ -195,6 +207,18 @@ export function collapseExpandedComposerCursor(text: string, cursorInput: number
         return collapsedCursor + remaining;
       }
       remaining -= 1;
+      collapsedCursor += 1;
+      continue;
+    }
+    if (segment.type === "pasted-text") {
+      const expandedLength = segment.source.length;
+      if (remaining === 0) {
+        return collapsedCursor;
+      }
+      if (remaining <= expandedLength) {
+        return collapsedCursor + 1;
+      }
+      remaining -= expandedLength;
       collapsedCursor += 1;
       continue;
     }

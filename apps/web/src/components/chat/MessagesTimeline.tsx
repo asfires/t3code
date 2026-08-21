@@ -15,6 +15,7 @@ import {
 const EMPTY_AGENT_PANEL_MODEL = emptyAgentPanelModel();
 const NOOP_OPEN_AGENTS = () => {};
 import { resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
+import { splitPastedTextSegments, summarizePastedText } from "@t3tools/shared/pastedText";
 import {
   createContext,
   Fragment,
@@ -671,7 +672,7 @@ function deriveTimelineMinimapItems(
     items.push({
       id: row.id,
       rowIndex: index,
-      userText: compactMinimapPreview(row.message.text),
+      userText: compactMinimapPreview(summarizePastedText(row.message.text)),
       assistantText: compactMinimapPreview(resolveFinalAssistantTextForTurn(rows, index)),
     });
   }
@@ -1689,8 +1690,13 @@ const CollapsibleUserMessageBody = memo(function CollapsibleUserMessageBody(prop
   footer?: ReactNode;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const hasVisibleBody = props.text.trim().length > 0 || props.terminalContexts.length > 0;
-  const canCollapse = hasVisibleBody && shouldCollapseUserMessage(props.text);
+  const presentationText = summarizePastedText(props.text);
+  const hasPastedText = splitPastedTextSegments(props.text).some(
+    (segment) => segment.type === "pasted-text",
+  );
+  const hasVisibleBody = presentationText.trim().length > 0 || props.terminalContexts.length > 0;
+  const canCollapse =
+    !hasPastedText && hasVisibleBody && shouldCollapseUserMessage(presentationText);
   const isCollapsed = canCollapse && !expanded;
 
   return (
@@ -1749,6 +1755,44 @@ const CollapsibleUserMessageBody = memo(function CollapsibleUserMessageBody(prop
   );
 });
 
+const UserMessagePastedTextBlock = memo(function UserMessagePastedTextBlock(props: {
+  text: string;
+  ordinal: number;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const label = `Pasted text #${props.ordinal}`;
+
+  return (
+    <div
+      className="my-1.5 flex max-w-full flex-col items-start gap-1"
+      data-user-message-pasted-text="true"
+      data-user-message-pasted-text-expanded={expanded ? "true" : "false"}
+    >
+      <Button
+        type="button"
+        size="xs"
+        variant="ghost"
+        aria-expanded={expanded}
+        aria-label={`${expanded ? "Hide" : "Show"} ${label}`}
+        onClick={() => setExpanded((value) => !value)}
+        className="h-6 max-w-full gap-1.5 rounded-md border border-border/70 bg-accent/40 px-2 font-medium text-message-foreground text-xs hover:bg-accent/65"
+      >
+        <span className="truncate">{label}</span>
+        {expanded ? (
+          <ChevronDownIcon className="size-3 shrink-0" aria-hidden />
+        ) : (
+          <ChevronRightIcon className="size-3 shrink-0" aria-hidden />
+        )}
+      </Button>
+      {expanded ? (
+        <pre className="max-h-80 max-w-full overflow-auto whitespace-pre-wrap wrap-break-word rounded-lg border border-border/70 bg-background/70 p-3 font-mono text-message-foreground text-xs leading-relaxed">
+          {props.text}
+        </pre>
+      ) : null}
+    </div>
+  );
+});
+
 const UserMessageBody = memo(function UserMessageBody(props: {
   text: string;
   terminalContexts: ParsedTerminalContextEntry[];
@@ -1756,6 +1800,7 @@ const UserMessageBody = memo(function UserMessageBody(props: {
   markdownCwd: string | undefined;
 }) {
   const ctx = use(TimelineRowCtx);
+  let pastedTextOrdinal = 0;
   const renderInlineMarkdownSegment = (text: string, key: string) => {
     const leadingWhitespace = /^\s+/.exec(text)?.[0] ?? "";
     const textWithoutLeadingWhitespace = text.slice(leadingWhitespace.length);
@@ -1783,6 +1828,33 @@ const UserMessageBody = memo(function UserMessageBody(props: {
       </Fragment>
     );
   };
+  const renderPastedAwareMarkdownSegment = (text: string, key: string) => {
+    const segments = splitPastedTextSegments(text);
+    if (!segments.some((segment) => segment.type === "pasted-text")) {
+      return renderInlineMarkdownSegment(text, key);
+    }
+    let segmentOffset = 0;
+
+    return (
+      <Fragment key={key}>
+        {segments.map((segment) => {
+          const currentOffset = segmentOffset;
+          segmentOffset += segment.type === "text" ? segment.text.length : segment.source.length;
+          if (segment.type === "text") {
+            return renderInlineMarkdownSegment(segment.text, `${key}:text:${currentOffset}`);
+          }
+          pastedTextOrdinal += 1;
+          return (
+            <UserMessagePastedTextBlock
+              key={`${key}:pasted-text:${currentOffset}`}
+              text={segment.text}
+              ordinal={pastedTextOrdinal}
+            />
+          );
+        })}
+      </Fragment>
+    );
+  };
 
   const reviewCommentSegments = parseReviewCommentMessageSegments(props.text);
   if (reviewCommentSegments.some((segment) => segment.kind === "review-comment")) {
@@ -1792,15 +1864,7 @@ const UserMessageBody = memo(function UserMessageBody(props: {
           segment.kind === "text" ? (
             segment.text.trim().length > 0 ? (
               <div key={segment.id} className="wrap-break-word">
-                <ChatMarkdown
-                  text={segment.text.trim()}
-                  cwd={props.markdownCwd}
-                  threadRef={ctx.threadRef ?? undefined}
-                  skills={props.skills}
-                  className="text-message-foreground"
-                  lineBreaks
-                  parseRawHtml={false}
-                />
+                {renderPastedAwareMarkdownSegment(segment.text.trim(), segment.id)}
               </div>
             ) : null
           ) : (
@@ -1831,7 +1895,7 @@ const UserMessageBody = memo(function UserMessageBody(props: {
         }
         if (matchIndex > cursor) {
           inlineNodes.push(
-            renderInlineMarkdownSegment(
+            renderPastedAwareMarkdownSegment(
               props.text.slice(cursor, matchIndex),
               `user-terminal-context-inline-before:${context.header}:${cursor}`,
             ),
@@ -1849,7 +1913,7 @@ const UserMessageBody = memo(function UserMessageBody(props: {
       if (inlineNodes.length > 0) {
         if (cursor < props.text.length) {
           inlineNodes.push(
-            renderInlineMarkdownSegment(
+            renderPastedAwareMarkdownSegment(
               props.text.slice(cursor),
               `user-message-terminal-context-inline-rest:${cursor}`,
             ),
@@ -1880,16 +1944,7 @@ const UserMessageBody = memo(function UserMessageBody(props: {
 
     if (props.text.length > 0) {
       inlineNodes.push(
-        <ChatMarkdown
-          key="user-message-terminal-context-inline-text"
-          text={props.text}
-          cwd={props.markdownCwd}
-          threadRef={ctx.threadRef ?? undefined}
-          skills={props.skills}
-          className="text-message-foreground"
-          lineBreaks
-          parseRawHtml={false}
-        />,
+        renderPastedAwareMarkdownSegment(props.text, "user-message-terminal-context-inline-text"),
       );
     } else if (inlinePrefix.length === 0) {
       return null;
@@ -1906,17 +1961,7 @@ const UserMessageBody = memo(function UserMessageBody(props: {
     return null;
   }
 
-  return (
-    <ChatMarkdown
-      text={props.text}
-      cwd={props.markdownCwd}
-      threadRef={ctx.threadRef ?? undefined}
-      skills={props.skills}
-      className="text-message-foreground"
-      lineBreaks
-      parseRawHtml={false}
-    />
-  );
+  return renderPastedAwareMarkdownSegment(props.text, "user-message-text");
 });
 
 function UserMessageReviewCommentCard({ comment }: { comment: ReviewCommentContext }) {
