@@ -50,6 +50,7 @@ import { CHAT_LIST_ANCHOR_OFFSET } from "@t3tools/shared/chatList";
 import { projectScriptCwd, projectScriptRuntimeEnv } from "@t3tools/shared/projectScripts";
 import { truncate } from "@t3tools/shared/String";
 import { nextTerminalId, resolveTerminalSessionLabel } from "@t3tools/shared/terminalLabels";
+import { materializePastedText } from "@t3tools/shared/pastedText";
 import { Debouncer } from "@tanstack/react-pacer";
 import { useAtomValue } from "@effect/atom-react";
 import {
@@ -214,6 +215,7 @@ import {
 import {
   appendTerminalContextsToPrompt,
   formatTerminalContextLabel,
+  stripInlineTerminalContextPlaceholders,
   type TerminalContextDraft,
   type TerminalContextSelection,
 } from "../lib/terminalContext";
@@ -5201,7 +5203,7 @@ function ChatViewContent(props: ChatViewProps) {
     });
     if (!directAnnotation && showPlanFollowUpPrompt && activeProposedPlan) {
       const followUp = resolvePlanFollowUpSubmission({
-        draftText: trimmed,
+        draftText: trimmed.length > 0 ? stripInlineTerminalContextPlaceholders(promptForSend) : "",
         planMarkdown: activeProposedPlan.planMarkdown,
       });
       const outgoingFollowUpText = formatOutgoingPrompt({
@@ -5211,7 +5213,10 @@ function ChatViewContent(props: ChatViewProps) {
         effort: ctxSelectedPromptEffort,
         text: followUp.text.trim(),
       });
-      if (composerRef.current?.validateProviderInput(outgoingFollowUpText) === false) {
+      if (
+        composerRef.current?.validateProviderInput(materializePastedText(outgoingFollowUpText)) ===
+        false
+      ) {
         return;
       }
       promptRef.current = "";
@@ -5307,7 +5312,10 @@ function ChatViewContent(props: ChatViewProps) {
       effort: ctxSelectedPromptEffort,
       text: messageTextForSend || IMAGE_ONLY_MESSAGE_PLACEHOLDER,
     });
-    if (composerRef.current?.validateProviderInput(outgoingMessageText) === false) {
+    if (
+      composerRef.current?.validateProviderInput(materializePastedText(outgoingMessageText)) ===
+      false
+    ) {
       return;
     }
 

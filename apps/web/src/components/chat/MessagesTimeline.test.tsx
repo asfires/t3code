@@ -3,6 +3,7 @@ import { createRef, type ReactNode, type Ref } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeAll, describe, expect, it, vi } from "vite-plus/test";
 import type { LegendListRef } from "@legendapp/list/react";
+import { serializePastedText } from "@t3tools/shared/pastedText";
 
 vi.mock("@legendapp/list/react", async () => {
   const legendListTestId = "legend-list";
@@ -1025,6 +1026,27 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toContain("Show full message");
     expect(markup).toContain('data-user-message-collapsible="false"');
     expect(markup).toContain("rounded-2xl bg-message p-3");
+  });
+
+  it("renders each sent pasted block as a separately numbered disclosure", () => {
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          buildUserTimelineEntry(
+            `before ${serializePastedText("first hidden body")} between ${serializePastedText("second hidden body")} after`,
+          ),
+        ]}
+      />,
+    );
+
+    expect(markup).toContain("Pasted text #1");
+    expect(markup).toContain("Pasted text #2");
+    expect(markup).toContain('data-user-message-pasted-text-expanded="false"');
+    expect(markup).not.toContain("first hidden body");
+    expect(markup).not.toContain("second hidden body");
+    expect(markup).not.toContain("Show full message");
+    expect(markup).not.toContain("t3-pasted-text");
   });
 
   it("preserves arbitrary XML-like tags and comparisons in rendered user messages", async () => {

@@ -1,4 +1,5 @@
 import type { ChatMessage } from "./types";
+import { materializePastedText } from "@t3tools/shared/pastedText";
 
 export interface BootstrapInputResult {
   text: string;
@@ -33,7 +34,7 @@ function attachmentSummary(message: ChatMessage): string | null {
 }
 
 function buildMessageBlock(message: ChatMessage): string {
-  const text = message.text;
+  const text = message.role === "user" ? materializePastedText(message.text) : message.text;
   const attachments = attachmentSummary(message);
 
   if (text && attachments) {
@@ -62,15 +63,19 @@ export function buildBootstrapInput(
   latestPrompt: string,
   maxChars: number,
 ): BootstrapInputResult {
+  const materializedLatestPrompt = materializePastedText(latestPrompt);
   const budget = Number.isFinite(maxChars) ? Math.max(1, Math.floor(maxChars)) : 1;
-  const promptOnly = latestPrompt.length <= budget ? latestPrompt : latestPrompt.slice(0, budget);
+  const promptOnly =
+    materializedLatestPrompt.length <= budget
+      ? materializedLatestPrompt
+      : materializedLatestPrompt.slice(0, budget);
 
   if (previousMessages.length === 0) {
     return {
       text: promptOnly,
       includedCount: 0,
       omittedCount: 0,
-      truncated: promptOnly.length !== latestPrompt.length,
+      truncated: promptOnly.length !== materializedLatestPrompt.length,
     };
   }
 
@@ -100,7 +105,7 @@ export function buildBootstrapInput(
       omittedCount > 0
         ? `${OMITTED_SUMMARY(omittedCount)}\n\n${nextChronological.join("\n\n")}`
         : nextChronological.join("\n\n");
-    if (!finalizeWithPrompt(transcriptBody, latestPrompt, budget)) {
+    if (!finalizeWithPrompt(transcriptBody, materializedLatestPrompt, budget)) {
       break;
     }
     includedNewestFirst = nextNewestFirst;
@@ -115,13 +120,13 @@ export function buildBootstrapInput(
           ? `${OMITTED_SUMMARY(omittedCount)}\n\n${includedChronological.join("\n\n")}`
           : OMITTED_SUMMARY(omittedCount)
         : includedChronological.join("\n\n");
-    const finalized = finalizeWithPrompt(transcriptBody, latestPrompt, budget);
+    const finalized = finalizeWithPrompt(transcriptBody, materializedLatestPrompt, budget);
     if (finalized) {
       return {
         text: finalized,
         includedCount: includedChronological.length,
         omittedCount,
-        truncated: omittedCount > 0 || latestPrompt.length !== promptOnly.length,
+        truncated: omittedCount > 0 || materializedLatestPrompt.length !== promptOnly.length,
       };
     }
 

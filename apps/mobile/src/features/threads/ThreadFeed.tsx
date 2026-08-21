@@ -4,6 +4,7 @@ import { type LegendListRef } from "@legendapp/list/react-native";
 import type { EnvironmentId, MessageId, ThreadId, TurnId } from "@t3tools/contracts";
 import { CHAT_LIST_ANCHOR_OFFSET, resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
 import { formatElapsed } from "@t3tools/shared/orchestrationTiming";
+import { materializePastedText, splitPastedTextSegments } from "@t3tools/shared/pastedText";
 import { SymbolView } from "../../components/AppSymbol";
 import { HeaderHeightContext } from "@react-navigation/elements";
 import { useNavigation } from "@react-navigation/native";
@@ -924,7 +925,7 @@ function renderFeedEntry(
             {message.text.trim().length > 0 ? (
               <CopyTextButton
                 accessibilityLabel="Copy message"
-                text={message.text}
+                text={materializePastedText(message.text)}
                 tintColor={iconSubtleColor}
                 buttonSize={28}
                 iconSize={13}
@@ -1040,6 +1041,33 @@ function UserMessageContent(props: {
   readonly skills?: ReadonlyArray<SelectableMarkdownSkill>;
   readonly onLinkPress: (href: string) => void;
 }) {
+  const pastedTextSegments = splitPastedTextSegments(props.text);
+  if (pastedTextSegments.some((segment) => segment.type === "pasted-text")) {
+    let pastedTextOrdinal = 0;
+    let segmentOffset = 0;
+    return (
+      <View className="w-full gap-2">
+        {pastedTextSegments.map((segment) => {
+          const currentOffset = segmentOffset;
+          segmentOffset += segment.type === "text" ? segment.text.length : segment.source.length;
+          if (segment.type === "pasted-text") {
+            pastedTextOrdinal += 1;
+            return (
+              <MobilePastedTextBlock
+                key={`pasted-text:${currentOffset}`}
+                text={segment.text}
+                ordinal={pastedTextOrdinal}
+              />
+            );
+          }
+          return segment.text.trim().length > 0 ? (
+            <UserMessageContent key={`text:${currentOffset}`} {...props} text={segment.text} />
+          ) : null;
+        })}
+      </View>
+    );
+  }
+
   const segments = parseReviewCommentMessageSegments(props.text);
   const hasReviewComment = segments.some((segment) => segment.kind === "review-comment");
   if (!hasReviewComment) {
@@ -1108,6 +1136,41 @@ function UserMessageContent(props: {
     </View>
   );
 }
+
+const MobilePastedTextBlock = memo(function MobilePastedTextBlock(props: {
+  readonly text: string;
+  readonly ordinal: number;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const iconColor = useThemeColor("--color-icon-muted");
+
+  return (
+    <View className="max-w-full items-start gap-1">
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ expanded }}
+        accessibilityLabel={`${expanded ? "Hide" : "Show"} pasted text ${props.ordinal}`}
+        className="flex-row items-center gap-1.5 rounded-lg border border-border bg-foreground/5 px-2 py-1"
+        onPress={() => setExpanded((value) => !value)}
+      >
+        <Text className="font-t3-medium text-xs text-foreground">Pasted text #{props.ordinal}</Text>
+        <SymbolView
+          name={expanded ? "chevron.down" : "chevron.right"}
+          size={12}
+          tintColor={iconColor}
+          type="monochrome"
+        />
+      </Pressable>
+      {expanded ? (
+        <ScrollView className="max-h-72 max-w-full rounded-xl border border-border bg-background/50 p-2.5">
+          <Text selectable className="font-mono text-xs leading-5 text-foreground">
+            {props.text}
+          </Text>
+        </ScrollView>
+      ) : null}
+    </View>
+  );
+});
 
 const ReviewCommentCard = memo(function ReviewCommentCard(props: {
   readonly comment: ReviewInlineComment;

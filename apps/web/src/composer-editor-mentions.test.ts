@@ -5,6 +5,7 @@ import {
   splitPromptIntoComposerSegments,
 } from "./composer-editor-mentions";
 import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "./lib/terminalContext";
+import { serializePastedText } from "@t3tools/shared/pastedText";
 
 describe("splitPromptIntoComposerSegments", () => {
   it("splits mention tokens followed by whitespace into mention segments", () => {
@@ -165,6 +166,17 @@ describe("splitPromptIntoComposerSegments", () => {
       { type: "text", text: " " },
     ]);
   });
+
+  it("keeps pasted text atomic even when it contains mentions and context placeholders", () => {
+    const pasted = `@AGENTS.md ${INLINE_TERMINAL_CONTEXT_PLACEHOLDER}\nmore text`;
+    const source = serializePastedText(pasted);
+
+    expect(splitPromptIntoComposerSegments(`before ${source} after`)).toEqual([
+      { type: "text", text: "before " },
+      { type: "pasted-text", text: pasted, source },
+      { type: "text", text: " after" },
+    ]);
+  });
 });
 
 describe("selectionTouchesMentionBoundary", () => {
@@ -228,5 +240,10 @@ describe("selectionTouchesMentionBoundary", () => {
         prompt.length,
       ),
     ).toBe(true);
+  });
+
+  it("does not treat mention-like text inside a pasted block as a mention boundary", () => {
+    const prompt = serializePastedText("@AGENTS.md followed by text");
+    expect(selectionTouchesMentionBoundary(prompt, 0, prompt.length)).toBe(false);
   });
 });

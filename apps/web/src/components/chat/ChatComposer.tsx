@@ -21,6 +21,7 @@ import {
 import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
 import { createModelSelection, normalizeModelSlug } from "@t3tools/shared/model";
+import { summarizePastedText } from "@t3tools/shared/pastedText";
 import {
   memo,
   type ReactNode,
@@ -2818,7 +2819,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     onClick={expandMobileComposer}
                     aria-label="Write custom answer"
                   >
-                    {activePendingProgress?.customAnswer || "Write custom answer"}
+                    {activePendingProgress?.customAnswer
+                      ? summarizePastedText(activePendingProgress.customAnswer)
+                      : "Write custom answer"}
                   </button>
                   {activePendingProgress?.activeQuestion?.multiSelect ? (
                     <ComposerPrimaryActions
@@ -2854,7 +2857,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 type="button"
                 className={cn(
                   "min-w-0 flex-1 truncate bg-transparent p-0 text-left text-[14px] focus:outline-none",
-                  (activePendingProgress ? activePendingProgress.customAnswer : prompt.trim())
+                  (
+                    activePendingProgress
+                      ? activePendingProgress.customAnswer
+                      : summarizePastedText(prompt).trim()
+                  )
                     ? "text-foreground"
                     : "text-placeholder",
                 )}
@@ -2863,9 +2870,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 aria-label="Expand composer"
               >
                 {activePendingProgress
-                  ? activePendingProgress.customAnswer ||
+                  ? summarizePastedText(activePendingProgress.customAnswer) ||
                     "Type your own answer, or leave this blank to use the selected option"
-                  : prompt.trim() ||
+                  : summarizePastedText(prompt).trim() ||
                     (noProviderAvailable ? "Enable a provider in Settings" : "Ask anything...")}
               </button>
               <button
