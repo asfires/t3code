@@ -21,6 +21,7 @@ import {
   type TerminalContextDraft,
 } from "../lib/terminalContext";
 import type { DraftThreadEnvMode } from "../composerDraftStore";
+import { materializePastedText } from "@t3tools/shared/pastedText";
 
 export const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "t3code:last-invoked-script-by-project";
 export const MAX_HIDDEN_MOUNTED_TERMINAL_THREADS = 10;
@@ -289,7 +290,9 @@ export function deriveComposerSendState(options: {
   expiredTerminalContextCount: number;
   hasSendableContent: boolean;
 } {
-  const trimmedPrompt = stripInlineTerminalContextPlaceholders(options.prompt).trim();
+  const trimmedPrompt = stripInlineTerminalContextPlaceholders(
+    materializePastedText(options.prompt),
+  ).trim();
   const sendableTerminalContexts = filterTerminalContextsWithText(options.terminalContexts);
   const expiredTerminalContextCount =
     options.terminalContexts.length - sendableTerminalContexts.length;

@@ -13,6 +13,7 @@ import {
   shouldSubmitComposerOnEnter,
 } from "./composer-logic";
 import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "./lib/terminalContext";
+import { serializePastedText } from "@t3tools/shared/pastedText";
 
 describe("shouldSubmitComposerOnEnter", () => {
   it("submits plain Enter on desktop", () => {
@@ -251,6 +252,15 @@ describe("expandCollapsedComposerCursor", () => {
       expandedCursorAfterSkill,
     );
   });
+
+  it("maps a collapsed pasted-text cursor to the end of its presentation envelope", () => {
+    const pasted = serializePastedText("long pasted body");
+    const text = `before ${pasted} after`;
+
+    expect(expandCollapsedComposerCursor(text, "before ".length + 1)).toBe(
+      "before ".length + pasted.length,
+    );
+  });
 });
 
 describe("collapseExpandedComposerCursor", () => {
@@ -313,6 +323,15 @@ describe("collapseExpandedComposerCursor", () => {
 
     expect(collapseExpandedComposerCursor(text, expandedCursorAfterSkill)).toBe(
       collapsedCursorAfterSkill,
+    );
+  });
+
+  it("maps an expanded pasted-text cursor back to one atomic position", () => {
+    const pasted = serializePastedText("long pasted body");
+    const text = `before ${pasted} after`;
+
+    expect(collapseExpandedComposerCursor(text, "before ".length + pasted.length)).toBe(
+      "before ".length + 1,
     );
   });
 });

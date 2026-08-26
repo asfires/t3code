@@ -1,4 +1,5 @@
 import { collectComposerInlineTokens } from "@t3tools/shared/composerInlineTokens";
+import { shouldPresentPasteAsBlock } from "@t3tools/shared/pastedText";
 import {
   $createLineBreakNode,
   $createTextNode,
@@ -13,6 +14,7 @@ import {
 
 interface ComposerInlineTokenPasteOptions {
   createMentionNode: (path: string) => LexicalNode;
+  createPastedTextNode: (text: string) => LexicalNode;
   getExpandedAbsoluteOffsetForPoint: (node: LexicalNode, pointOffset: number) => number;
 }
 
@@ -33,6 +35,15 @@ export function registerComposerInlineTokenPaste(
       if (text.length === 0) {
         return false;
       }
+      const selection = $getSelection();
+      if (!$isRangeSelection(selection)) {
+        return false;
+      }
+      if (shouldPresentPasteAsBlock(text)) {
+        selection.insertNodes([options.createPastedTextNode(text)]);
+        event.preventDefault();
+        return true;
+      }
       // Token grammar requires trailing whitespace; a virtual newline lets a
       // mention at the very end of the pasted text still parse.
       const mentions = collectComposerInlineTokens(`${text}\n`).filter(
@@ -45,10 +56,6 @@ export function registerComposerInlineTokenPaste(
       // Lexical command listeners already run inside an editor update. Starting
       // a nested update here queues the mention insertion until after this
       // listener returns, which lets the plain-text paste handler run as well.
-      const selection = $getSelection();
-      if (!$isRangeSelection(selection)) {
-        return false;
-      }
       const nodes: LexicalNode[] = [];
       const appendText = (value: string) => {
         const lines = value.split("\n");

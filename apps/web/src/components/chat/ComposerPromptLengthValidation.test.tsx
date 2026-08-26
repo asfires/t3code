@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { getComposerPromptLengthValidationMessage } from "./composerSubmission";
 import { ComposerPromptLengthValidation } from "./ComposerPromptLengthValidation";
+import { serializePastedText } from "@t3tools/shared/pastedText";
 
 describe("ComposerPromptLengthValidation", () => {
   it("renders oversized prompt feedback as an actionable composer alert", () => {
@@ -19,5 +20,13 @@ describe("ComposerPromptLengthValidation", () => {
       "Prompt is 1 character over the 120,000-character limit. Shorten or split it before sending.",
     );
     expect(markup).not.toContain("ProviderValidationError");
+  });
+
+  it("does not count the pasted-text presentation envelope toward the prompt limit", () => {
+    expect(
+      getComposerPromptLengthValidationMessage(
+        serializePastedText("x".repeat(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)),
+      ),
+    ).toBeNull();
   });
 });

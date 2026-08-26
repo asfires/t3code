@@ -59,6 +59,7 @@ describe("registerComposerInlineTokenPaste", () => {
     );
     registerComposerInlineTokenPaste(editor, {
       createMentionNode: (path) => $createTextNode(`<mention:${path}>`),
+      createPastedTextNode: (text) => $createTextNode(`<paste:${text}>`),
       getExpandedAbsoluteOffsetForPoint: () => 0,
     });
     editor.registerCommand(PASTE_COMMAND, plainTextFallback, COMMAND_PRIORITY_EDITOR);
@@ -104,6 +105,7 @@ describe("registerComposerInlineTokenPaste", () => {
     );
     registerComposerInlineTokenPaste(editor, {
       createMentionNode: (path) => $createTextNode(`<mention:${path}>`),
+      createPastedTextNode: (text) => $createTextNode(`<paste:${text}>`),
       getExpandedAbsoluteOffsetForPoint: () => 0,
     });
     editor.registerCommand(PASTE_COMMAND, plainTextFallback, COMMAND_PRIORITY_EDITOR);
@@ -138,6 +140,7 @@ describe("registerComposerInlineTokenPaste", () => {
     );
     registerComposerInlineTokenPaste(editor, {
       createMentionNode: (path) => $createTextNode(`<mention:${path}>`),
+      createPastedTextNode: (text) => $createTextNode(`<paste:${text}>`),
       getExpandedAbsoluteOffsetForPoint: () => 0,
     });
     editor.registerCommand(PASTE_COMMAND, plainTextFallback, COMMAND_PRIORITY_EDITOR);
@@ -156,6 +159,39 @@ describe("registerComposerInlineTokenPaste", () => {
     expect(event.defaultPrevented).toBe(true);
     expect(editor.getEditorState().read(() => $getRoot().getTextContent())).toBe(
       "<mention:@scope/pkg/sub> ",
+    );
+  });
+
+  it("turns a large plain-text paste into one atomic presentation node", () => {
+    vi.stubGlobal("ClipboardEvent", TestClipboardEvent);
+    const editor = createEditor();
+    const pastedText = "line of pasted text\n".repeat(20);
+    const plainTextFallback = vi.fn(() => true);
+
+    editor.update(
+      () => {
+        const paragraph = $createParagraphNode();
+        $getRoot().append(paragraph);
+        paragraph.selectEnd();
+      },
+      { discrete: true },
+    );
+    registerComposerInlineTokenPaste(editor, {
+      createMentionNode: (path) => $createTextNode(`<mention:${path}>`),
+      createPastedTextNode: (text) => $createTextNode(`<paste:${text}>`),
+      getExpandedAbsoluteOffsetForPoint: () => 0,
+    });
+    editor.registerCommand(PASTE_COMMAND, plainTextFallback, COMMAND_PRIORITY_EDITOR);
+
+    const event = new TestClipboardEvent(pastedText);
+    editor.update(() => editor.dispatchCommand(PASTE_COMMAND, event as ClipboardEvent), {
+      discrete: true,
+    });
+
+    expect(plainTextFallback).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(true);
+    expect(editor.getEditorState().read(() => $getRoot().getTextContent())).toBe(
+      `<paste:${pastedText}>`,
     );
   });
 });

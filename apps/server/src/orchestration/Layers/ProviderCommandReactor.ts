@@ -34,6 +34,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
+import { materializePastedText } from "@t3tools/shared/pastedText";
 
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
@@ -171,7 +172,9 @@ function formatThreadTitleSection(message: ThreadTitleMessage): string | undefin
   if (message.role === "system") {
     return undefined;
   }
-  const text = message.text.trim();
+  const text = (
+    message.role === "user" ? materializePastedText(message.text) : message.text
+  ).trim();
   const attachmentSummary = (message.attachments ?? [])
     .map((attachment) => attachment.name)
     .join(", ");
@@ -1213,6 +1216,7 @@ const make = Effect.gen(function* () {
       });
       return;
     }
+    const messageText = materializePastedText(message.text);
 
     // First gate: when retract won before provider startup, persist the
     // send-cancelled handoff and do not create a provider session. WO3 owns
@@ -1236,7 +1240,7 @@ const make = Effect.gen(function* () {
           projects: project ? [project] : [],
         }) ?? process.cwd();
       const generationInput = {
-        messageText: message.text,
+        messageText,
         ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
         ...(event.payload.titleSeed !== undefined ? { titleSeed: event.payload.titleSeed } : {}),
       };
@@ -1296,7 +1300,7 @@ const make = Effect.gen(function* () {
 
     const sendTurnRequest = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
-      messageText: message.text,
+      messageText,
       ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
       ...(event.payload.modelSelection !== undefined
         ? { modelSelection: event.payload.modelSelection }

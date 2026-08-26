@@ -4,6 +4,17 @@ Messages can contain up to 120,000 characters. If a draft is longer, T3 Code kee
 composer and shows how many characters need to be removed. Shorten the draft or split it into
 multiple messages, then send again in the same thread.
 
+## Pasted text
+
+On web and desktop, pasting at least 1,000 characters or 20 lines collapses the pasted block into a
+**Pasted text #1** badge. Each badge can be expanded or hidden without changing the draft. Badge
+numbers always follow their current order, so deleting an earlier block renumbers the remaining
+ones.
+
+Sent messages keep the same expandable badges on web, desktop, and mobile. Copying a message and
+the text sent to the agent both use the complete original content; the badges are only a visual
+presentation.
+
 ## New thread defaults
 
 Set which model every new thread starts with under **Settings > General > New thread model**, so

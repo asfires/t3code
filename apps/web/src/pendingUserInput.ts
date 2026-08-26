@@ -1,4 +1,5 @@
 import type { UserInputQuestion } from "@t3tools/contracts";
+import { materializePastedText } from "@t3tools/shared/pastedText";
 
 export interface PendingUserInputDraftAnswer {
   selectedOptionLabels?: string[];
@@ -24,7 +25,7 @@ function normalizeDraftAnswer(value: string | undefined): string | null {
     return null;
   }
 
-  const trimmed = value.trim();
+  const trimmed = materializePastedText(value).trim();
   return trimmed.length > 0 ? trimmed : null;
 }
 
