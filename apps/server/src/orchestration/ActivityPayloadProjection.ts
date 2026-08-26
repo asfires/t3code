@@ -299,6 +299,24 @@ function projectCommandData(data: Record<string, unknown>): {
   };
 }
 
+function projectCommandValue(data: Record<string, unknown>): unknown {
+  if (data.command !== undefined) {
+    return data.command;
+  }
+
+  const input = asRecord(data.input);
+  if (input?.command !== undefined) {
+    return input.command;
+  }
+
+  const stateInput = asRecord(asRecord(data.state)?.input);
+  if (stateInput?.command !== undefined) {
+    return stateInput.command;
+  }
+
+  return undefined;
+}
+
 /**
  * Fields of an MCP tool-call item clients use for identity and presentation.
  * Result content is retained separately under the tool-output cap.
@@ -384,11 +402,17 @@ export function projectActivityPayload(
     return normalizedActivity;
   }
 
+  const itemStatus = asRecord(data.item)?.status;
+  const projectedPayload =
+    payload.status === "completed" && (itemStatus === "failed" || itemStatus === "declined")
+      ? { ...payload, status: itemStatus }
+      : payload;
+
   if (payload.itemType === "mcp_tool_call") {
     return {
       ...normalizedActivity,
       payload: {
-        ...payload,
+        ...projectedPayload,
         data: projectMcpToolCallData(data),
       },
     };
@@ -409,6 +433,10 @@ export function projectActivityPayload(
       : ["toolName", "input", "result", "rawOutput", "state"],
     copyKeys: ["command", "tool", "toolCallId", "kind"],
   });
+  const command = projectCommandValue(data);
+  if (command !== undefined) {
+    projectedData.command = command;
+  }
 
   const changedFiles: string[] = [];
   collectChangedFiles(data, changedFiles, new Set<string>(), 0);
@@ -433,7 +461,7 @@ export function projectActivityPayload(
   return {
     ...normalizedActivity,
     payload: {
-      ...payload,
+      ...projectedPayload,
       data: projectedData,
     },
   };
@@ -486,12 +514,10 @@ function dropStaleContextWindowActivities(
 }
 
 /**
- * Identity both clients use to fold a tool lifecycle row into the call it
- * belongs to (`deriveToolLifecycleCollapseKey` in web's `session-logic` and
- * mobile's `threadActivity`): an explicit `data.toolCallId` when the adapter
- * emits one, otherwise the itemType/title/detail triple. Returns null for rows
- * with no identity at all — those never collapse on the client either, so they
- * must not be dropped here.
+ * Identity used to retain only the newest lifecycle row for each call in a
+ * thread snapshot. Prefer the runtime item id, then the legacy nested id, and
+ * finally the itemType/title/detail triple. Rows without any identity remain
+ * untouched.
  */
 function toolLifecycleIdentity(activity: OrchestrationThreadActivity): string | null {
   const payload = asRecord(activity.payload);
@@ -499,7 +525,8 @@ function toolLifecycleIdentity(activity: OrchestrationThreadActivity): string | 
     return null;
   }
 
-  const toolCallId = asTrimmedString(asRecord(payload.data)?.toolCallId);
+  const toolCallId =
+    asTrimmedString(payload.toolCallId) ?? asTrimmedString(asRecord(payload.data)?.toolCallId);
   if (toolCallId) {
     return `id:${toolCallId}`;
   }

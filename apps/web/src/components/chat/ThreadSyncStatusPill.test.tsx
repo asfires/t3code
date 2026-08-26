@@ -4,25 +4,23 @@ import { describe, expect, it } from "vite-plus/test";
 import { ThreadSyncStatusPill } from "./ThreadSyncStatusPill";
 
 describe("ThreadSyncStatusPill", () => {
-  it("renders loading immediately without participating in composer layout", () => {
-    const markup = renderToStaticMarkup(<ThreadSyncStatusPill phase="loading" raised={false} />);
+  it("renders loading immediately as an attached composer drawer", () => {
+    const label = "Loading messages...";
+    const markup = renderToStaticMarkup(<ThreadSyncStatusPill phase="loading" />);
 
     expect(markup).toContain('role="status"');
-    expect(markup).toContain("Loading messages...");
-    expect(markup).toContain("absolute");
-    expect(markup).toContain("calc(100% + 0.5rem)");
+    expect(markup).toContain('data-thread-sync-drawer="true"');
+    expect(markup).toContain("chat-composer-drawer-surface");
+    expect(markup).toContain("chat-composer-drawer-attached");
+    expect(markup).toContain("chat-composer-drawer-slot");
+    expect(markup).toContain("pb-[calc(var(--chat-composer-attachment-overlap)_+_0.375rem)]");
+    expect(markup).toContain(label);
     expect(markup).not.toContain("animate-");
   });
 
   it("withholds the cached-thread syncing phase initially", () => {
-    const markup = renderToStaticMarkup(<ThreadSyncStatusPill phase="syncing" raised={false} />);
+    const markup = renderToStaticMarkup(<ThreadSyncStatusPill phase="syncing" />);
 
     expect(markup).toBe("");
-  });
-
-  it("moves above the scroll-to-end control when it is visible", () => {
-    const markup = renderToStaticMarkup(<ThreadSyncStatusPill phase="loading" raised />);
-
-    expect(markup).toContain("calc(100% + 2.75rem)");
   });
 });

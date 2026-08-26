@@ -325,6 +325,7 @@ async function startHarness(
     respondToRequest: () => unsupported(),
     respondToUserInput: () => unsupported(),
     discardTransientThread: () => unsupported(),
+    uploadFeedback: () => unsupported(),
     stopSession: () => unsupported(),
     listSessions: () => Effect.succeed([]),
     getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),

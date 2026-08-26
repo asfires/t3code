@@ -1,4 +1,5 @@
 export const CHAT_FLOATING_LAYER_SELECTOR = [
+  '[data-composer-drawer-layer="true"]',
   '[data-slot="popover-popup"]',
   '[data-slot="menu-popup"]',
   '[data-slot="select-popup"]',
