@@ -406,12 +406,13 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     var(--app-scrollbar-width) 100%;
 }
 
-/* Stage-channel art needs a mask and pseudo-element gradient, so keep the
-   behavior composable without tying it to the global components layer. */
+/* Fade stage-channel art with an overlay rather than a CSS mask. Chromium can
+   mis-composite the masked blueprint SVG while another sidebar layer is
+   animating, leaking fragments of the artwork into unrelated tiles. The
+   overlay reaches the sidebar surface color by 93%, so the mask was visually
+   redundant as well as an extra composited layer. */
 @utility sidebar-stage-backdrop {
   --stage-fade: var(--sidebar-stage-fade, var(--app-chrome-background));
-  mask-image: linear-gradient(to bottom, black 0%, black 55%, transparent 92%);
-  -webkit-mask-image: linear-gradient(to bottom, black 0%, black 55%, transparent 92%);
 
   &::after {
     content: "";
@@ -1904,13 +1905,13 @@ code {
 }
 
 /* Sidebar "Working" spinner: Material's indeterminate ring, transform-only.
-   The arc's grow-and-reel-in is faked by two half-ring SVGs, one per clipped
-   half, counter-rotating with ease-in-out inside a stepped-rotation layer
-   inside a linearly rotating container (MDC's construction and timings). Every
-   animated property is a transform on an HTML element or a root <svg>, so the
-   compositor drives all of it and the main thread never repaints a frame —
-   the same bar the stepped status indicators hold themselves to. A stroke-dash
-   animation would look identical but repaint on the main thread every vsync. */
+   The arc's grow-and-reel-in is faked by two filled half-ring SVGs, one per
+   clipped half, counter-rotating with ease-in-out inside a stepped-rotation
+   layer inside a linearly rotating container (MDC's construction and timings).
+   Every animated property is a transform on an HTML element or a root <svg>,
+   so the compositor drives all of it and the main thread never repaints a
+   frame. A stroke-dash animation would look identical but repaint on the main
+   thread every vsync. */
 .working-spinner {
   position: relative;
   display: block;
@@ -1972,27 +1973,6 @@ code {
 
 .working-spinner__clipper--right > svg {
   animation: working-spinner-right-spin 1333ms cubic-bezier(0.4, 0, 0.2, 1) infinite both;
-}
-
-/* A hairline sliver of ring parked over the 12 o'clock seam where the two
-   halves meet (the arc always spans it), so antialiasing never shows a gap. */
-.working-spinner__patch {
-  position: absolute;
-  top: 0;
-  left: 46%;
-  display: block;
-  width: 8%;
-  height: 100%;
-  overflow: hidden;
-}
-
-.working-spinner__patch > svg {
-  position: absolute;
-  top: 0;
-  left: -575%;
-  width: 1250%;
-  height: 100%;
-  transform: rotate(180deg);
 }
 
 @keyframes working-spinner-container-rotate {

@@ -236,22 +236,21 @@ function JumpHintBadge(props: { label: string }) {
 // lucide's CircleCheck (r=10, edge 11) sat visibly inside the spinner.
 //
 // The spinner is Material's transform-only construction (see .working-spinner
-// in index.css): a static track ring, then two half-ring SVGs whose rotation
-// inside clipped halves makes the arc grow and reel in without animating any
-// paint property. Half ring = full circumference dash, offset by half.
-const SPINNER_RING_CIRCUMFERENCE = 2 * Math.PI * 10;
-
-function SpinnerHalfRing() {
+// in index.css): a static track ring, then two filled half-ring paths whose
+// rotation inside clipped halves makes the arc grow and reel in without
+// animating any paint property. Each path is one continuous silhouette with a
+// square clipped-seam end and a rounded exposed end, avoiding both hidden-cap
+// leakage and self-overdraw between a stroked path and a separate cap shape.
+function SpinnerHalfRing({ roundedEnd }: { roundedEnd: "start" | "end" }) {
   return (
     <svg aria-hidden xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-      <circle
-        cx="12"
-        cy="12"
-        r="10"
-        stroke="currentColor"
-        strokeWidth="4"
-        strokeDasharray={SPINNER_RING_CIRCUMFERENCE}
-        strokeDashoffset={SPINNER_RING_CIRCUMFERENCE / 2}
+      <path
+        d={
+          roundedEnd === "start"
+            ? "M24 12A12 12 0 0 1 0 12L4 12A8 8 0 0 0 20 12A2 2 0 0 1 24 12Z"
+            : "M24 12A12 12 0 0 1 0 12A2 2 0 0 1 4 12A8 8 0 0 0 20 12Z"
+        }
+        fill="currentColor"
       />
     </svg>
   );
@@ -271,13 +270,10 @@ function WorkingSpinnerIcon(props: { className?: string }) {
       <span className="working-spinner__container">
         <span className="working-spinner__layer">
           <span className="working-spinner__clipper working-spinner__clipper--left">
-            <SpinnerHalfRing />
-          </span>
-          <span className="working-spinner__patch">
-            <SpinnerHalfRing />
+            <SpinnerHalfRing roundedEnd="start" />
           </span>
           <span className="working-spinner__clipper working-spinner__clipper--right">
-            <SpinnerHalfRing />
+            <SpinnerHalfRing roundedEnd="end" />
           </span>
         </span>
       </span>
