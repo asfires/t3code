@@ -43,6 +43,7 @@ import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useT3ProjectFileState } from "../../hooks/useT3ProjectFileScripts";
 import { shortcutLabelForCommand } from "../../keybindings";
 import { keybindingValueForCommand } from "../../lib/projectScriptKeybindings";
+import { releaseProjectDraftUploads } from "../../lib/composerDraftUploads";
 import { readLocalApi } from "../../localApi";
 import {
   buildProjectScript,
@@ -97,7 +98,11 @@ import {
   SettingsRow,
   SettingsSection,
 } from "./settingsLayout";
-import { ProjectFaviconPickerDialog } from "./ProjectFaviconPickerDialog";
+import {
+  canPickExternalProjectFavicon,
+  ProjectFaviconPickerDialog,
+} from "./ProjectFaviconPickerDialog";
+import { projectGroupTitleNeedsUpdate } from "./ProjectSettingsPanel.logic";
 
 export const PROJECT_GROUPING_MODE_LABELS: Record<SidebarProjectGroupingMode, string> = {
   repository: "Group by repository",
@@ -275,6 +280,7 @@ export function ProjectSettingsPanel({ projectKey }: { projectKey: string }) {
 
 function ProjectDetail({ group }: { group: SidebarProjectSnapshot }) {
   const navigate = useNavigate();
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
   const settings = usePrimarySettings();
   const updateClientSettings = useUpdateClientSettings();
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
@@ -287,6 +293,7 @@ function ProjectDetail({ group }: { group: SidebarProjectSnapshot }) {
   const removeKeybinding = useAtomCommand(serverEnvironment.removeKeybinding, {
     reportFailure: false,
   });
+  const projectNameEditedRef = useRef(false);
   const { copyToClipboard: copyPathToClipboard } = useCopyToClipboard<{ path: string }>({
     onCopy: ({ path }) => {
       toastManager.add({ type: "success", title: "Path copied", description: path });
@@ -307,6 +314,15 @@ function ProjectDetail({ group }: { group: SidebarProjectSnapshot }) {
       (member) => member.environmentId === group.environmentId && member.id === group.id,
     ) ?? group.memberProjects[0]!;
   const faviconPath = representative.faviconPath ?? null;
+  const pickProjectFavicon =
+    typeof window !== "undefined" &&
+    group.memberProjects.every(
+      (member) =>
+        member.environmentId === primaryEnvironmentId &&
+        canPickExternalProjectFavicon(member.workspaceRoot, navigator.platform),
+    )
+      ? window.desktopBridge?.pickProjectFavicon
+      : undefined;
 
   const threadCountByMember = useMemo(() => {
     const counts = new Map<string, number>();
@@ -365,17 +381,24 @@ function ProjectDetail({ group }: { group: SidebarProjectSnapshot }) {
   );
 
   const renameGroup = useCallback(
-    async (nextTitle: string) => {
+    async (nextTitle: string, wasEdited: boolean) => {
       const title = nextTitle.trim();
       if (!title) {
         toastManager.add({ type: "warning", title: "Project title cannot be empty" });
         return;
       }
-      if (title === group.displayName) return;
-      if (group.memberProjects.every((member) => member.title === title)) return;
+      if (
+        !projectGroupTitleNeedsUpdate(
+          group.memberProjects.map((member) => member.title),
+          title,
+          wasEdited,
+        )
+      ) {
+        return;
+      }
       await updateAllMembers({ title }, "Failed to rename project");
     },
-    [group.displayName, group.memberProjects, updateAllMembers],
+    [group.memberProjects, updateAllMembers],
   );
 
   // ----- new-thread workspace mode -----
@@ -673,6 +696,7 @@ function ProjectDetail({ group }: { group: SidebarProjectSnapshot }) {
           return;
         }
         const projectRef = scopeProjectRef(member.environmentId, member.id);
+        releaseProjectDraftUploads(projectRef);
         const projectDraftThread = draftStore.getDraftThreadByProjectRef(projectRef);
         if (projectDraftThread) {
           draftStore.clearDraftThread(projectDraftThread.draftId);
@@ -716,8 +740,13 @@ function ProjectDetail({ group }: { group: SidebarProjectSnapshot }) {
                 className="w-full sm:w-64"
                 aria-label="Project name"
                 defaultValue={group.displayName}
+                onChange={() => {
+                  projectNameEditedRef.current = true;
+                }}
                 onBlur={(event) => {
-                  void renameGroup(event.currentTarget.value);
+                  const wasEdited = projectNameEditedRef.current;
+                  projectNameEditedRef.current = false;
+                  void renameGroup(event.currentTarget.value, wasEdited);
                 }}
                 onKeyDown={(event) => {
                   if (event.key === "Enter") event.currentTarget.blur();
@@ -1077,6 +1106,9 @@ function ProjectDetail({ group }: { group: SidebarProjectSnapshot }) {
         cwd={representative.workspaceRoot}
         environmentId={representative.environmentId}
         onOpenChange={setFaviconPickerOpen}
+        {...(pickProjectFavicon
+          ? { onPickExternal: () => pickProjectFavicon(representative.workspaceRoot) }
+          : {})}
         onSelect={(path) => void setFaviconPath(path)}
         open={faviconPickerOpen}
         projectName={group.displayName}

@@ -20,7 +20,7 @@ function activity(payload: Record<string, unknown>): OrchestrationThreadActivity
  * If slimming ever moves to an allowlist over the whole payload, these
  * assertions are the tripwire.
  */
-describe("projectActivityPayload agent-field survival", () => {
+describe("projectActivityPayload", () => {
   it("preserves tool attribution (agentId/parentToolUseId) through data slimming", () => {
     const projected = projectActivityPayload(
       activity({
@@ -115,7 +115,47 @@ describe("projectActivityPayload agent-field survival", () => {
     expect(data.resultTruncated).toBe(true);
   });
 
-  it("slims Codex-shaped mcp_tool_call items to rendered fields plus a result summary", () => {
+  it("normalizes Claude and OpenCode command inputs while retaining provider output", () => {
+    const claude = projectActivityPayload(
+      activity({
+        itemType: "command_execution",
+        toolCallId: "claude-call-1",
+        data: {
+          toolName: "Bash",
+          input: { command: "vp test run" },
+          result: { content: "x".repeat(5_000) },
+        },
+      }),
+    );
+    const openCode = projectActivityPayload(
+      activity({
+        itemType: "command_execution",
+        toolCallId: "opencode-call-1",
+        data: {
+          tool: "bash",
+          state: {
+            status: "running",
+            input: { command: "vp lint" },
+            output: "x".repeat(5_000),
+          },
+        },
+      }),
+    );
+
+    // Output stays intact under the projection cap so expanded work-log rows
+    // can show it; only the command is normalized to a top-level field.
+    expect(claude.payload).toMatchObject({
+      toolCallId: "claude-call-1",
+      data: { command: "vp test run", result: { content: "x".repeat(5_000) } },
+    });
+    expect(openCode.payload).toMatchObject({
+      toolCallId: "opencode-call-1",
+      data: { command: "vp lint", state: { status: "running", output: "x".repeat(5_000) } },
+    });
+    expect((claude.payload as Record<string, unknown>).data).not.toHaveProperty("resultTruncated");
+  });
+
+  it("slims Codex-shaped mcp_tool_call items to rendered fields while retaining the result", () => {
     const projected = projectActivityPayload(
       activity({
         itemType: "mcp_tool_call",
@@ -143,11 +183,14 @@ describe("projectActivityPayload agent-field survival", () => {
     expect(item.server).toBe("github");
     expect(item.arguments).toEqual({ pr: 42 });
     expect(item._meta).toBeUndefined();
-    expect(item.result).toEqual({ content: "PR body line one" });
-    expect(JSON.stringify(projected.payload).length).toBeLessThan(500);
+    expect(item.result).toEqual({
+      content: [{ type: "text", text: `PR body line one\n${"x".repeat(5000)}` }],
+      structuredContent: { huge: "y".repeat(5000) },
+    });
+    expect(data.resultTruncated).toBeUndefined();
   });
 
-  it("slims Claude-shaped mcp_tool_call data (toolName/input/result block)", () => {
+  it("keeps Claude-shaped mcp_tool_call data (toolName/input/result block) intact", () => {
     const projected = projectActivityPayload(
       activity({
         itemType: "mcp_tool_call",
@@ -165,8 +208,12 @@ describe("projectActivityPayload agent-field survival", () => {
     const data = (projected.payload as Record<string, unknown>).data as Record<string, unknown>;
     expect(data.toolName).toBe("mcp__github__fetch_pr");
     expect(data.input).toEqual({ pr: 42 });
-    expect(data.result).toEqual({ content: "first line of output" });
-    expect(JSON.stringify(projected.payload).length).toBeLessThan(500);
+    expect(data.result).toEqual({
+      type: "tool_result",
+      tool_use_id: "toolu_1",
+      content: [{ type: "text", text: `first line of output\n${"z".repeat(5000)}` }],
+    });
+    expect(data.resultTruncated).toBeUndefined();
   });
 
   it("passes task lifecycle payloads (no data field) through untouched", () => {

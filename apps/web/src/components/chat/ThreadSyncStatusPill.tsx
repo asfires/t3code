@@ -3,13 +3,7 @@ import { useEffect, useState } from "react";
 
 import { threadSyncLabel, type ThreadSyncPhase } from "../../threadSync";
 
-export function ThreadSyncStatusPill({
-  phase,
-  raised,
-}: {
-  readonly phase: ThreadSyncPhase;
-  readonly raised: boolean;
-}) {
+export function ThreadSyncStatusPill({ phase }: { readonly phase: ThreadSyncPhase }) {
   const [syncingVisible, setSyncingVisible] = useState(phase === "loading");
 
   useEffect(() => {
@@ -25,9 +19,9 @@ export function ThreadSyncStatusPill({
   return (
     <div
       aria-label={label}
-      className="pointer-events-none absolute left-1/2 flex w-fit max-w-full -translate-x-1/2 items-center gap-2 rounded-full border border-border/60 bg-card/95 px-3 py-1.5 text-foreground text-xs font-medium shadow-sm"
+      className="chat-composer-drawer-surface chat-composer-drawer-attached chat-composer-drawer-slot pointer-events-none flex items-center gap-2 px-3 pt-2 pb-[calc(var(--chat-composer-attachment-overlap)_+_0.375rem)] text-foreground text-xs font-medium sm:px-4"
+      data-thread-sync-drawer="true"
       role="status"
-      style={{ bottom: raised ? "calc(100% + 2.75rem)" : "calc(100% + 0.5rem)" }}
     >
       <LoaderCircleIcon aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
       <span className="truncate">{label}</span>

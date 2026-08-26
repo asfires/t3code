@@ -73,6 +73,7 @@ function projectedThread(patch: Partial<ProjectionThread> = {}): ProjectionThrea
     archivedAt: null,
     settledOverride: null,
     settledAt: null,
+    unsettledAt: null,
     snoozedUntil: null,
     snoozedAt: null,
     pinnedAt: null,
