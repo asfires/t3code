@@ -129,7 +129,14 @@ export function resolveRetractionRecoverySignal(input: {
   const hasCorrelatedPendingRow =
     input.projectedRetraction?.requestId === input.recovery.requestId &&
     input.projectedRetraction.status === "requested";
+  // A mid-thread pop is already restored in the source composer. Never turn
+  // that message into a brand-new-thread draft just because the acknowledgement
+  // is late: keeping the recovery pending also keeps resends gated until the
+  // server reaches a terminal result. The draft fallback is only meaningful
+  // for a first-message retraction, whose successful outcome deletes its
+  // transient source thread, plus legacy records that predate this marker.
   const stale =
+    input.recovery.firstUserMessage !== false &&
     input.threadDetailExists &&
     !hasCorrelatedPendingRow &&
     Number.isFinite(createdAtMs) &&

@@ -42,6 +42,7 @@ import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import {
   type CodexSessionRuntimeOptions,
+  type CodexSessionRuntimeError,
   type CodexSessionRuntimeSendTurnInput,
   type CodexSessionRuntimeShape,
   type CodexThreadSnapshot,
@@ -104,6 +105,14 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
       }),
   );
 
+  public readonly revertThreadImpl = vi.fn(
+    (_beforeTurnId: TurnId): Promise<CodexThreadSnapshot> =>
+      Promise.resolve({
+        threadId: "provider-thread-1",
+        turns: [],
+      }),
+  );
+
   public readonly deleteThreadImpl = vi.fn((): Promise<void> => Promise.resolve(undefined));
   public readonly uploadFeedbackImpl = vi.fn((_reason?: string) =>
     Promise.resolve({ threadId: "provider-thread-1" }),
@@ -145,6 +154,13 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
 
   rollbackThread(numTurns: number) {
     return Effect.promise(() => this.rollbackThreadImpl(numTurns));
+  }
+
+  revertThread(beforeTurnId: TurnId) {
+    return Effect.tryPromise({
+      try: () => this.revertThreadImpl(beforeTurnId),
+      catch: (cause) => cause as CodexSessionRuntimeError,
+    });
   }
 
   deleteThread = Effect.promise(() => this.deleteThreadImpl());
@@ -389,21 +405,59 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         turns: turnIds.map((id) => ({ id: asTurnId(id), items: [] })),
       });
       const targetTurnId = asTurnId("turn-retracted");
-      runtime.readThreadImpl
-        .mockResolvedValueOnce(snapshot(["turn-1", "turn-2", targetTurnId]))
-        .mockResolvedValue(snapshot(["turn-1", "turn-2"]));
-      runtime.rollbackThreadImpl.mockResolvedValue(snapshot(["turn-1", "turn-2"]));
+      runtime.revertThreadImpl.mockResolvedValue(snapshot(["turn-1", "turn-2"]));
 
       const first = yield* adapter.rollbackThreadTo(threadId, 3, targetTurnId);
       NodeAssert.deepStrictEqual(
         first.turns.map((turn) => turn.id),
         [asTurnId("turn-1"), asTurnId("turn-2")],
       );
-      NodeAssert.deepStrictEqual(runtime.rollbackThreadImpl.mock.calls, [[1]]);
+      NodeAssert.deepStrictEqual(runtime.revertThreadImpl.mock.calls, [[targetTurnId]]);
+      NodeAssert.equal(runtime.readThreadImpl.mock.calls.length, 0);
+      NodeAssert.equal(runtime.rollbackThreadImpl.mock.calls.length, 0);
 
       const repeated = yield* adapter.rollbackThreadTo(threadId, 3, targetTurnId);
       NodeAssert.equal(repeated.turns.length, 2);
+      NodeAssert.deepStrictEqual(runtime.revertThreadImpl.mock.calls, [
+        [targetTurnId],
+        [targetTurnId],
+      ]);
+    }),
+  );
+
+  it.effect("verifies a rollback from its response when thread reads still lag", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("lagging-read-rollback-thread");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      NodeAssert.ok(adapter.rollbackThreadTo);
+      const snapshot = (turnIds: ReadonlyArray<string>): CodexThreadSnapshot => ({
+        threadId: "provider-thread-1",
+        turns: turnIds.map((id) => ({ id: asTurnId(id), items: [] })),
+      });
+      const targetTurnId = asTurnId("turn-retracted");
+      const staleSnapshot = snapshot(["turn-1", targetTurnId]);
+      const rolledBackSnapshot = snapshot(["turn-1"]);
+      runtime.readThreadImpl.mockResolvedValue(staleSnapshot);
+      runtime.rollbackThreadImpl.mockResolvedValue(rolledBackSnapshot);
+      runtime.revertThreadImpl.mockRejectedValue(
+        CodexErrors.CodexAppServerRequestError.methodNotFound("thread/revert"),
+      );
+
+      const result = yield* adapter.rollbackThreadTo(threadId, 1, targetTurnId);
+
+      NodeAssert.deepStrictEqual(
+        result.turns.map((turn) => turn.id),
+        [asTurnId("turn-1")],
+      );
       NodeAssert.deepStrictEqual(runtime.rollbackThreadImpl.mock.calls, [[1]]);
+      NodeAssert.equal(runtime.readThreadImpl.mock.calls.length, 1);
     }),
   );
 

@@ -4,7 +4,7 @@ import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { describe } from "vite-plus/test";
-import { DEFAULT_MODEL, ThreadId } from "@t3tools/contracts";
+import { DEFAULT_MODEL, ThreadId, TurnId } from "@t3tools/contracts";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
@@ -23,6 +23,7 @@ import {
   isRecoverableThreadResumeError,
   makeMemoryConsolidationNotificationFilter,
   openCodexThread,
+  revertCodexThread,
   toMcpElicitationResponse,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
@@ -870,6 +871,43 @@ describe("deleteCodexThread", () => {
         {
           method: "thread/delete",
           payload: { threadId: "provider-thread-transient" },
+        },
+      ]);
+    }),
+  );
+});
+
+describe("revertCodexThread", () => {
+  it.effect("reverts paginated history before the target turn", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ method: string; payload: unknown }> = [];
+      const client = {
+        request: (method: string, payload?: unknown) => {
+          calls.push({ method, payload });
+          return Effect.succeed({
+            thread: {
+              id: "provider-thread-paginated",
+              turns: [],
+            },
+            turnsBackwardsCursor: "turn-cursor",
+          });
+        },
+      };
+
+      const response = yield* revertCodexThread(
+        client,
+        "provider-thread-paginated",
+        TurnId.make("turn-retracted"),
+      );
+
+      NodeAssert.equal(response.thread.id, "provider-thread-paginated");
+      NodeAssert.deepStrictEqual(calls, [
+        {
+          method: "thread/revert",
+          payload: {
+            threadId: "provider-thread-paginated",
+            beforeTurnId: "turn-retracted",
+          },
         },
       ]);
     }),

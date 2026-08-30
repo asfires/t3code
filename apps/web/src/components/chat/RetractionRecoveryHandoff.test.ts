@@ -367,4 +367,33 @@ describe("retraction recovery handoff", () => {
     expect(signal).toBeNull();
     expect(useComposerDraftStore.getState().getDraftSession(draftId)?.hidden).toBe(true);
   });
+
+  it("does not move an unresolved mid-thread message into a new-thread draft", async () => {
+    await seedRecovery();
+    const persisted = useRetractionRecoveryStore.getState().byRequestId[requestId];
+    if (!persisted) throw new Error("Expected recovery fixture");
+    useRetractionRecoveryStore.setState({
+      byRequestId: {
+        [requestId]: { ...persisted, firstUserMessage: false },
+      },
+    });
+    const recovery = useRetractionRecoveryStore.getState().byRequestId[requestId];
+    if (!recovery) throw new Error("Expected mid-thread recovery fixture");
+
+    const signal = resolveRetractionRecoverySignal({
+      recovery,
+      liveCompletion: null,
+      projectedRetraction: null,
+      activities: [],
+      threadStatus: "live",
+      threadDetailExists: true,
+      shellSnapshotReady: true,
+      sourceThreadInShell: true,
+      nowMs: Date.parse(createdAt) + RETRACTION_RECOVERY_STALE_AFTER_MS * 2,
+    });
+
+    expect(signal).toBeNull();
+    expect(useComposerDraftStore.getState().getDraftSession(draftId)?.hidden).toBe(true);
+    expect(useRetractionRecoveryStore.getState().byRequestId[requestId]).toBeDefined();
+  });
 });
