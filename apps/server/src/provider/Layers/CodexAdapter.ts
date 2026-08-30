@@ -33,6 +33,7 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Queue from "effect/Queue";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -68,12 +69,16 @@ import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogg
 import { resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
 const isCodexAppServerProcessExitedError = Schema.is(CodexErrors.CodexAppServerProcessExitedError);
 const isCodexAppServerTransportError = Schema.is(CodexErrors.CodexAppServerTransportError);
+const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 const isCodexSessionRuntimeThreadIdMissingError = Schema.is(
   CodexSessionRuntimeThreadIdMissingError,
 );
 const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
 
 const PROVIDER = ProviderDriverKind.make("codex");
+
+const isThreadRevertUnavailable = (error: CodexSessionRuntimeError): boolean =>
+  isCodexAppServerRequestError(error) && error.code === -32601;
 
 export interface CodexAdapterLiveOptions {
   readonly instanceId?: ProviderInstanceId;
@@ -1925,6 +1930,21 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       });
     }
     const session = yield* requireSession(threadId);
+    if (targetTurnId !== undefined) {
+      const revertResult = yield* session.runtime.revertThread(targetTurnId).pipe(Effect.result);
+      if (Result.isSuccess(revertResult)) {
+        if (session.lastStartedTurnId === targetTurnId) {
+          session.lastStartedTurnId = undefined;
+        }
+        return {
+          threadId,
+          turns: revertResult.success.turns,
+        };
+      }
+      if (!isThreadRevertUnavailable(revertResult.failure)) {
+        return yield* mapCodexRuntimeError(threadId, "thread/revert", revertResult.failure);
+      }
+    }
     const current = yield* readThread(threadId);
     const targetIndex =
       targetTurnId === undefined ? -1 : current.turns.findIndex((turn) => turn.id === targetTurnId);
@@ -1950,10 +1970,15 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           : targetTurnId !== undefined
             ? 0
             : current.turns.length - retainedTurnCount;
-    if (remainingDelta > 0) {
-      yield* rollbackThread(threadId, remainingDelta);
-    }
-    const verified = yield* readThread(threadId);
+    // thread/rollback returns the post-rollback snapshot. Use that response
+    // for the first verification instead of immediately calling thread/read:
+    // recent Codex app-server builds can briefly serve the pre-rollback turn
+    // from thread/read after the mutation has already committed. Treating
+    // that lagging read as failure leaves a durable T3 retraction pending and
+    // repeatedly rolls back the same provider turn.
+    const rolledBack =
+      remainingDelta > 0 ? yield* rollbackThread(threadId, remainingDelta) : undefined;
+    const verified = rolledBack ?? (yield* readThread(threadId));
     if (targetTurnId !== undefined) {
       if (verified.turns.some((turn) => turn.id === targetTurnId)) {
         return yield* new ProviderAdapterRequestError({
