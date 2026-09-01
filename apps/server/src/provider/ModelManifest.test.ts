@@ -59,6 +59,15 @@ describe("isLegacyModel (bundled manifest)", () => {
   it("leaves driver kinds without a manifest entry unflagged", () => {
     assert.isFalse(isLegacyModel(BUNDLED_MODEL_MANIFEST, CURSOR, "composer-1.5"));
   });
+
+  it("keeps fork-added models current even when the manifest omits them", () => {
+    const upstreamManifest: ModelManifestData = {
+      version: 1,
+      currentModels: { claudeAgent: ["claude-fable-5", "claude-opus-5", "claude-sonnet-5"] },
+    };
+    assert.isFalse(isLegacyModel(upstreamManifest, CLAUDE, "claude-fable-5-1"));
+    assert.isFalse(isLegacyModel(BUNDLED_MODEL_MANIFEST, CLAUDE, "claude-fable-5-1"));
+  });
 });
 
 const model = (overrides: Partial<ServerProviderModel>): ServerProviderModel => ({
