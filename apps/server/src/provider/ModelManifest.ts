@@ -75,12 +75,23 @@ const encodeManifestCache = Schema.encodeEffect(
   ),
 );
 
+/**
+ * Fork-local catalog additions upstream's manifest does not know about yet.
+ * The remote manifest is fetched from upstream `main`, so without this
+ * override every fork-added model would land in the legacy section. Remove a
+ * slug once upstream's manifest lists it.
+ */
+const FORK_CURRENT_MODELS: Partial<Record<string, ReadonlyArray<string>>> = {
+  claudeAgent: ["claude-fable-5-1"],
+};
+
 /** True when the manifest classifies `slug` as legacy for `driverKind`. */
 export function isLegacyModel(
   manifest: ModelManifestData,
   driverKind: ProviderDriverKind,
   slug: string,
 ): boolean {
+  if (FORK_CURRENT_MODELS[driverKind]?.includes(slug)) return false;
   const currentModels = manifest.currentModels[driverKind];
   if (!currentModels) return false;
   return !currentModels.includes(slug);
