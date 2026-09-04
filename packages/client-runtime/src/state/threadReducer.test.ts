@@ -1017,6 +1017,81 @@ describe("applyThreadDetailEvent", () => {
         ]);
       }
     });
+
+    it("excludes the retracted message from a paginated thread window", () => {
+      const paginatedThread: OrchestrationThread = {
+        ...baseThread,
+        messages: [
+          {
+            id: MessageId.make("msg-user-loaded"),
+            role: "user",
+            text: "Loaded history",
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-04-01T01:00:00.000Z",
+            updatedAt: "2026-04-01T01:00:00.000Z",
+          },
+          {
+            id: MessageId.make("msg-assistant-loaded"),
+            role: "assistant",
+            text: "Loaded response",
+            turnId: TurnId.make("turn-287"),
+            streaming: false,
+            createdAt: "2026-04-01T02:00:00.000Z",
+            updatedAt: "2026-04-01T02:00:00.000Z",
+          },
+          {
+            id: MessageId.make("msg-user-retracted"),
+            role: "user",
+            text: "Retract me",
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-04-01T03:00:00.000Z",
+            updatedAt: "2026-04-01T03:00:00.000Z",
+          },
+        ],
+        checkpoints: [
+          {
+            turnId: TurnId.make("turn-287"),
+            checkpointTurnCount: 287,
+            checkpointRef: CheckpointRef.make("ref-287"),
+            status: "ready",
+            files: [],
+            assistantMessageId: MessageId.make("msg-assistant-loaded"),
+            completedAt: "2026-04-01T02:00:00.000Z",
+          },
+        ],
+      };
+      const completedAt = "2026-04-01T04:00:00.000Z";
+
+      const result = applyThreadDetailEvent(paginatedThread, {
+        ...baseEventFields,
+        sequence: 16,
+        occurredAt: completedAt,
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.reverted",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          turnCount: 287,
+          retraction: {
+            requestId: CommandId.make("cmd-retract-paginated"),
+            messageId: MessageId.make("msg-user-retracted"),
+            turnId: null,
+            firstUserMessage: false,
+            completedAt,
+          },
+        },
+      });
+
+      expect(result.kind).toBe("updated");
+      if (result.kind === "updated") {
+        expect(result.thread.messages.map((message) => message.id)).toEqual([
+          "msg-user-loaded",
+          "msg-assistant-loaded",
+        ]);
+      }
+    });
   });
 
   describe("retraction projection", () => {
