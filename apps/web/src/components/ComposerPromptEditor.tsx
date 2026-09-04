@@ -5,6 +5,7 @@ import { LexicalErrorBoundary } from "@lexical/react/LexicalErrorBoundary";
 import { HistoryPlugin } from "@lexical/react/LexicalHistoryPlugin";
 import { OnChangePlugin } from "@lexical/react/LexicalOnChangePlugin";
 import { PlainTextPlugin } from "@lexical/react/LexicalPlainTextPlugin";
+import { useLexicalEditable } from "@lexical/react/useLexicalEditable";
 import { type ServerProviderSkill } from "@t3tools/contracts";
 import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
 import { serializePastedText } from "@t3tools/shared/pastedText";
@@ -13,6 +14,7 @@ import {
   $createRangeSelectionFromDom,
   $createRangeSelection,
   $getSelection,
+  $getNodeByKey,
   $setSelection,
   $isElementNode,
   $isLineBreakNode,
@@ -437,9 +439,35 @@ function $createComposerTerminalContextNode(
   return $applyNodeReplacement(new ComposerTerminalContextNode(context));
 }
 
-function ComposerPastedTextDecorator(props: { text: string; ordinal: number }) {
+function ComposerPastedTextDecorator(props: { text: string; ordinal: number; nodeKey: NodeKey }) {
+  const [editor] = useLexicalComposerContext();
+  const isEditable = useLexicalEditable();
   const [expanded, setExpanded] = useState(false);
+  const [draft, setDraft] = useState(props.text);
   const label = `Pasted text #${props.ordinal}`;
+
+  useEffect(() => {
+    setDraft(props.text);
+  }, [props.text]);
+
+  const updateText = useCallback(
+    (text: string) => {
+      setDraft(text);
+      editor.update(() => {
+        const node = $getNodeByKey(props.nodeKey);
+        if (node instanceof ComposerPastedTextNode) {
+          node.setText(text);
+        }
+      });
+    },
+    [editor, props.nodeKey],
+  );
+  const stopEditorPropagation = useCallback((event: React.SyntheticEvent) => {
+    event.stopPropagation();
+  }, []);
+  // Input is committed during capture so it cannot also reach Lexical's outer
+  // editor. Keep an onChange handler so React recognizes the controlled field.
+  const acknowledgeControlledInput = useCallback(() => undefined, []);
 
   return (
     <span
@@ -463,15 +491,34 @@ function ComposerPastedTextDecorator(props: { text: string; ordinal: number }) {
         </span>
       </button>
       {expanded ? (
-        <span className="max-h-48 max-w-[min(40rem,calc(100vw-4rem))] overflow-auto whitespace-pre-wrap wrap-break-word rounded-md border border-border/70 bg-background/80 px-2 py-1.5 text-left font-mono text-[0.78em] leading-relaxed text-foreground shadow-sm">
-          {props.text}
-        </span>
+        <textarea
+          aria-label={`Edit ${label}`}
+          className="field-sizing-content max-h-48 min-h-20 w-[min(40rem,calc(100vw-4rem))] max-w-full resize-none overflow-auto whitespace-pre-wrap wrap-break-word rounded-md border border-border/70 bg-background/80 px-2 py-1.5 text-left font-mono text-[0.78em] leading-relaxed text-foreground shadow-sm outline-none focus:border-ring focus:ring-2 focus:ring-ring/24 disabled:cursor-not-allowed disabled:opacity-64"
+          disabled={!isEditable}
+          spellCheck={false}
+          value={draft}
+          onBeforeInputCapture={stopEditorPropagation}
+          onClickCapture={stopEditorPropagation}
+          onChange={acknowledgeControlledInput}
+          onCompositionEndCapture={stopEditorPropagation}
+          onCompositionStartCapture={stopEditorPropagation}
+          onCopyCapture={stopEditorPropagation}
+          onCutCapture={stopEditorPropagation}
+          onDropCapture={stopEditorPropagation}
+          onInputCapture={(event) => {
+            event.stopPropagation();
+            updateText(event.currentTarget.value);
+          }}
+          onKeyDownCapture={stopEditorPropagation}
+          onPasteCapture={stopEditorPropagation}
+          onPointerDownCapture={stopEditorPropagation}
+        />
       ) : null}
     </span>
   );
 }
 
-class ComposerPastedTextNode extends DecoratorNode<React.ReactElement> {
+export class ComposerPastedTextNode extends DecoratorNode<React.ReactElement> {
   __text: string;
   __ordinal: number;
 
@@ -518,6 +565,15 @@ class ComposerPastedTextNode extends DecoratorNode<React.ReactElement> {
     return serializePastedText(this.__text);
   }
 
+  setText(text: string): void {
+    if (text.length === 0) {
+      this.remove();
+      return;
+    }
+    const writable = this.getWritable();
+    writable.__text = text;
+  }
+
   override isInline(): true {
     return true;
   }
@@ -528,11 +584,17 @@ class ComposerPastedTextNode extends DecoratorNode<React.ReactElement> {
   }
 
   override decorate(): React.ReactElement {
-    return <ComposerPastedTextDecorator text={this.__text} ordinal={this.__ordinal} />;
+    return (
+      <ComposerPastedTextDecorator
+        text={this.__text}
+        ordinal={this.__ordinal}
+        nodeKey={this.getKey()}
+      />
+    );
   }
 }
 
-function $createComposerPastedTextNode(text: string, ordinal = 1): ComposerPastedTextNode {
+export function $createComposerPastedTextNode(text: string, ordinal = 1): ComposerPastedTextNode {
   return $applyNodeReplacement(new ComposerPastedTextNode(text, ordinal));
 }
 
