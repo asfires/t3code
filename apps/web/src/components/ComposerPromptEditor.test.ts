@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   $createParagraphNode,
   $createTextNode,
+  $getNodeByKey,
   $getRoot,
   $getSelection,
   $isRangeSelection,
@@ -9,15 +10,87 @@ import {
   createEditor,
   PASTE_COMMAND,
 } from "lexical";
+import { serializePastedText } from "@t3tools/shared/pastedText";
 
 import { registerComposerInlineTokenPaste } from "./composerInlineTokenPaste";
-import { isComposerPromptEditorBeyondMinimumHeight } from "./ComposerPromptEditor";
+import {
+  $createComposerPastedTextNode,
+  ComposerPastedTextNode,
+  isComposerPromptEditorBeyondMinimumHeight,
+} from "./ComposerPromptEditor";
 
 describe("isComposerPromptEditorBeyondMinimumHeight", () => {
   it("reports the first physical height increase beyond the editor minimum", () => {
     expect(isComposerPromptEditorBeyondMinimumHeight({ clientHeight: 70 }, 70)).toBe(false);
     expect(isComposerPromptEditorBeyondMinimumHeight({ clientHeight: 71 }, 70)).toBe(false);
     expect(isComposerPromptEditorBeyondMinimumHeight({ clientHeight: 92 }, 70)).toBe(true);
+  });
+});
+
+describe("ComposerPastedTextNode", () => {
+  it("updates the serialized prompt when its expanded editor changes", () => {
+    const editor = createEditor({ nodes: [ComposerPastedTextNode] });
+    let nodeKey = "";
+
+    editor.update(
+      () => {
+        const paragraph = $createParagraphNode();
+        $getRoot().append(paragraph);
+        const pastedText = $createComposerPastedTextNode("original pasted text");
+        paragraph.append(pastedText);
+        nodeKey = pastedText.getKey();
+      },
+      { discrete: true },
+    );
+    editor.update(
+      () => {
+        const pastedText = $getNodeByKey(nodeKey);
+        expect(pastedText).toBeInstanceOf(ComposerPastedTextNode);
+        if (pastedText instanceof ComposerPastedTextNode) {
+          pastedText.setText("edited pasted text");
+        }
+      },
+      { discrete: true },
+    );
+
+    expect(editor.getEditorState().read(() => $getRoot().getTextContent())).toBe(
+      serializePastedText("edited pasted text"),
+    );
+  });
+
+  it("removes the pasted-text block when its expanded editor is cleared", () => {
+    const editor = createEditor({ nodes: [ComposerPastedTextNode] });
+    let nodeKey = "";
+    let retainedNodeKey = "";
+
+    editor.update(
+      () => {
+        const paragraph = $createParagraphNode();
+        $getRoot().append(paragraph);
+        const pastedText = $createComposerPastedTextNode("delete all of this");
+        const retainedPastedText = $createComposerPastedTextNode("keep this block");
+        paragraph.append(pastedText, retainedPastedText);
+        nodeKey = pastedText.getKey();
+        retainedNodeKey = retainedPastedText.getKey();
+      },
+      { discrete: true },
+    );
+    editor.update(
+      () => {
+        const pastedText = $getNodeByKey(nodeKey);
+        expect(pastedText).toBeInstanceOf(ComposerPastedTextNode);
+        if (pastedText instanceof ComposerPastedTextNode) {
+          pastedText.setText("");
+        }
+      },
+      { discrete: true },
+    );
+
+    editor.getEditorState().read(() => {
+      expect($getNodeByKey(nodeKey)).toBeNull();
+      expect($getNodeByKey(retainedNodeKey)).toBeInstanceOf(ComposerPastedTextNode);
+      expect($getRoot().getTextContent()).toBe(serializePastedText("keep this block"));
+    });
   });
 });
 
