@@ -19,6 +19,11 @@ export default defineConfig({
     ],
     hookTimeout: 60_000,
     testTimeout: 60_000,
+    setupFiles: [
+      NodeURL.fileURLToPath(
+        new URL("./packages/shared/src/testing/longTempDir.ts", import.meta.url),
+      ),
+    ],
   },
   staged: {
     // Formatter only for now — no lint or typecheck on commit.
@@ -171,7 +176,7 @@ export default defineConfig({
         "apps/server/src/orchestration/Layers/ThreadDeletionReactor.test.ts": 2,
         "apps/server/src/orchestration/Layers/TurnRetractionReactor.test.ts": 8,
         "apps/server/src/orchestration/commandInvariants.test.ts": 5,
-        "apps/server/src/orchestration/projector.test.ts": 20,
+        "apps/server/src/orchestration/projector.test.ts": 32,
         "apps/server/src/provider/Layers/CodexAdapter.test.ts": 1,
         "apps/server/src/provider/Layers/CodexSessionRuntime.test.ts": 5,
         "apps/server/src/provider/Layers/CursorAdapter.test.ts": 1,
