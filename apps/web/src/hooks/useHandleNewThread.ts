@@ -35,7 +35,13 @@ import {
   resolveConfiguredProviderOptionDefaults,
   resolveConfiguredRuntimeMode,
 } from "@t3tools/shared/model";
-import { readThreadShell, useProjects, useServerConfigs, useThread } from "../state/entities";
+import {
+  readProjects,
+  readThreadShell,
+  useProjects,
+  useThread,
+  useServerConfigs,
+} from "../state/entities";
 import { resolveNewDraftStartFromOrigin } from "../lib/chatThreadActions";
 import { readT3ProjectFileDefaultThreadEnvMode } from "../lib/t3ProjectFileDefaults";
 import { primaryServerSettingsAtom } from "../state/server";
@@ -89,13 +95,19 @@ function resolveAdapterDefaultSelection(
 }
 
 export function resolveNewThreadConfiguredState(input: {
+  projectDefaultModel?: ModelSelection | null | undefined;
   configuredModel: ModelSelection | null | undefined;
   carryModel: ModelSelection | null | undefined;
   stickyActiveProvider: ModelSelection | null | undefined;
   providers: ReadonlyArray<ServerProvider>;
   settings: Pick<ServerSettings, "providerNewThreadDefaults">;
 }) {
+  const projectModel = resolveSelectableNewThreadSelection(
+    input.projectDefaultModel,
+    input.providers,
+  );
   const modelSelection =
+    projectModel ??
     resolveSelectableNewThreadSelection(input.configuredModel, input.providers) ??
     resolveSelectableNewThreadSelection(input.carryModel, input.providers) ??
     resolveSelectableNewThreadSelection(input.stickyActiveProvider, input.providers) ??
@@ -107,11 +119,13 @@ export function resolveNewThreadConfiguredState(input: {
     (candidate) => candidate.instanceId === modelSelection.instanceId,
   );
   const model = provider?.models.find((candidate) => candidate.slug === modelSelection.model);
-  const options = resolveConfiguredProviderOptionDefaults({
-    settings: input.settings,
-    instanceId: modelSelection.instanceId,
-    descriptors: model?.capabilities?.optionDescriptors ?? [],
-  });
+  const options =
+    (projectModel ? input.projectDefaultModel?.options : undefined) ??
+    resolveConfiguredProviderOptionDefaults({
+      settings: input.settings,
+      instanceId: modelSelection.instanceId,
+      descriptors: model?.capabilities?.optionDescriptors ?? [],
+    });
   return {
     modelSelection: createModelSelection(modelSelection.instanceId, modelSelection.model, options),
     // Permission mode is provider-bound: the provider's configured default,
@@ -135,7 +149,6 @@ function pickExplicitWorkspaceOptions(options: NewThreadWorkspaceOptions | undef
 }
 
 export function useNewThreadHandler() {
-  const projects = useProjects();
   const serverConfigs = useServerConfigs();
   // New-thread defaults are a user preference, and the settings UI only ever
   // edits the primary environment's settings.json. Reading the target
@@ -159,26 +172,18 @@ export function useNewThreadHandler() {
         envMode?: DraftThreadEnvMode;
         startFromOrigin?: boolean;
         replace?: boolean;
-        /**
-         * Move the viewed draft's typed content (prompt + images) into the
-         * draft this request lands on. Set by the draft repo picker: the
-         * user started writing in the wrong project and the text should
-         * follow them. Explicit new-thread surfaces leave this unset and
-         * keep mint-fresh semantics.
-         */
-        carryComposerContent?: boolean;
       },
       // Which draft the thread ended up in, so a caller that has something to put in it — a
       // prepared checkout, a task to write — addresses that one rather than looking the project
       // up again and finding whichever draft it happens to hold.
     ): Promise<{ draftId: DraftId; threadId: ThreadId } | null> => {
+      const projects = readProjects();
       const {
         getComposerDraft,
         getDraftSessionByLogicalProjectKey,
         getDraftSession,
         getDraftThread,
         applyStickyState,
-        moveComposerPromptAndImages,
         setDraftThreadContext,
         setLogicalProjectDraftThreadId,
         setModelSelection,
@@ -186,6 +191,8 @@ export function useNewThreadHandler() {
         stickyActiveProvider,
         stickyModelSelectionByProvider,
       } = useComposerDraftStore.getState();
+      const requestingRouteHref = router.state.location.href;
+      const routeChangedSinceRequest = () => router.state.location.href !== requestingRouteHref;
       const currentRouteTarget = getCurrentRouteTarget();
       // A new thread can carry the viewed provider/model and interaction
       // mode. Model options and permission mode come from the selected
@@ -218,27 +225,6 @@ export function useNewThreadHandler() {
         carrySourceShell?.interactionMode ??
         carrySourceDraft?.interactionMode ??
         null;
-      // Content only moves when the caller opted in and the user is looking
-      // at a draft. The content check happens at move time, not here: the
-      // paths below await, and text typed during those awaits must still
-      // come along.
-      const carryContentSourceDraftId =
-        options?.carryComposerContent === true && currentRouteTarget?.kind === "draft"
-          ? currentRouteTarget.draftId
-          : null;
-      const carryComposerContentTo = (destinationDraftId: DraftId) => {
-        if (
-          carryContentSourceDraftId &&
-          carryContentSourceDraftId !== destinationDraftId &&
-          // Never clobber a destination the user already invested in — the
-          // move overwrites the destination prompt, so a concurrent repo
-          // change that carried content first must win.
-          !composerDraftHasUserContent(getComposerDraft(destinationDraftId)) &&
-          composerDraftHasUserContent(getComposerDraft(carryContentSourceDraftId))
-        ) {
-          moveComposerPromptAndImages(carryContentSourceDraftId, destinationDraftId);
-        }
-      };
       const project = projects.find(
         (candidate) =>
           candidate.id === projectRef.projectId &&
@@ -251,6 +237,7 @@ export function useNewThreadHandler() {
         ? stickyModelSelectionByProvider[stickyActiveProvider]
         : null;
       const newThreadState = resolveNewThreadConfiguredState({
+        projectDefaultModel: project?.defaultModelSelection,
         configuredModel: targetSettings.newThreadModel,
         carryModel: carryModelSelection,
         stickyActiveProvider: stickyModelSelection,
@@ -325,13 +312,18 @@ export function useNewThreadHandler() {
           // env context resets to the configured defaults so drafts seeded
           // before a defaults change (or by the old carry-over behavior) stop
           // landing on "current checkout" branches forever. When the draft is
-          // already open and no options were passed, leave it alone entirely —
-          // the user may have just picked a branch in the composer.
+          // already open and no options were passed, leave its workspace
+          // context alone entirely — the user may have just picked a branch
+          // in the composer. Model selection has its own explicit-pick rule
+          // below and does not follow this guard.
           let workspaceContext: NewThreadWorkspaceOptions | null = null;
           if (hasExplicitWorkspaceOption) {
             workspaceContext = pickExplicitWorkspaceOptions(options);
           } else if (!isDraftAlreadyOpen) {
             const defaultEnvMode = await resolveDefaultEnvMode();
+            if (routeChangedSinceRequest()) {
+              return null;
+            }
             // The await yields. If the draft was opened (a concurrent
             // invocation's navigation landed), promoted to a real thread,
             // remapped away (a concurrent invocation registered a fresh
@@ -397,7 +389,6 @@ export function useNewThreadHandler() {
               ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
             },
           );
-          carryComposerContentTo(emptyStoredDraftThread.draftId);
           const opened = {
             draftId: emptyStoredDraftThread.draftId,
             threadId: emptyStoredDraftThread.threadId,
@@ -456,6 +447,9 @@ export function useNewThreadHandler() {
       const createdAt = new Date().toISOString();
       return (async () => {
         const initialEnvMode = options?.envMode ?? (await resolveDefaultEnvMode());
+        if (routeChangedSinceRequest()) {
+          return null;
+        }
         // The await yields, so a concurrent invocation may have registered a
         // draft for this logical project in the meantime. Registering ours
         // too would evict that draft while its navigation is in flight —
@@ -485,7 +479,6 @@ export function useNewThreadHandler() {
             interactionMode: racedDraft.interactionMode,
             ...pickExplicitWorkspaceOptions(options),
           });
-          carryComposerContentTo(racedDraft.draftId);
           await router.navigate({
             to: "/draft/$draftId",
             params: { draftId: racedDraft.draftId },
@@ -512,8 +505,6 @@ export function useNewThreadHandler() {
         if (newThreadState.modelSelection) {
           setModelSelection(draftId, newThreadState.modelSelection, { replaceOptions: true });
         }
-        carryComposerContentTo(draftId);
-
         await router.navigate({
           to: "/draft/$draftId",
           params: { draftId },
@@ -522,14 +513,7 @@ export function useNewThreadHandler() {
         return { draftId, threadId };
       })();
     },
-    [
-      getCurrentRouteTarget,
-      primaryServerSettings,
-      projectGroupingSettings,
-      projects,
-      router,
-      serverConfigs,
-    ],
+    [getCurrentRouteTarget, primaryServerSettings, projectGroupingSettings, router, serverConfigs],
   );
 }
 

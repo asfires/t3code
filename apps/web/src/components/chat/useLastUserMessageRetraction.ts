@@ -1,5 +1,5 @@
+import { CommandId } from "@t3tools/contracts";
 import type {
-  CommandId,
   MessageId,
   ProviderInteractionMode,
   RuntimeMode,
@@ -15,7 +15,7 @@ import { useCallback, useEffect, useRef, type RefObject } from "react";
 
 import type { ComposerHandleRef } from "../../composerHandleContext";
 import type { ComposerImageAttachment, DraftThreadEnvMode } from "../../composerDraftStore";
-import { newCommandId, newDraftId, newThreadId } from "../../lib/utils";
+import { newDraftId, newThreadId, randomUUID } from "../../lib/utils";
 import { threadEnvironment } from "../../state/threads";
 import type { Thread } from "../../types";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -267,7 +267,7 @@ export function useLastUserMessageRetraction(input: {
     }
     recoveryPreparationRef.current = true;
 
-    const requestId = newCommandId();
+    const requestId = CommandId.make(randomUUID());
     const createdAt = new Date().toISOString();
     const sourceThreadRef = scopeThreadRef(activeThread.environmentId, activeThread.id);
     const prompt =

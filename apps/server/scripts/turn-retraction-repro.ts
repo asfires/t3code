@@ -9,9 +9,9 @@ import {
   ThreadId,
   WsRpcGroup,
 } from "@t3tools/contracts";
-import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodeSqlite from "node:sqlite";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
@@ -72,15 +72,23 @@ const modelSelection = {
   model: provider === "codex" ? "gpt-5.4" : "claude-sonnet-4-6",
 };
 
-mkdirSync(workspaceRoot, { recursive: true });
-writeFileSync(`${workspaceRoot}/README.md`, "# Turn retraction repro\n");
-execFileSync("git", ["init", "--quiet"], { cwd: workspaceRoot });
-execFileSync("git", ["config", "user.name", "T3 Retraction Repro"], { cwd: workspaceRoot });
-execFileSync("git", ["config", "user.email", "repro@t3.local"], { cwd: workspaceRoot });
-execFileSync("git", ["add", "README.md"], { cwd: workspaceRoot });
-execFileSync("git", ["commit", "--allow-empty", "--quiet", "-m", "repro baseline"], {
+NodeFS.mkdirSync(workspaceRoot, { recursive: true });
+NodeFS.writeFileSync(`${workspaceRoot}/README.md`, "# Turn retraction repro\n");
+NodeChildProcess.execFileSync("git", ["init", "--quiet"], { cwd: workspaceRoot });
+NodeChildProcess.execFileSync("git", ["config", "user.name", "T3 Retraction Repro"], {
   cwd: workspaceRoot,
 });
+NodeChildProcess.execFileSync("git", ["config", "user.email", "repro@t3.local"], {
+  cwd: workspaceRoot,
+});
+NodeChildProcess.execFileSync("git", ["add", "README.md"], { cwd: workspaceRoot });
+NodeChildProcess.execFileSync(
+  "git",
+  ["commit", "--allow-empty", "--quiet", "-m", "repro baseline"],
+  {
+    cwd: workspaceRoot,
+  },
+);
 
 const bootstrapResponse = await fetch(`${httpOrigin}/api/auth/browser-session`, {
   method: "POST",
@@ -93,7 +101,9 @@ if (!bootstrapResponse.ok) {
 const sessionCookie = bootstrapResponse.headers.getSetCookie()[0]?.split(";", 1)[0];
 if (!sessionCookie) throw new Error("pairing credential exchange returned no session cookie");
 
-const database = new DatabaseSync(`${baseDir}/userdata/state.sqlite`, { readOnly: true });
+const database = new NodeSqlite.DatabaseSync(`${baseDir}/userdata/state.sqlite`, {
+  readOnly: true,
+});
 const queryOne = <T>(sql: string, ...params: ReadonlyArray<string>): T | undefined =>
   database.prepare(sql).get(...params) as T | undefined;
 const waitFor = async <T>(

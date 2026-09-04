@@ -1,3 +1,5 @@
+import type { AssistantCitation } from "@t3tools/contracts";
+import { collectAssistantCitations } from "@t3tools/shared/assistantCitations";
 import {
   INLINE_TERMINAL_CONTEXT_PLACEHOLDER,
   type TerminalContextDraft,
@@ -21,6 +23,11 @@ export type ComposerPromptSegment =
   | {
       type: "skill";
       name: string;
+    }
+  | {
+      type: "citation";
+      citation: AssistantCitation;
+      source: string;
     }
   | {
       type: "terminal-context";
@@ -138,22 +145,31 @@ function forEachMentionMatch(
   ) => boolean | void,
 ): boolean {
   return forEachPromptTextSlice(prompt, (text, promptOffset) => {
-    let segmentOffset = 0;
-    for (const segment of splitPastedTextSegments(text)) {
-      if (segment.type === "text") {
-        for (const match of collectComposerInlineTokens(segment.text)) {
-          if (match.type !== "mention") {
-            continue;
-          }
-          if (visitor(match, promptOffset + segmentOffset) === true) {
-            return true;
-          }
-        }
+    for (const match of collectComposerPromptInlineTokens(text)) {
+      if (match.type !== "mention") {
+        continue;
       }
-      segmentOffset += segment.type === "text" ? segment.text.length : segment.source.length;
+      if (visitor(match, promptOffset) === true) {
+        return true;
+      }
     }
     return false;
   });
+}
+
+export function collectComposerPromptInlineTokens(text: string) {
+  const tokens = collectComposerInlineTokens(text);
+  const citations = collectAssistantCitations(text);
+  if (citations.length === 0) return tokens;
+
+  // An unfinished @ mention can otherwise consume the start of a citation's label.
+  return [
+    ...tokens.filter(
+      (token) =>
+        !citations.some((citation) => token.start < citation.end && token.end > citation.start),
+    ),
+    ...citations.map((match) => ({ ...match, type: "citation" as const })),
+  ].sort((left, right) => left.start - right.start);
 }
 
 function splitPromptTextIntoComposerSegments(text: string): ComposerPromptSegment[] {
@@ -162,40 +178,34 @@ function splitPromptTextIntoComposerSegments(text: string): ComposerPromptSegmen
     return segments;
   }
 
-  for (const pastedTextSegment of splitPastedTextSegments(text)) {
-    if (pastedTextSegment.type === "pasted-text") {
-      segments.push(pastedTextSegment);
+  const tokenMatches = collectComposerPromptInlineTokens(text);
+  let cursor = 0;
+  for (const match of tokenMatches) {
+    if (match.start < cursor) {
       continue;
     }
 
-    const plainText = pastedTextSegment.text;
-    const tokenMatches = collectComposerInlineTokens(plainText);
-    let cursor = 0;
-    for (const match of tokenMatches) {
-      if (match.start < cursor) {
-        continue;
-      }
-
-      if (match.start > cursor) {
-        pushTextSegment(segments, plainText.slice(cursor, match.start));
-      }
-
-      if (match.type === "mention") {
-        segments.push({
-          type: "mention",
-          path: match.value,
-          source: match.source,
-        });
-      } else {
-        segments.push({ type: "skill", name: match.value });
-      }
-
-      cursor = match.end;
+    if (match.start > cursor) {
+      pushTextSegment(segments, text.slice(cursor, match.start));
     }
 
-    if (cursor < plainText.length) {
-      pushTextSegment(segments, plainText.slice(cursor));
+    if (match.type === "citation") {
+      segments.push({ type: "citation", citation: match.citation, source: match.source });
+    } else if (match.type === "mention") {
+      segments.push({
+        type: "mention",
+        path: match.value,
+        source: match.source,
+      });
+    } else {
+      segments.push({ type: "skill", name: match.value });
     }
+
+    cursor = match.end;
+  }
+
+  if (cursor < text.length) {
+    pushTextSegment(segments, text.slice(cursor));
   }
 
   return segments;

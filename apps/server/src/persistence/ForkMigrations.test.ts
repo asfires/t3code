@@ -11,11 +11,11 @@ import {
   forkMigrationsTable,
   runAllMigrations,
 } from "./ForkMigrations.ts";
-import * as NodeSqliteClient from "./NodeSqliteClient.ts";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 const freshLayer = () => it.layer(Layer.fresh(Layer.mergeAll(NodeSqliteClient.layerMemory())));
 
-const upstreamLatestId = migrationManifest.at(-1)![0];
+const legacyUpstreamLatestId = 40;
 const legacyForkRow = (id: number) => 40 + id;
 
 const readLedger = (table: string) =>
@@ -34,7 +34,7 @@ const readIds = (table: string) =>
 // Reproduces a database from before the split: fork migrations applied
 // through upstream's ledger as 041..046.
 const applyLegacyForkMigrations = Effect.gen(function* () {
-  yield* runMigrations();
+  yield* runMigrations({ toMigrationInclusive: legacyUpstreamLatestId });
   const legacyLoader = Migrator.fromRecord(
     Object.fromEntries(
       forkMigrationEntries.map(([id, name, migration]) => [
@@ -79,7 +79,7 @@ freshLayer()("ForkMigrations on a database migrated before the split", (it) => {
       yield* sql`
         UPDATE effect_sql_migrations
         SET created_at = '2026-08-12 03:04:05'
-        WHERE migration_id > ${upstreamLatestId}
+        WHERE migration_id > ${legacyUpstreamLatestId}
       `;
       // A projection row that a re-run of the rebuild migrations would wipe.
       yield* sql`
@@ -89,7 +89,10 @@ freshLayer()("ForkMigrations on a database migrated before the split", (it) => {
 
       const result = yield* runAllMigrations();
 
-      assert.deepEqual(result, { upstream: [], fork: [] });
+      assert.deepEqual(result, {
+        upstream: migrationManifest.filter(([id]) => id > legacyUpstreamLatestId),
+        fork: [],
+      });
       assert.deepEqual(
         yield* readIds("effect_sql_migrations"),
         migrationManifest.map(([id]) => id),
@@ -131,8 +134,9 @@ freshLayer()(
           [forkMigrationEntries.length],
         );
         assert.deepEqual(yield* readIds("effect_sql_migrations"), [
-          ...migrationManifest.map(([id]) => id),
+          ...migrationManifest.filter(([id]) => id <= legacyUpstreamLatestId).map(([id]) => id),
           takenId,
+          ...migrationManifest.filter(([id]) => id > takenId).map(([id]) => id),
         ]);
         assert.deepEqual(
           yield* readIds(forkMigrationsTable),
@@ -168,7 +172,7 @@ freshLayer()("ForkMigrations when the fork ledger already holds a different migr
       }
       // The transaction rolled back: every legacy row is still in place.
       assert.deepEqual(yield* readIds("effect_sql_migrations"), [
-        ...migrationManifest.map(([id]) => id),
+        ...migrationManifest.filter(([id]) => id <= legacyUpstreamLatestId).map(([id]) => id),
         ...forkMigrationManifest.map(([id]) => legacyForkRow(id)),
       ]);
       assert.deepEqual(yield* readIds(forkMigrationsTable), [forkMigrationEntries.length]);

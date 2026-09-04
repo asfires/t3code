@@ -41,6 +41,7 @@ import * as ServerRuntimeStartup from "../src/serverRuntimeStartup.ts";
 import * as ServerSettings from "../src/serverSettings.ts";
 import * as AnalyticsService from "../src/telemetry/AnalyticsService.ts";
 import * as WorkspacePaths from "../src/workspace/WorkspacePaths.ts";
+import * as GitVcsDriver from "../src/vcs/GitVcsDriver.ts";
 
 const providerInstanceId = ProviderInstanceId.make("codex");
 const projectId = ProjectId.make("project-startup-orphan");
@@ -107,15 +108,18 @@ const startupDependencies = Layer.mergeAll(
     }),
   ),
   AnalyticsService.layerTest,
+  Layer.mock(GitVcsDriver.GitVcsDriver)({}),
   Layer.succeed(ProviderService.ProviderService, {
     startSession: () => Effect.die("unused"),
     sendTurn: () => Effect.die("unused"),
+    compactThread: () => Effect.die("unused"),
     interruptTurn: () => Effect.die("unused"),
     respondToRequest: () => Effect.die("unused"),
     respondToUserInput: () => Effect.die("unused"),
     stopSession: () => Effect.die("unused"),
     listSessions: () => Effect.succeed([]),
     getCapabilities: () => Effect.die("unused"),
+    assertConversationRollbackSupported: () => Effect.die("unused"),
     getInstanceInfo: () => Effect.die("unused"),
     rollbackConversation: () => Effect.die("unused"),
     rollbackConversationTo: () => Effect.die("unused"),

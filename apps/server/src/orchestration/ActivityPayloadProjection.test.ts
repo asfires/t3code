@@ -123,7 +123,13 @@ describe("projectActivityPayload", () => {
         data: {
           toolName: "Bash",
           input: { command: "vp test run" },
-          result: { content: "x".repeat(5_000) },
+          result: {
+            type: "tool_result",
+            content: [
+              { type: "text", text: "tests passed" },
+              { type: "text", text: "x".repeat(5_000) },
+            ],
+          },
         },
       }),
     );
@@ -146,13 +152,48 @@ describe("projectActivityPayload", () => {
     // can show it; only the command is normalized to a top-level field.
     expect(claude.payload).toMatchObject({
       toolCallId: "claude-call-1",
-      data: { command: "vp test run", result: { content: "x".repeat(5_000) } },
+      data: {
+        command: "vp test run",
+        result: {
+          content: [
+            { type: "text", text: "tests passed" },
+            { type: "text", text: "x".repeat(5_000) },
+          ],
+        },
+      },
     });
     expect(openCode.payload).toMatchObject({
       toolCallId: "opencode-call-1",
       data: { command: "vp lint", state: { status: "running", output: "x".repeat(5_000) } },
     });
     expect((claude.payload as Record<string, unknown>).data).not.toHaveProperty("resultTruncated");
+  });
+
+  it("keeps full Claude Read image paths through repeated projection", () => {
+    const imagePath = `/workspace/${"nested folder/".repeat(16)}reference image.webp`;
+    const projected = projectActivityPayload(
+      activity({
+        itemType: "dynamic_tool_call",
+        detail: 'Read: {"file_path":"truncated..."}',
+        data: {
+          toolName: "Read",
+          input: { file_path: imagePath },
+          result: { content: "Image Size: 1280x720." },
+        },
+      }),
+    );
+    const projectedAgain = projectActivityPayload(projected);
+
+    expect(projected.payload).toMatchObject({ data: { imagePath } });
+    expect(projectedAgain.payload).toMatchObject({ data: { imagePath } });
+
+    const textRead = projectActivityPayload(
+      activity({
+        itemType: "dynamic_tool_call",
+        data: { toolName: "Read", input: { file_path: "/workspace/src/index.ts" } },
+      }),
+    );
+    expect(textRead.payload).not.toMatchObject({ data: { imagePath: expect.anything() } });
   });
 
   it("slims Codex-shaped mcp_tool_call items to rendered fields while retaining the result", () => {

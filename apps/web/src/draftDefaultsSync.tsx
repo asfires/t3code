@@ -3,7 +3,7 @@ import { type EnvironmentId, type ServerConfig } from "@t3tools/contracts";
 import { useEffect, useRef } from "react";
 import { DraftId, type DraftSessionState, useComposerDraftStore } from "./composerDraftStore";
 import { resolveNewThreadConfiguredState } from "./hooks/useHandleNewThread";
-import { readThreadShell, useServerConfigs } from "./state/entities";
+import { readProject, readThreadShell, useServerConfigs } from "./state/entities";
 
 export interface DraftDefaultsInputSnapshot {
   readonly settingsByEnvironment: ReadonlyMap<EnvironmentId, string>;
@@ -82,6 +82,7 @@ export function syncDraftDefaultsForChangedInputs(input: {
       ? latestStore.stickyModelSelectionByProvider[latestStore.stickyActiveProvider]
       : null;
     const resolved = resolveNewThreadConfiguredState({
+      projectDefaultModel: readProject(projectRef)?.defaultModelSelection,
       configuredModel: serverConfig.settings.newThreadModel,
       carryModel: null,
       stickyActiveProvider: stickySelection,

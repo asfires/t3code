@@ -3,6 +3,7 @@ import type {
   OrchestrationThreadActivity,
   OrchestrationThreadDetailSnapshot,
 } from "@t3tools/contracts";
+import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -317,6 +318,21 @@ function projectCommandValue(data: Record<string, unknown>): unknown {
   return undefined;
 }
 
+function projectViewedImagePath(data: Record<string, unknown>): string | undefined {
+  const directPath = asTrimmedString(data.imagePath);
+  if (directPath && isWorkspaceImagePreviewPath(directPath)) {
+    return directPath;
+  }
+
+  const toolName = asTrimmedString(data.toolName)?.toLowerCase();
+  if (toolName !== "read" && toolName !== "read file") {
+    return undefined;
+  }
+  const input = asRecord(data.input);
+  const inputPath = asTrimmedString(input?.file_path) ?? asTrimmedString(input?.path);
+  return inputPath && isWorkspaceImagePreviewPath(inputPath) ? inputPath : undefined;
+}
+
 /**
  * Fields of an MCP tool-call item clients use for identity and presentation.
  * Result content is retained separately under the tool-output cap.
@@ -437,6 +453,10 @@ export function projectActivityPayload(
   if (command !== undefined) {
     projectedData.command = command;
   }
+  const imagePath = projectViewedImagePath(data);
+  if (imagePath) {
+    projectedData.imagePath = imagePath;
+  }
 
   const changedFiles: string[] = [];
   collectChangedFiles(data, changedFiles, new Set<string>(), 0);
@@ -452,6 +472,9 @@ export function projectActivityPayload(
       projectedData.rawOutput = capped.value;
       resultTruncated ||= capped.truncated;
     }
+  }
+  if ("toolName" in data) {
+    projectedData.toolName = data.toolName;
   }
 
   if (resultTruncated) {
@@ -559,9 +582,6 @@ function toolLifecycleIdentity(activity: OrchestrationThreadActivity): string | 
  * update within the turn — a later update belongs to a subsequent call that
  * reuses the same identity and is still in flight. Rows without a lifecycle
  * identity pass through, matching the clients, which never collapse them.
- * Live `thread.activity-appended` events are untouched: updates still stream
- * in real time and the completion supersedes them on the client as before.
- *
  * Deliberate divergence from client collapse: clients fold only *adjacent*
  * lifecycle rows, so a superseded update separated from its completion by an
  * interleaved parallel call renders as its own row today, and this drop
