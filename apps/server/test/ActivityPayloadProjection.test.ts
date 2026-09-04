@@ -205,6 +205,58 @@ describe("projectActivityPayload", () => {
     });
   });
 
+  it("projects a Claude Bash result for the web and mobile expanded rows", () => {
+    const command = `printf 'first line\nsecond line'\n&& printf done`;
+    const source: OrchestrationThreadActivity = {
+      ...makeActivity("claude-bash", "command_execution", {}),
+      summary: "Command run",
+      payload: {
+        itemType: "command_execution",
+        title: "Command run",
+        detail: `Bash: ${command}`,
+        status: "completed",
+        data: {
+          toolName: "Bash",
+          input: { command },
+          result: {
+            type: "tool_result",
+            tool_use_id: "toolu_1",
+            content: [
+              { type: "text", text: "first output line" },
+              { type: "text", text: "x".repeat(5_000) },
+            ],
+          },
+        },
+      },
+    };
+    const projected = projectActivityPayload(source);
+
+    expect(projected.payload).toMatchObject({
+      data: {
+        toolName: "Bash",
+        command,
+        result: {
+          content: [
+            { type: "text", text: "first output line" },
+            { type: "text", text: "x".repeat(5_000) },
+          ],
+        },
+      },
+    });
+
+    const [webEntry] = deriveWorkLogEntries([projected]);
+    expect(webEntry).toMatchObject({ command, detail: `first output line\n${"x".repeat(5_000)}` });
+
+    const [mobileGroup] = buildThreadFeed(makeThread([projected]));
+    expect(mobileGroup?.type).toBe("activity-group");
+    if (mobileGroup?.type !== "activity-group") return;
+    const [mobileRow] = mobileGroup.activities;
+    expect(mobileRow).toMatchObject({ detail: command, canExpand: true });
+    expect(mobileRow?.getFullDetail()).toContain("first output line");
+    expect(mobileRow?.getFullDetail()).toContain("x".repeat(5_000));
+    expect(mobileRow?.getCopyText()).toContain("x".repeat(5_000));
+  });
+
   it("retains Codex command output and completion metadata", () => {
     const projected = projectActivityPayload(
       makeActivity("codex-command", "command_execution", {

@@ -262,6 +262,9 @@ async function startHarness(
   });
   const engine = OrchestrationEngineService.of({
     readEvents: () => Stream.empty,
+    readThreadEvents: () => Stream.empty,
+    getThreadReplayStats: () => Effect.die("unused"),
+    subscribeDomainEvents: Effect.succeed(Stream.fromPubSub(domainEvents)),
     dispatch,
     get streamDomainEvents() {
       return Stream.fromPubSub(domainEvents);
@@ -312,6 +315,8 @@ async function startHarness(
   const provider = ProviderService.of({
     startSession: () => unsupported(),
     sendTurn: () => unsupported(),
+    compactThread: () => unsupported(),
+    assertConversationRollbackSupported: () => Effect.void,
     interruptTurn: ({ turnId }) =>
       Effect.sync(() => {
         state.order.push("interrupt");

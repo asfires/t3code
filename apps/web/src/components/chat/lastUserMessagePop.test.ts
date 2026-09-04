@@ -7,6 +7,7 @@ import {
   deriveLastUserMessageRestoredText,
   findLastUserMessagePopCandidate,
   IMAGE_ONLY_MESSAGE_PLACEHOLDER,
+  ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
   isLastUserMessagePopWindowOpen,
   mergePoppedPrompt,
 } from "./lastUserMessagePop";
@@ -234,6 +235,21 @@ describe("last user message selection", () => {
   });
 });
 
+it("keeps messages with file attachments in history until files can be restored", () => {
+  expect(
+    findLastUserMessagePopCandidate({
+      messages: [
+        {
+          ...message({ id: "with-file", role: "user" }),
+          attachments: [
+            { type: "file", id: "file", name: "notes.txt", mimeType: "text/plain", sizeBytes: 8 },
+          ],
+        },
+      ],
+    }),
+  ).toBeNull();
+});
+
 describe("last user message restored text", () => {
   it("removes the injected effort prefix and terminal and element decorations", () => {
     const decorated = [
@@ -256,6 +272,7 @@ describe("last user message restored text", () => {
 
   it("turns the image-only placeholder back into an empty prompt", () => {
     expect(deriveLastUserMessageRestoredText(IMAGE_ONLY_MESSAGE_PLACEHOLDER)).toBe("");
+    expect(deriveLastUserMessageRestoredText(ATTACHMENT_ONLY_BOOTSTRAP_PROMPT)).toBe("");
   });
 
   it("merges with an in-progress draft using stash restore semantics", () => {

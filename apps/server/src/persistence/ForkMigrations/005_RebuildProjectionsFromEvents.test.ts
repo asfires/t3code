@@ -8,7 +8,7 @@ import { forkMigrationManifest, runForkMigrations } from "../ForkMigrations.ts";
 import rebuildProjectionsFromEvents, {
   projectionTableNames,
 } from "./005_RebuildProjectionsFromEvents.ts";
-import * as NodeSqliteClient from "../NodeSqliteClient.ts";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
 

@@ -8,6 +8,9 @@ import type { TimelineEntry } from "../../session-logic";
 import type { ChatMessage, SessionPhase } from "../../types";
 import type { ComposerImageAttachment } from "../../composerDraftStore";
 
+export const ATTACHMENT_ONLY_BOOTSTRAP_PROMPT =
+  "[User attached one or more files without additional text. Respond using the conversation context and the attached files.]";
+
 export const IMAGE_ONLY_MESSAGE_PLACEHOLDER =
   "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
 
@@ -19,7 +22,9 @@ export function findLastUserMessagePopCandidate(input: {
   messages: ReadonlyArray<ChatMessage>;
 }): LastUserMessagePopCandidate | null {
   const message = input.messages.findLast((entry) => entry.role === "user");
-  return message ? { message } : null;
+  return message && (message.attachments ?? []).every((attachment) => attachment.type === "image")
+    ? { message }
+    : null;
 }
 
 export function isLastUserMessagePopWindowOpen(input: {
@@ -49,8 +54,6 @@ export function isLastUserMessagePopWindowOpen(input: {
         return entry.entry.turnId === input.activeTurnId && entry.entry.tone !== "thinking";
       case "proposed-plan":
         return entry.proposedPlan.turnId === input.activeTurnId;
-      case "turn-plan":
-        return entry.turnPlan.turnId === input.activeTurnId;
     }
   });
 }
@@ -83,7 +86,11 @@ export function deriveLastUserMessageRestoredText(messageText: string): string {
 
   visibleText = deriveDisplayedUserMessageState(visibleText).visibleText;
   visibleText = extractTrailingElementContexts(visibleText).promptText;
-  if (visibleText === IMAGE_ONLY_MESSAGE_PLACEHOLDER) return "";
+  if (
+    visibleText === IMAGE_ONLY_MESSAGE_PLACEHOLDER ||
+    visibleText === ATTACHMENT_ONLY_BOOTSTRAP_PROMPT
+  )
+    return "";
   return visibleText.startsWith("Ultrathink:\n")
     ? visibleText.slice("Ultrathink:\n".length)
     : visibleText;
@@ -94,7 +101,8 @@ export async function captureLastUserMessageImages(
 ): Promise<{ images: ComposerImageAttachment[]; failedNames: string[] }> {
   const results = await Promise.all(
     (message.attachments ?? []).map(async (attachment) => {
-      if (!attachment.previewUrl) return { name: attachment.name, image: null };
+      if (attachment.type !== "image" || !("previewUrl" in attachment) || !attachment.previewUrl)
+        return { name: attachment.name, image: null };
       try {
         const response = await fetch(attachment.previewUrl);
         if (!response.ok) return { name: attachment.name, image: null };
@@ -108,6 +116,7 @@ export async function captureLastUserMessageImages(
           name: attachment.name,
           image: {
             ...attachment,
+            type: "image",
             sizeBytes: file.size,
             previewUrl,
             file,
