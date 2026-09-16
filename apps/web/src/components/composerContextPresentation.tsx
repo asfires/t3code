@@ -75,7 +75,8 @@ export interface ComposerContextActions {
   openFile: (fileId: string) => void;
   openMention: (path: string) => void;
   openPullRequest: (event: MouseEvent<HTMLElement>, url: string) => void;
-  /** Rewrites a draft paste in place; absent when the composer cannot edit records. */
+  /** Rewrites a draft paste in place, or removes it when the text is empty; absent when the
+      composer cannot edit records. */
   editPastedText?: ((pastedTextId: string, text: string) => void) | undefined;
 }
 

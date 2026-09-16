@@ -31,7 +31,7 @@ interface PastedTextInlineChipProps {
   text: string;
   detailsMode: ContextPresentationCapability["details"];
   surface?: "composer" | "transcript";
-  /** Present only while the paste is still a draft; a sent chip is read-only. */
+  /** Present only while the paste is still a draft; a sent chip is read-only. Empty text removes it. */
   onEdit?: ((text: string) => void) | undefined;
   copyMarkdown?: string;
 }
@@ -57,7 +57,8 @@ function PastedTextChipContent(props: { label: string }) {
 /**
  * Editing happens in a dialog rather than the chip itself: a paste that earned a chip is
  * long, and a Lexical decorator is a poor host for a multi-line editor. The draft record is
- * rewritten on save; the chip keeps its id and place in the prompt.
+ * rewritten on save; the chip keeps its id and place in the prompt. Saving nothing removes
+ * the chip, the same as deleting it in the prompt.
  */
 function PastedTextEditDialog(props: {
   label: string;
@@ -67,7 +68,8 @@ function PastedTextEditDialog(props: {
 }) {
   // Mounted only while open, so the draft starts from the current text every time.
   const [draft, setDraft] = useState(props.text);
-  const canSave = draft.trim().length > 0 && draft !== props.text;
+  const removes = draft.trim().length === 0;
+  const canSave = draft !== props.text;
   return (
     <Dialog open onOpenChange={props.onOpenChange}>
       <DialogPopup className="max-w-3xl">
@@ -95,8 +97,12 @@ function PastedTextEditDialog(props: {
           <Button variant="ghost" onClick={() => props.onOpenChange(false)}>
             Cancel
           </Button>
-          <Button disabled={!canSave} onClick={() => props.onSave(draft)}>
-            Save
+          <Button
+            variant={removes ? "destructive" : undefined}
+            disabled={!canSave}
+            onClick={() => props.onSave(draft)}
+          >
+            {removes ? "Remove" : "Save"}
           </Button>
         </DialogFooter>
       </DialogPopup>

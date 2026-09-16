@@ -1653,6 +1653,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         openPrLink(event, url);
       },
       editPastedText: (pastedTextId: string, text: string) => {
+        if (text.trim().length === 0) {
+          removeComposerDraftPastedText(composerDraftTarget, pastedTextId);
+          return;
+        }
         updateComposerDraftPastedText(composerDraftTarget, pastedTextId, text);
       },
     }),
@@ -1663,6 +1667,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       environmentId,
       onExpandImage,
       openPrLink,
+      removeComposerDraftPastedText,
       routeThreadRef,
       updateComposerDraftPastedText,
     ],
