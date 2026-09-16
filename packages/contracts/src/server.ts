@@ -197,6 +197,9 @@ export const ServerProvider = Schema.Struct({
   badgeLabel: Schema.optional(TrimmedNonEmptyString),
   continuation: Schema.optional(ServerProviderContinuation),
   showInteractionModeToggle: Schema.optional(Schema.Boolean),
+  // The driver streams context window usage, so a started thread will have a
+  // meter once its activities load. Clients reserve the meter's space on it.
+  reportsContextWindow: Schema.optional(Schema.Boolean),
   requiresNewThreadForModelChange: Schema.optional(Schema.Boolean),
   supportsConversationRollback: Schema.optional(Schema.Boolean),
   supportsTextGeneration: Schema.optional(Schema.Boolean),
@@ -595,14 +598,19 @@ export type ServerConfig = typeof ServerConfig.Type;
 
 /**
  * The machine an environment should be drawn as: the user's pick, else what
- * the server detected, else a generic server. A null config (not connected
- * yet, or an older server) resolves to the same generic so rows never
- * flicker between glyphs.
+ * the server detected, else a generic server. Settings only exist once
+ * connected; a descriptor alone (relay discovery, before any connection)
+ * still yields the detected kind. A null config (nothing known yet, or an
+ * older server) resolves to the same generic so rows never flicker between
+ * glyphs.
  */
 export function resolveEnvironmentMachineKind(
-  config: Pick<ServerConfig, "environment" | "settings"> | null,
+  config: {
+    readonly environment: Pick<ExecutionEnvironmentDescriptor, "platform">;
+    readonly settings?: Pick<ServerSettings, "environmentIcon">;
+  } | null,
 ): EnvironmentMachineKind {
-  return config?.settings.environmentIcon ?? config?.environment.platform.machine ?? "server";
+  return config?.settings?.environmentIcon ?? config?.environment.platform.machine ?? "server";
 }
 
 const ServerUpsertKeybindingReplaceTarget = Schema.Struct({
@@ -748,8 +756,11 @@ export const ServerLifecycleWelcomePayload = Schema.Struct({
   environment: ExecutionEnvironmentDescriptor,
   cwd: TrimmedNonEmptyString,
   projectName: TrimmedNonEmptyString,
+  bootstrapStatus: Schema.optional(Schema.Literals(["pending", "complete"])),
   bootstrapProjectId: Schema.optional(ProjectId),
   bootstrapThreadId: Schema.optional(ThreadId),
+  bootstrapProjectCreated: Schema.optional(Schema.Boolean),
+  bootstrapThreadCreated: Schema.optional(Schema.Boolean),
 });
 export type ServerLifecycleWelcomePayload = typeof ServerLifecycleWelcomePayload.Type;
 
@@ -786,7 +797,7 @@ export const ServerProviderUpdateInput = Schema.Struct({
 });
 export type ServerProviderUpdateInput = typeof ServerProviderUpdateInput.Type;
 
-export class ServerProviderUpdateError extends Schema.TaggedErrorClass<ServerProviderUpdateError>()(
+export class ServerProviderUpdateError extends Schema.TaggedError<ServerProviderUpdateError>()(
   "ServerProviderUpdateError",
   {
     provider: ProviderDriverKind,
@@ -842,7 +853,7 @@ export const ServerSelfUpdateProgressEvent = Schema.Union([
 ]);
 export type ServerSelfUpdateProgressEvent = typeof ServerSelfUpdateProgressEvent.Type;
 
-export class ServerSelfUpdateError extends Schema.TaggedErrorClass<ServerSelfUpdateError>()(
+export class ServerSelfUpdateError extends Schema.TaggedError<ServerSelfUpdateError>()(
   "ServerSelfUpdateError",
   {
     reason: TrimmedNonEmptyString,

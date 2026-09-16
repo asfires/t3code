@@ -2,6 +2,7 @@
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeChildProcess from "node:child_process";
 
 import {
   OrchestrationReadModel,
@@ -22,6 +23,7 @@ import {
   type OrchestrationCommand,
   ProjectId,
   ProviderItemId,
+  RuntimeRequestId,
   type ServerSettings,
   ThreadId,
   TurnId,
@@ -32,6 +34,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -47,6 +50,9 @@ import {
   type ProviderServiceShape,
 } from "../../provider/Services/ProviderService.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
+import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
+import * as VcsDriverRegistry from "../../vcs/VcsDriverRegistry.ts";
+import * as VcsProcess from "../../vcs/VcsProcess.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
@@ -56,6 +62,7 @@ import {
   inheritTaskIdentityFromActivities,
   ProviderRuntimeIngestionLive,
   runtimeEventToActivities,
+  splitBufferedAssistantText,
 } from "./ProviderRuntimeIngestion.ts";
 import { DEFAULT_THREAD_TITLE } from "../threadTitles.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -396,9 +403,15 @@ describe("ProviderRuntimeIngestion", () => {
   async function createHarness(options?: {
     serverSettings?: Partial<ServerSettings>;
     threadTitle?: string;
+    workspaceSubdirectory?: string;
   }) {
-    const workspaceRoot = makeTempDir("t3-provider-project-");
-    NodeFS.mkdirSync(NodePath.join(workspaceRoot, ".git"));
+    const repositoryRoot = makeTempDir("t3-provider-project-");
+    NodeChildProcess.execFileSync("git", ["init", "--initial-branch=main"], {
+      cwd: repositoryRoot,
+      stdio: "ignore",
+    });
+    const workspaceRoot = NodePath.join(repositoryRoot, options?.workspaceSubdirectory ?? "");
+    NodeFS.mkdirSync(workspaceRoot, { recursive: true });
     const provider = createProviderServiceHarness();
     const sqlCounter = makeSqlStatementCounter();
     const orchestrationLayer = OrchestrationEngineLive.pipe(
@@ -413,9 +426,37 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provide(RepositoryIdentityResolver.layer),
       Layer.provide(SqlitePersistenceMemory),
     );
+    const ingestionProjectionSnapshotLayer = Layer.effect(
+      ProjectionSnapshotQuery,
+      Effect.gen(function* () {
+        const query = yield* ProjectionSnapshotQuery;
+        return ProjectionSnapshotQuery.of({
+          ...query,
+          getThreadDetailById: () =>
+            Effect.die("provider runtime ingestion must not hydrate thread detail"),
+        });
+      }),
+    ).pipe(Layer.provide(projectionSnapshotLayer));
+    // Real clock plus an offset the test can advance, so delivery pacing in
+    // ingestion can be driven without sleeping. Sleeps stay real.
+    let clockOffsetMs = 0;
+    const realClock = Effect.runSync(Effect.service(Clock.Clock));
+    const shiftedClock: Clock.Clock = {
+      currentTimeMillisUnsafe: () => realClock.currentTimeMillisUnsafe() + clockOffsetMs,
+      currentTimeMillis: Effect.sync(() => realClock.currentTimeMillisUnsafe() + clockOffsetMs),
+      currentTimeNanosUnsafe: () =>
+        realClock.currentTimeNanosUnsafe() + BigInt(clockOffsetMs) * 1_000_000n,
+      currentTimeNanos: Effect.sync(
+        () => realClock.currentTimeNanosUnsafe() + BigInt(clockOffsetMs) * 1_000_000n,
+      ),
+      monotonicTimeNanosUnsafe: () => realClock.monotonicTimeNanosUnsafe(),
+      monotonicTimeNanos: realClock.monotonicTimeNanos,
+      sleep: (duration) => realClock.sleep(duration),
+    };
     const layer = ProviderRuntimeIngestionLive.pipe(
+      Layer.provide(Layer.succeed(Clock.Clock, shiftedClock)),
       Layer.provideMerge(orchestrationLayer),
-      Layer.provideMerge(projectionSnapshotLayer),
+      Layer.provideMerge(ingestionProjectionSnapshotLayer),
       // Single shared liveness instance across ingestion (writer), the
       // engine, and the snapshot query (reader).
       Layer.provideMerge(ThreadBackgroundLiveness.layer),
@@ -423,6 +464,8 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
       Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
+      Layer.provideMerge(CheckpointStore.layer.pipe(Layer.provide(VcsDriverRegistry.layer))),
+      Layer.provideMerge(VcsProcess.layer),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
       Layer.provideMerge(NodeServices.layer),
       Layer.provideMerge(Layer.succeed(Tracer.Tracer, sqlCounter.tracer)),
@@ -499,7 +542,16 @@ describe("ProviderRuntimeIngestion", () => {
       engine,
       dispatch,
       readModel: () => testRuntime.runPromise(snapshotQuery.getSnapshot()),
+      readThreadShell: () =>
+        testRuntime.runPromise(
+          snapshotQuery
+            .getThreadShellById(asThreadId("thread-1"))
+            .pipe(Effect.map(Option.getOrThrow)),
+        ),
       emit: provider.emit,
+      advanceClock: (ms: number) => {
+        clockOffsetMs += ms;
+      },
       emitAndDrain,
       sqlCount: sqlCounter.count,
       setProviderSession: provider.setSession,
@@ -681,11 +733,11 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it.each([
-    { delivery: "buffered", enableLegacyTokenStreaming: false },
-    { delivery: "streamed", enableLegacyTokenStreaming: true },
+    { delivery: "buffered", responseStreamingMode: "paragraph" as const },
+    { delivery: "streamed", responseStreamingMode: "token" as const },
   ])("settles OpenCode aborted turns and saves $delivery assistant text", async (settings) => {
     const harness = await createHarness({
-      serverSettings: { enableLegacyTokenStreaming: settings.enableLegacyTokenStreaming },
+      serverSettings: { responseStreamingMode: settings.responseStreamingMode },
     });
     const threadId = asThreadId("thread-1");
     const turnId = asTurnId("opencode-aborted-turn");
@@ -733,12 +785,95 @@ describe("ProviderRuntimeIngestion", () => {
     ]);
   });
 
+  it.each(["turn.completed", "turn.aborted"] as const)(
+    "finalizes old buffered text on late %s without stopping the newer turn",
+    async (terminalType) => {
+      const harness = await createHarness({
+        serverSettings: { responseStreamingMode: "paragraph" },
+      });
+      const threadId = asThreadId("thread-1");
+      const oldTurnId = asTurnId("old-buffered-turn");
+      const newTurnId = asTurnId("new-active-turn");
+      const base = {
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        createdAt: "2026-01-01T00:00:01.000Z",
+      };
+      await harness.emitAndDrain([
+        {
+          ...base,
+          type: "turn.started",
+          eventId: asEventId("old-buffered-started"),
+          turnId: oldTurnId,
+        },
+        {
+          ...base,
+          type: "content.delta",
+          eventId: asEventId("old-buffered-delta"),
+          turnId: oldTurnId,
+          itemId: asItemId("old-buffered-message"),
+          payload: { streamKind: "assistant_text", delta: "Keep the old answer." },
+        },
+      ]);
+      await harness.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("start-new-while-old-finishes"),
+        threadId,
+        message: {
+          messageId: asMessageId("new-turn-prompt"),
+          role: "user",
+          text: "Continue",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: base.createdAt,
+      });
+      harness.setProviderSession({
+        provider: base.provider,
+        status: "running",
+        runtimeMode: "approval-required",
+        threadId,
+        createdAt: base.createdAt,
+        updatedAt: base.createdAt,
+        activeTurnId: newTurnId,
+      });
+      await harness.emitAndDrain([
+        {
+          ...base,
+          type: "turn.started",
+          eventId: asEventId("new-active-started"),
+          turnId: newTurnId,
+        },
+        {
+          ...base,
+          type: terminalType,
+          eventId: asEventId("old-buffered-terminal"),
+          turnId: oldTurnId,
+          payload:
+            terminalType === "turn.completed"
+              ? { state: "completed" }
+              : { reason: "Interrupted by user." },
+        },
+      ]);
+      const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+      expect(thread?.session).toMatchObject({ activeTurnId: newTurnId, status: "running" });
+      expect(thread?.messages).toContainEqual(
+        expect.objectContaining({
+          turnId: oldTurnId,
+          text: "Keep the old answer.",
+          streaming: false,
+        }),
+      );
+    },
+  );
+
   it.each([
     { source: "the previous turn", turnId: asTurnId("opencode-stopped-turn") },
     { source: "an unspecified turn", turnId: undefined },
   ])("ignores late OpenCode aborts for $source across newer turns", async (lateAbort) => {
     const harness = await createHarness({
-      serverSettings: { enableLegacyTokenStreaming: true },
+      serverSettings: { responseStreamingMode: "token" },
     });
     const threadId = asThreadId("thread-1");
     const stoppedTurnId = asTurnId("opencode-stopped-turn");
@@ -1940,6 +2075,31 @@ describe("ProviderRuntimeIngestion", () => {
     ).toMatchObject({
       implementationThreadId: "thread-implement",
     });
+    const implementedPlan = sourceThreadAfterStart.proposedPlans.find(
+      (entry) => entry.id === sourcePlan.id,
+    );
+    await harness.emitAndDrain([
+      {
+        type: "turn.proposed.completed",
+        eventId: asEventId("evt-plan-source-late-completion"),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:01:00.000Z",
+        threadId: sourceThreadId,
+        turnId: sourceTurnId,
+        payload: { planMarkdown: "# Source plan with late details" },
+      },
+    ]);
+    const sourceAfterLateCompletion = (await harness.readModel()).threads.find(
+      (entry) => entry.id === sourceThreadId,
+    );
+    expect(
+      sourceAfterLateCompletion?.proposedPlans.find((entry) => entry.id === sourcePlan.id),
+    ).toMatchObject({
+      planMarkdown: "# Source plan with late details",
+      createdAt: sourcePlan.createdAt,
+      implementedAt: implementedPlan?.implementedAt,
+      implementationThreadId: targetThreadId,
+    });
   });
 
   it("does not mark the source proposed plan implemented for a rejected turn.started event", async () => {
@@ -2370,7 +2530,7 @@ describe("ProviderRuntimeIngestion", () => {
       type: "turn.proposed.delta",
       eventId: asEventId("evt-plan-delta-1"),
       provider: ProviderDriverKind.make("codex"),
-      createdAt: now,
+      createdAt: "",
       threadId: asThreadId("thread-1"),
       turnId: asTurnId("turn-plan-buffer"),
       payload: {
@@ -2381,7 +2541,7 @@ describe("ProviderRuntimeIngestion", () => {
       type: "turn.proposed.delta",
       eventId: asEventId("evt-plan-delta-2"),
       provider: ProviderDriverKind.make("codex"),
-      createdAt: now,
+      createdAt: "",
       threadId: asThreadId("thread-1"),
       turnId: asTurnId("turn-plan-buffer"),
       payload: {
@@ -2411,6 +2571,42 @@ describe("ProviderRuntimeIngestion", () => {
         entry.id === "plan:thread-1:turn:turn-plan-buffer",
     );
     expect(proposedPlan?.planMarkdown).toBe("## Buffered plan\n\n- first\n- second");
+    expect(proposedPlan?.createdAt).toBe(now);
+  });
+
+  it("releases a blank completed plan before a late replacement", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("blank-plan-turn");
+    const base = { provider: ProviderDriverKind.make("codex"), threadId, turnId };
+    const replacementTime = "2026-01-01T00:00:02.000Z";
+    await harness.emitAndDrain([
+      {
+        ...base,
+        type: "turn.proposed.delta",
+        eventId: asEventId("blank-plan-delta"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        payload: { delta: " \n " },
+      },
+      {
+        ...base,
+        type: "turn.completed",
+        eventId: asEventId("blank-plan-completed"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        payload: { state: "completed" },
+      },
+      {
+        ...base,
+        type: "turn.proposed.completed",
+        eventId: asEventId("late-plan-completed"),
+        createdAt: replacementTime,
+        payload: { planMarkdown: "# Replacement plan" },
+      },
+    ]);
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(thread?.proposedPlans).toEqual([
+      expect.objectContaining({ planMarkdown: "# Replacement plan", createdAt: replacementTime }),
+    ]);
   });
 
   it("buffers assistant deltas with one lifecycle query per event until completion", async () => {
@@ -2604,8 +2800,187 @@ describe("ProviderRuntimeIngestion", () => {
     expect(message?.streaming).toBe(false);
   });
 
+  function userInputEvent(
+    turnId: string,
+    requestId: string,
+    responseMode?: "message",
+  ): ProviderRuntimeEvent {
+    return {
+      type: "user-input.requested",
+      eventId: asEventId(`requested:${requestId}`),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId(turnId),
+      requestId: RuntimeRequestId.make(requestId),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      payload: {
+        ...(responseMode ? { responseMode } : {}),
+        questions: ["first", "second"].map((id) => ({
+          id,
+          header: id,
+          question: `Choose ${id}`,
+          options: [{ label: "yes", description: "Continue" }],
+          multiSelect: false,
+        })),
+      },
+    };
+  }
+
+  it.each(["completed", "interrupted", "failed", "aborted"] as const)(
+    "resolves native questions when their turn is %s",
+    async (state) => {
+      const harness = await createHarness();
+      const request = userInputEvent("question-turn", "question-request");
+      await harness.emitAndDrain([
+        {
+          type: "turn.started",
+          eventId: asEventId("question-started"),
+          provider: request.provider,
+          threadId: request.threadId,
+          turnId: request.turnId,
+          createdAt: request.createdAt,
+        },
+        request,
+      ]);
+      expect((await harness.readThreadShell()).hasPendingUserInput).toBe(true);
+      if (state === "interrupted") {
+        await harness.dispatch({
+          type: "thread.turn.interrupt",
+          commandId: CommandId.make("question-interrupt"),
+          threadId: request.threadId,
+          createdAt: "2026-01-01T00:00:02.000Z",
+        });
+      }
+      const completed: ProviderRuntimeEvent = {
+        ...(state === "aborted"
+          ? ({ type: "turn.aborted", payload: { reason: "Interrupted by user." } } as const)
+          : ({ type: "turn.completed", payload: { state } } as const)),
+        eventId: asEventId("question-completed"),
+        provider: request.provider,
+        threadId: request.threadId,
+        turnId: request.turnId,
+        createdAt: "2026-01-01T00:00:03.000Z",
+      };
+      await harness.emitAndDrain([completed]);
+      const thread = (await harness.readModel()).threads[0]!;
+      expect(thread.session?.activeTurnId).toBeNull();
+      expect((await harness.readThreadShell()).hasPendingUserInput).toBe(false);
+      expect(
+        thread.activities.filter((activity) => activity.kind === "user-input.resolved"),
+      ).toMatchObject([{ turnId: request.turnId, payload: { requestId: request.requestId } }]);
+
+      await harness.emitAndDrain([completed]);
+      expect(
+        (await harness.readModel()).threads[0]!.activities.filter(
+          (activity) => activity.kind === "user-input.resolved",
+        ),
+      ).toHaveLength(1);
+    },
+  );
+
+  it("keeps a stale request dismissed when its turn later completes", async () => {
+    const harness = await createHarness();
+    const request = userInputEvent("stale-turn", "stale-question");
+    await harness.emitAndDrain([request]);
+    await harness.dispatch({
+      type: "thread.activity.append",
+      commandId: CommandId.make("stale-question-response"),
+      threadId: request.threadId,
+      activity: {
+        id: asEventId("stale-question-failed"),
+        kind: "provider.user-input.respond.failed",
+        tone: "error",
+        summary: "User input response failed",
+        turnId: request.turnId ?? null,
+        payload: {
+          requestId: request.requestId,
+          detail: "Unknown pending user input request",
+        },
+        createdAt: "2026-01-01T00:00:02.000Z",
+      },
+      createdAt: "2026-01-01T00:00:02.000Z",
+    });
+    expect((await harness.readThreadShell()).hasPendingUserInput).toBe(false);
+    await harness.emitAndDrain([
+      {
+        type: "turn.completed",
+        eventId: asEventId("stale-turn-completed"),
+        provider: request.provider,
+        threadId: request.threadId,
+        turnId: request.turnId,
+        createdAt: "2026-01-01T00:00:03.000Z",
+        payload: { state: "completed" },
+      },
+    ]);
+    expect((await harness.readThreadShell()).hasPendingUserInput).toBe(false);
+    expect(
+      (await harness.readModel()).threads[0]!.activities.filter(
+        (activity) => activity.kind === "user-input.resolved",
+      ),
+    ).toMatchObject([{ payload: { requestId: request.requestId } }]);
+  });
+
+  it("preserves answered questions and leaves newer, child and async questions pending", async () => {
+    const harness = await createHarness();
+    const answered = userInputEvent("old-turn", "answered-question");
+    const unresolved = userInputEvent("old-turn", "old-question");
+    const newer = userInputEvent("new-turn", "new-question");
+    const child = userInputEvent("child-turn", "child-question");
+    const asynchronous = userInputEvent("old-turn", "async-question", "message");
+    const answer: ProviderRuntimeEvent = {
+      type: "user-input.resolved",
+      eventId: asEventId("normal-answer"),
+      provider: answered.provider,
+      threadId: answered.threadId,
+      turnId: answered.turnId,
+      requestId: answered.requestId,
+      createdAt: "2026-01-01T00:00:02.000Z",
+      payload: { answers: { first: "yes", second: "yes" } },
+    };
+    await harness.emitAndDrain([
+      answered,
+      unresolved,
+      newer,
+      child,
+      asynchronous,
+      answer,
+      {
+        type: "turn.started",
+        eventId: asEventId("new-turn-started"),
+        provider: newer.provider,
+        threadId: newer.threadId,
+        turnId: newer.turnId,
+        createdAt: "2026-01-01T00:00:03.000Z",
+      },
+    ]);
+    expect((await harness.readThreadShell()).hasPendingUserInput).toBe(true);
+    await harness.emitAndDrain([
+      {
+        type: "turn.completed",
+        eventId: asEventId("old-turn-completed"),
+        provider: answered.provider,
+        threadId: answered.threadId,
+        turnId: answered.turnId,
+        createdAt: "2026-01-01T00:00:04.000Z",
+        payload: { state: "interrupted" },
+      },
+    ]);
+    const thread = (await harness.readModel()).threads[0]!;
+    expect(thread.session?.activeTurnId).toBe(newer.turnId);
+    expect((await harness.readThreadShell()).hasPendingUserInput).toBe(true);
+    expect(
+      thread.activities.filter((activity) => activity.kind === "user-input.resolved"),
+    ).toMatchObject([
+      {
+        id: answer.eventId,
+        payload: { requestId: answered.requestId, answers: answer.payload.answers },
+      },
+      { turnId: unresolved.turnId, payload: { requestId: unresolved.requestId } },
+    ]);
+  });
+
   it("keeps streaming while an async question is pending", async () => {
-    const harness = await createHarness({ serverSettings: { enableLegacyTokenStreaming: true } });
+    const harness = await createHarness({ serverSettings: { responseStreamingMode: "token" } });
     const base = {
       provider: ProviderDriverKind.make("codex"),
       createdAt: "2026-01-01T00:00:00.000Z",
@@ -2847,7 +3222,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("starts a new streaming assistant message segment after approval", async () => {
-    const harness = await createHarness({ serverSettings: { enableLegacyTokenStreaming: true } });
+    const harness = await createHarness({ serverSettings: { responseStreamingMode: "token" } });
     const startedAt = "2026-03-28T07:00:00.000Z";
     const pausedAt = "2026-03-28T07:00:01.000Z";
     const resumedAt = "2026-03-28T07:00:02.000Z";
@@ -2954,7 +3329,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("streams assistant deltas when thread.turn.start requests streaming mode", async () => {
-    const harness = await createHarness({ serverSettings: { enableLegacyTokenStreaming: true } });
+    const harness = await createHarness({ serverSettings: { responseStreamingMode: "token" } });
     const now = "2026-01-01T00:00:00.000Z";
 
     await Effect.runPromise(
@@ -3043,6 +3418,201 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(finalMessage?.text).toBe("hello live");
     expect(finalMessage?.streaming).toBe(false);
+  });
+
+  it("delivers finished paragraphs while the rest of the message stays buffered", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    const codex = ProviderDriverKind.make("codex");
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("turn-paragraph-flush");
+    const itemId = asItemId("item-paragraph-flush");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-paragraph-started"),
+      provider: codex,
+      createdAt: now,
+      threadId,
+      turnId,
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.status === "running" && thread.session?.activeTurnId === turnId,
+    );
+
+    // Each delta lands well outside the pacing window of the one before.
+    const emitDelta = (eventId: string, delta: string) => {
+      harness.advanceClock(1_000);
+      harness.emit({
+        type: "content.delta",
+        eventId: asEventId(eventId),
+        provider: codex,
+        createdAt: now,
+        threadId,
+        turnId,
+        itemId,
+        payload: { streamKind: "assistant_text", delta },
+      });
+    };
+
+    emitDelta("evt-paragraph-1", "First paragraph.\n\nSecond para");
+    const afterFirst = await waitForThread(harness.readModel, (thread) =>
+      thread.messages.some(
+        (message: ProviderRuntimeTestMessage) => message.id === `assistant:${itemId}`,
+      ),
+    );
+    expect(
+      afterFirst.messages.find((m: ProviderRuntimeTestMessage) => m.id === `assistant:${itemId}`),
+    ).toMatchObject({
+      text: "First paragraph.\n\n",
+      streaming: true,
+    });
+
+    // An open code block holds the whole block until its closing fence lands.
+    emitDelta("evt-paragraph-2", "graph.\n\n```ts\nconst a = 1;\n\nconst b = 2;\n");
+    await harness.drain();
+    expect(
+      (await harness.readModel()).threads
+        .find((t) => t.id === threadId)
+        ?.messages.find((m: ProviderRuntimeTestMessage) => m.id === `assistant:${itemId}`)?.text,
+    ).toBe("First paragraph.\n\nSecond paragraph.\n\n");
+
+    emitDelta("evt-paragraph-3", "```\n\nTail without newline");
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-paragraph-completed"),
+      provider: codex,
+      createdAt: now,
+      threadId,
+      turnId,
+      itemId,
+      payload: { itemType: "assistant_message", status: "completed" },
+    });
+    const finalThread = await waitForThread(harness.readModel, (thread) =>
+      thread.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === `assistant:${itemId}` && !message.streaming,
+      ),
+    );
+    expect(
+      finalThread.messages.find((m: ProviderRuntimeTestMessage) => m.id === `assistant:${itemId}`)
+        ?.text,
+    ).toBe(
+      "First paragraph.\n\nSecond paragraph.\n\n```ts\nconst a = 1;\n\nconst b = 2;\n```\n\nTail without newline",
+    );
+  });
+
+  it("holds every paragraph until completion in turn mode", async () => {
+    const harness = await createHarness({ serverSettings: { responseStreamingMode: "turn" } });
+    const now = "2026-01-01T00:00:00.000Z";
+    const codex = ProviderDriverKind.make("codex");
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("turn-wait-mode");
+    const itemId = asItemId("item-wait-mode");
+
+    await harness.emitAndDrain([
+      {
+        type: "turn.started",
+        eventId: asEventId("evt-wait-started"),
+        provider: codex,
+        createdAt: now,
+        threadId,
+        turnId,
+      },
+    ]);
+    harness.advanceClock(1_000);
+    await harness.emitAndDrain([
+      {
+        type: "content.delta",
+        eventId: asEventId("evt-wait-delta"),
+        provider: codex,
+        createdAt: now,
+        threadId,
+        turnId,
+        itemId,
+        payload: {
+          streamKind: "assistant_text",
+          delta: "First paragraph.\n\nSecond paragraph.\n\n",
+        },
+      },
+    ]);
+    const messageText = async () =>
+      (await harness.readModel()).threads
+        .find((t) => t.id === threadId)
+        ?.messages.find((m: ProviderRuntimeTestMessage) => m.id === `assistant:${itemId}`)?.text;
+    // Paragraph mode would have delivered both paragraphs by now.
+    expect(await messageText()).toBeUndefined();
+
+    await harness.emitAndDrain([
+      {
+        type: "item.completed",
+        eventId: asEventId("evt-wait-completed"),
+        provider: codex,
+        createdAt: now,
+        threadId,
+        turnId,
+        itemId,
+        payload: { itemType: "assistant_message", status: "completed" },
+      },
+    ]);
+    expect(await messageText()).toBe("First paragraph.\n\nSecond paragraph.\n\n");
+  });
+
+  it("holds paragraphs that finish inside the pacing window and lands them together", async () => {
+    const harness = await createHarness();
+    const codex = ProviderDriverKind.make("codex");
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("turn-paced");
+    const itemId = asItemId("item-paced");
+    // Every delta carries the same event time, like OpenCode does for one
+    // part. Pacing must follow the server clock, not the event stamp.
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-paced-started"),
+      provider: codex,
+      createdAt: now,
+      threadId,
+      turnId,
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.status === "running" && thread.session?.activeTurnId === turnId,
+    );
+    // Emit is fire-and-forget, so drain after each delta before moving the
+    // clock. Otherwise the worker reads a clock that has already advanced.
+    let clockMs = 0;
+    const emitDelta = async (eventId: string, delta: string, offsetMs: number) => {
+      harness.advanceClock(offsetMs - clockMs);
+      clockMs = offsetMs;
+      await harness.emitAndDrain([
+        {
+          type: "content.delta",
+          eventId: asEventId(eventId),
+          provider: codex,
+          createdAt: now,
+          threadId,
+          turnId,
+          itemId,
+          payload: { streamKind: "assistant_text", delta },
+        },
+      ]);
+    };
+    const messageText = async () =>
+      (await harness.readModel()).threads
+        .find((t) => t.id === threadId)
+        ?.messages.find((m: ProviderRuntimeTestMessage) => m.id === `assistant:${itemId}`)?.text;
+
+    await emitDelta("evt-paced-1", "One.\n\n", 0);
+    await emitDelta("evt-paced-2", "Two.\n\n", 100);
+    await emitDelta("evt-paced-3", "Three.\n\n", 200);
+    // The first paragraph lands right away. The next two are inside the window.
+    expect(await messageText()).toBe("One.\n\n");
+
+    await emitDelta("evt-paced-4", "Four.\n\n", 500);
+    expect(await messageText()).toBe("One.\n\nTwo.\n\nThree.\n\nFour.\n\n");
   });
 
   it("spills oversized buffered deltas and still finalizes full assistant text", async () => {
@@ -3446,6 +4016,33 @@ describe("ProviderRuntimeIngestion", () => {
       },
     });
   });
+
+  effectIt.effect("tracks provider diff updates from a nested Git workspace", () =>
+    Effect.gen(function* () {
+      const harness = yield* Effect.promise(() =>
+        createHarness({ workspaceSubdirectory: "apps/server" }),
+      );
+      yield* Effect.promise(() =>
+        harness.emitAndDrain([
+          {
+            type: "turn.diff.updated",
+            eventId: asEventId("evt-nested-diff"),
+            provider: ProviderDriverKind.make("codex"),
+            createdAt: "2026-01-01T00:00:00.000Z",
+            threadId: asThreadId("thread-1"),
+            turnId: asTurnId("nested-turn"),
+            payload: {
+              unifiedDiff: "diff --git a/apps/server/file.ts b/apps/server/file.ts\n+new\n",
+            },
+          },
+        ]),
+      );
+      const snapshot = yield* Effect.promise(harness.readModel);
+      expect(snapshot.threads[0]?.checkpoints).toEqual([
+        expect.objectContaining({ turnId: "nested-turn", status: "missing" }),
+      ]);
+    }),
+  );
 
   it("consumes P1 runtime events into thread metadata, diff checkpoints, and activities", async () => {
     const harness = await createHarness();
@@ -4081,71 +4678,65 @@ describe("ProviderRuntimeIngestion", () => {
     expect(completedPayload?.title).toBe("wait for codex review to finish");
   });
 
-  it("titles task completion from persisted activities after the description cache is swept", async () => {
+  it("recovers a task title past untitled progress after the cache is swept", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("turn-swept-task");
+    const provider = ProviderDriverKind.make("claudeAgent");
 
-    harness.emit({
-      type: "task.progress",
-      eventId: asEventId("evt-swept-task-progress"),
-      provider: ProviderDriverKind.make("claudeAgent"),
-      createdAt: now,
-      threadId: asThreadId("thread-1"),
-      turnId: asTurnId("turn-swept-task"),
-      payload: {
-        taskId: "swept-task-1",
-        description: "Watch round-3 CI and bots",
+    await harness.emitAndDrain([
+      {
+        type: "task.started",
+        eventId: asEventId("evt-swept-task-started"),
+        provider,
+        createdAt: now,
+        threadId,
+        turnId,
+        payload: { taskId: "swept-task-1", description: "Watch round-3 CI and bots" },
+      },
+    ]);
+    // Older saved progress rows can have no title even when the start has one.
+    await harness.dispatch({
+      type: "thread.activity.append",
+      commandId: CommandId.make("cmd-swept-task-progress"),
+      threadId,
+      activity: {
+        id: asEventId("evt-swept-task-progress"),
+        kind: "task.progress",
+        tone: "info",
         summary: "Polling CI checks.",
+        payload: { taskId: "swept-task-1" },
+        turnId,
+        createdAt: "2026-01-01T00:00:01.000Z",
       },
+      createdAt: "2026-01-01T00:00:01.000Z",
     });
-
-    await waitForThread(harness.readModel, (entry) =>
-      entry.activities.some(
-        (activity: ProviderRuntimeTestActivity) =>
-          activity.id === "task-progress:thread-1:swept-task-1",
-      ),
-    );
-
-    // session.exited sweeps the in-memory description cache; the completion
-    // that follows must recover the name from persisted activities.
-    harness.emit({
-      type: "session.exited",
-      eventId: asEventId("evt-swept-task-session-exited"),
-      provider: ProviderDriverKind.make("claudeAgent"),
-      createdAt: now,
-      threadId: asThreadId("thread-1"),
-      payload: {},
-    });
-
-    harness.emit({
-      type: "task.completed",
-      eventId: asEventId("evt-swept-task-completed"),
-      provider: ProviderDriverKind.make("claudeAgent"),
-      createdAt: now,
-      threadId: asThreadId("thread-1"),
-      turnId: asTurnId("turn-swept-task"),
-      payload: {
-        taskId: "swept-task-1",
-        status: "completed",
-        summary: "CI is green.",
+    await harness.emitAndDrain([
+      {
+        type: "session.exited",
+        eventId: asEventId("evt-swept-task-session-exited"),
+        provider,
+        createdAt: "2026-01-01T00:00:02.000Z",
+        threadId,
+        payload: {},
       },
-    });
+      {
+        type: "task.completed",
+        eventId: asEventId("evt-swept-task-completed"),
+        provider,
+        createdAt: "2026-01-01T00:00:03.000Z",
+        threadId,
+        turnId,
+        payload: { taskId: "swept-task-1", status: "completed", summary: "CI is green." },
+      },
+    ]);
 
-    const thread = await waitForThread(harness.readModel, (entry) =>
-      entry.activities.some(
-        (activity: ProviderRuntimeTestActivity) => activity.id === "evt-swept-task-completed",
-      ),
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    const completed = thread?.activities.find(
+      (activity) => activity.id === "evt-swept-task-completed",
     );
-
-    const completed = thread.activities.find(
-      (activity: ProviderRuntimeTestActivity) => activity.id === "evt-swept-task-completed",
-    );
-    const completedPayload =
-      completed?.payload && typeof completed.payload === "object"
-        ? (completed.payload as Record<string, unknown>)
-        : undefined;
-
-    expect(completedPayload?.title).toBe("Watch round-3 CI and bots");
+    expect(completed?.payload).toMatchObject({ title: "Watch round-3 CI and bots" });
   });
 
   it("projects structured user input request and resolution as thread activities", async () => {
@@ -4260,5 +4851,96 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("runtime still processed");
+  });
+});
+
+describe("splitBufferedAssistantText", () => {
+  it("keeps a partial trailing line buffered", () => {
+    expect(splitBufferedAssistantText("one\n\ntwo")).toEqual({ ready: "one\n\n", rest: "two" });
+    expect(splitBufferedAssistantText("one\ntwo")).toEqual({ ready: "", rest: "one\ntwo" });
+  });
+
+  it("does not split inside an open fence and delivers the block at its closing fence", () => {
+    const open = "intro\n\n```\ncode\n\nmore\n";
+    expect(splitBufferedAssistantText(open)).toEqual({
+      ready: "intro\n\n",
+      rest: "```\ncode\n\nmore\n",
+    });
+    expect(splitBufferedAssistantText(`${open}\`\`\`\nafter`)).toEqual({
+      ready: `${open}\`\`\`\n`,
+      rest: "after",
+    });
+  });
+
+  it("does not treat a fence with an info string as a closing fence", () => {
+    const text = "```\n```javascript\nstill code\n\nmore\n";
+    expect(splitBufferedAssistantText(text)).toEqual({ ready: "", rest: text });
+  });
+
+  it("treats a fence indented four or more spaces as code, not a closing fence", () => {
+    const text = "```\n    ```\n\nstill code\n";
+    expect(splitBufferedAssistantText(text)).toEqual({ ready: "", rest: text });
+    expect(splitBufferedAssistantText("```\n   ```\nafter")).toEqual({
+      ready: "```\n   ```\n",
+      rest: "after",
+    });
+  });
+
+  it("keeps a fence nested under a list item open across its blank lines", () => {
+    const text = "- step\n\n    ```ts\n    a\n\n    b\n    ```\n\nafter\n";
+    expect(splitBufferedAssistantText(text)).toEqual({
+      ready: "- step\n\n    ```ts\n    a\n\n    b\n    ```\n\n",
+      rest: "after\n",
+    });
+  });
+
+  it("does not treat a no-break-space line as blank", () => {
+    expect(splitBufferedAssistantText("para\n\u00a0\ncont\n\nnext")).toEqual({
+      ready: "para\n\u00a0\ncont\n\n",
+      rest: "next",
+    });
+  });
+
+  it("treats CRLF blank lines as boundaries", () => {
+    expect(splitBufferedAssistantText("one\r\n\r\ntwo")).toEqual({
+      ready: "one\r\n\r\n",
+      rest: "two",
+    });
+  });
+
+  it("only closes a fence with the same marker of equal or greater length", () => {
+    const text = "````\n```\nstill code\n\n````\n\nout\n";
+    expect(splitBufferedAssistantText(text)).toEqual({
+      ready: "````\n```\nstill code\n\n````\n\n",
+      rest: "out\n",
+    });
+    expect(splitBufferedAssistantText("~~~\n```\n\nx\n")).toEqual({
+      ready: "",
+      rest: "~~~\n```\n\nx\n",
+    });
+  });
+
+  it("delivers tight list items one at a time", () => {
+    expect(splitBufferedAssistantText("## Steps\n\n- one\n- two\n- thr")).toEqual({
+      ready: "## Steps\n\n- one\n- two\n",
+      rest: "- thr",
+    });
+    expect(splitBufferedAssistantText("1. one\n2. two\n   more\n3. t")).toEqual({
+      ready: "1. one\n2. two\n   more\n",
+      rest: "3. t",
+    });
+  });
+
+  it("keeps a partial list marker and list-like code buffered", () => {
+    expect(splitBufferedAssistantText("intro\n-")).toEqual({ ready: "", rest: "intro\n-" });
+    expect(splitBufferedAssistantText("intro\n1.")).toEqual({ ready: "", rest: "intro\n1." });
+    // `intro\n- \n` would parse as a setext heading, so a bare marker with only
+    // trailing whitespace is not a boundary on the partial line either.
+    expect(splitBufferedAssistantText("intro\n- ")).toEqual({ ready: "", rest: "intro\n- " });
+    expect(splitBufferedAssistantText("- one\n")).toEqual({ ready: "", rest: "- one\n" });
+    expect(splitBufferedAssistantText("```\n- one\n- two\n")).toEqual({
+      ready: "",
+      rest: "```\n- one\n- two\n",
+    });
   });
 });

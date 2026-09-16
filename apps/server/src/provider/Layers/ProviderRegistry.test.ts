@@ -43,7 +43,6 @@ import * as OpenCodeRuntime from "../opencodeRuntime.ts";
 import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import { ProviderInstanceRegistryHydrationLive } from "./ProviderInstanceRegistryHydration.ts";
 import {
-  haveProvidersChanged,
   mergeProviderSnapshot,
   upsertProviderWorkspaceSnapshot,
   ProviderRegistryLive,
@@ -514,20 +513,35 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
         }),
       );
 
-      it.effect("returns unavailable when codex is missing", () =>
+      it.effect.each([
+        "codex",
+        "/Applications/Custom App.app/Contents/Resources/codex",
+        "C:\\Tools\\codex.exe",
+      ])("explains how to configure a Codex executable that cannot start: %s", (binaryPath) =>
         Effect.gen(function* () {
-          const status = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
-            Effect.fail(
+          const settings = { ...defaultCodexSettings, binaryPath };
+          const status = yield* checkCodexProviderStatus(settings, (input) => {
+            assert.strictEqual(input.binaryPath, binaryPath);
+            return Effect.fail(
               new CodexErrors.CodexAppServerSpawnError({
-                command: "codex app-server",
-                cause: new Error("spawn codex ENOENT"),
+                command: `${binaryPath} app-server`,
+                cause: new Error("spawn ENOENT"),
               }),
-            ),
-          );
+            );
+          });
           assert.strictEqual(status.status, "error");
           assert.strictEqual(status.installed, false);
           assert.strictEqual(status.auth.status, "unknown");
-          assert.strictEqual(status.message, "Codex CLI (`codex`) was not found on PATH.");
+          assert.include(status.message, binaryPath);
+          assert.include(
+            status.message,
+            "Settings → Providers → Codex → Binary path on the server",
+          );
+          assert.strictEqual(
+            status.message?.includes("Installing ChatGPT or Codex desktop"),
+            binaryPath === "codex",
+          );
+          assert.strictEqual(settings.binaryPath, binaryPath);
         }),
       );
 
@@ -555,39 +569,6 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
     });
 
     describe("ProviderRegistryLive", () => {
-      it("treats equal provider snapshots as unchanged", () => {
-        const providers = [
-          {
-            instanceId: ProviderInstanceId.make("codex"),
-            driver: ProviderDriverKind.make("codex"),
-            status: "ready",
-            enabled: true,
-            installed: true,
-            auth: { status: "authenticated" },
-            checkedAt: "2026-03-25T00:00:00.000Z",
-            version: "1.0.0",
-            models: [],
-            slashCommands: [],
-            skills: [],
-          },
-          {
-            instanceId: ProviderInstanceId.make("claudeAgent"),
-            driver: ProviderDriverKind.make("claudeAgent"),
-            status: "warning",
-            enabled: true,
-            installed: true,
-            auth: { status: "unknown" },
-            checkedAt: "2026-03-25T00:00:00.000Z",
-            version: "1.0.0",
-            models: [],
-            slashCommands: [],
-            skills: [],
-          },
-        ] as const satisfies ReadonlyArray<ServerProvider>;
-
-        assert.strictEqual(haveProvidersChanged(providers, [...providers]), false);
-      });
-
       it("stores workspace skills and commands without changing machine metadata", () => {
         const provider = {
           instanceId: ProviderInstanceId.make("codex"),
@@ -1033,10 +1014,13 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
               displayName: undefined,
               enabled: true,
               snapshot: {
-                maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
-                  provider: cachedProvider.driver,
-                  packageName: null,
-                }),
+                resolveMaintenance: () =>
+                  Effect.succeed(
+                    makeManualOnlyProviderMaintenanceCapabilities({
+                      provider: cachedProvider.driver,
+                      packageName: null,
+                    }),
+                  ),
                 getSnapshot: Effect.succeed(pendingProvider),
                 refresh: Ref.get(nextProvider),
                 streamChanges: Stream.empty,
@@ -1210,6 +1194,113 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
         });
       });
 
+      describe("Antigravity saved account", () => {
+        const signedIn = {
+          instanceId: ProviderInstanceId.make("antigravity-personal"),
+          driver: ProviderDriverKind.make("antigravity"),
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated", type: "oauth-personal", label: "Google account" },
+          checkedAt: "2026-09-05T00:00:00.000Z",
+          version: "agy_acp_server_1.1.1",
+          models: [
+            {
+              slug: "gemini-3.7-flash-high",
+              name: "Gemini 3.7 Flash",
+              isCustom: false,
+              capabilities: null,
+            },
+          ],
+          slashCommands: [{ name: "plan" }],
+          skills: [],
+        } as const satisfies ServerProvider;
+        const uncheckedMessage =
+          "Antigravity is installed. Google account access is not checked yet.";
+        const restartProbe = {
+          ...signedIn,
+          status: "warning",
+          auth: { status: "unknown" },
+          checkedAt: "2026-09-05T00:01:00.000Z",
+          message: uncheckedMessage,
+          models: [],
+        } as const satisfies ServerProvider;
+
+        it("keeps the saved Google account through restart health checks", () => {
+          const merged = mergeProviderSnapshot(signedIn, restartProbe);
+          const { message: _uncheckedMessage, ...probeWithoutMessage } = restartProbe;
+          assert.deepStrictEqual(merged, {
+            ...probeWithoutMessage,
+            status: "ready",
+            auth: signedIn.auth,
+            models: signedIn.models,
+          });
+          assert.equal("message" in merged, false);
+          // The next periodic probe reads the merged snapshot as its previous state.
+          assert.deepStrictEqual(mergeProviderSnapshot(merged, restartProbe), merged);
+        });
+
+        it("carries the account through the boot probe and a failed probe without hiding them", () => {
+          const booting = {
+            ...restartProbe,
+            installed: false,
+            version: null,
+            message: "Checking Antigravity availability.",
+          } satisfies ServerProvider;
+          assert.deepStrictEqual(mergeProviderSnapshot(signedIn, booting), {
+            ...booting,
+            auth: signedIn.auth,
+            models: signedIn.models,
+          });
+
+          const failed = {
+            ...restartProbe,
+            status: "error",
+            message: "Antigravity did not respond to its local health check within 90 seconds.",
+          } satisfies ServerProvider;
+          assert.deepStrictEqual(mergeProviderSnapshot(signedIn, failed), {
+            ...failed,
+            auth: signedIn.auth,
+            models: signedIn.models,
+          });
+        });
+
+        it("does not invent an account after sign-out, disable, uninstall, or for other providers", () => {
+          const untouched = [
+            { ...restartProbe, auth: { status: "unauthenticated" } },
+            { ...restartProbe, status: "disabled", enabled: false },
+            { ...restartProbe, status: "error", installed: false },
+            { ...restartProbe, driver: ProviderDriverKind.make("codex") },
+            // The instance was rebuilt with another sign-in method.
+            { ...restartProbe, auth: { status: "unknown", type: "gemini-api-key" } },
+          ] satisfies ReadonlyArray<ServerProvider>;
+          for (const next of untouched) {
+            const merged = mergeProviderSnapshot(signedIn, next);
+            assert.deepStrictEqual(merged.auth, next.auth);
+            assert.equal(merged.status, next.status);
+            assert.equal(merged.message, next.message);
+          }
+          assert.deepStrictEqual(
+            mergeProviderSnapshot({ ...signedIn, auth: { status: "unknown" } }, restartProbe).auth,
+            { status: "unknown" },
+          );
+          assert.equal(
+            mergeProviderSnapshot(
+              { ...signedIn, driver: ProviderDriverKind.make("codex") },
+              restartProbe,
+            ).auth.status,
+            "unknown",
+          );
+          assert.deepStrictEqual(
+            mergeProviderSnapshot(signedIn, {
+              ...restartProbe,
+              auth: { status: "unknown", type: "oauth-personal" },
+            }).auth,
+            signedIn.auth,
+          );
+        });
+      });
+
       it("fills missing capabilities from the previous provider snapshot", () => {
         const previousProvider = {
           instanceId: ProviderInstanceId.make("cursor"),
@@ -1288,10 +1379,13 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             displayName: undefined,
             enabled: true,
             snapshot: {
-              maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
-                provider: codexDriver,
-                packageName: null,
-              }),
+              resolveMaintenance: () =>
+                Effect.succeed(
+                  makeManualOnlyProviderMaintenanceCapabilities({
+                    provider: codexDriver,
+                    packageName: null,
+                  }),
+                ),
               getSnapshot: Effect.succeed(initialProvider),
               refresh: Ref.update(refreshCalls, (count) => count + 1).pipe(
                 Effect.andThen(Effect.never),
@@ -1380,10 +1474,13 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             displayName: undefined,
             enabled: true,
             snapshot: {
-              maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
-                provider: driver,
-                packageName: null,
-              }),
+              resolveMaintenance: () =>
+                Effect.succeed(
+                  makeManualOnlyProviderMaintenanceCapabilities({
+                    provider: driver,
+                    packageName: null,
+                  }),
+                ),
               getSnapshot: Effect.succeed(provider),
               refresh: Effect.succeed(provider),
               streamChanges: Stream.empty,
@@ -1569,10 +1666,13 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
               displayName: undefined,
               enabled: true,
               snapshot: {
-                maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
-                  provider: codexDriver,
-                  packageName: null,
-                }),
+                resolveMaintenance: () =>
+                  Effect.succeed(
+                    makeManualOnlyProviderMaintenanceCapabilities({
+                      provider: codexDriver,
+                      packageName: null,
+                    }),
+                  ),
                 getSnapshot: Effect.succeed(codexProvider),
                 refresh: Ref.update(codexRefreshCalls, (count) => count + 1).pipe(
                   Effect.as(codexProvider),
@@ -1593,10 +1693,13 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
               displayName: undefined,
               enabled: true,
               snapshot: {
-                maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
-                  provider: openCodeDriver,
-                  packageName: null,
-                }),
+                resolveMaintenance: () =>
+                  Effect.succeed(
+                    makeManualOnlyProviderMaintenanceCapabilities({
+                      provider: openCodeDriver,
+                      packageName: null,
+                    }),
+                  ),
                 getSnapshot: Effect.succeed(failedOpenCodeProvider),
                 refresh: Ref.update(openCodeRefreshCalls, (count) => count + 1).pipe(
                   Effect.andThen(Ref.get(catalogSnapshot)),
@@ -1717,10 +1820,13 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             displayName: undefined,
             enabled: true,
             snapshot: {
-              maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
-                provider: cursorDriver,
-                packageName: null,
-              }),
+              resolveMaintenance: () =>
+                Effect.succeed(
+                  makeManualOnlyProviderMaintenanceCapabilities({
+                    provider: cursorDriver,
+                    packageName: null,
+                  }),
+                ),
               getSnapshot: Effect.succeed(initialProvider),
               refresh: Effect.succeed(refreshedProvider),
               streamChanges: Stream.fromPubSub(changes),
@@ -1839,10 +1945,13 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
               displayName: undefined,
               enabled: true,
               snapshot: {
-                maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
-                  provider: openCodeDriver,
-                  packageName: null,
-                }),
+                resolveMaintenance: () =>
+                  Effect.succeed(
+                    makeManualOnlyProviderMaintenanceCapabilities({
+                      provider: openCodeDriver,
+                      packageName: null,
+                    }),
+                  ),
                 getSnapshot: Effect.succeed(initialProvider),
                 refresh: Effect.succeed(authoritativeProvider),
                 streamChanges: Stream.fromPubSub(changes),
@@ -1939,10 +2048,13 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             displayName: undefined,
             enabled: true,
             snapshot: {
-              maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
-                provider: codexDriver,
-                packageName: null,
-              }),
+              resolveMaintenance: () =>
+                Effect.succeed(
+                  makeManualOnlyProviderMaintenanceCapabilities({
+                    provider: codexDriver,
+                    packageName: null,
+                  }),
+                ),
               getSnapshot: Effect.succeed(cachedProvider),
               refresh: Effect.die(new Error("simulated refresh failure")),
               streamChanges: Stream.empty,
@@ -2033,10 +2145,13 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             displayName: undefined,
             enabled: true,
             snapshot: {
-              maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
-                provider: provider.driver,
-                packageName: null,
-              }),
+              resolveMaintenance: () =>
+                Effect.succeed(
+                  makeManualOnlyProviderMaintenanceCapabilities({
+                    provider: provider.driver,
+                    packageName: null,
+                  }),
+                ),
               getSnapshot: Effect.succeed(provider),
               refresh: Effect.succeed(provider),
               streamChanges: Stream.empty,
@@ -2231,10 +2346,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
               "Real Codex probe against a missing binary should surface as 'error' in the aggregator",
             );
             assert.strictEqual(codexPersonal?.installed, false);
-            assert.strictEqual(
-              codexPersonal?.message,
-              "Codex CLI (`codex`) was not found on PATH.",
-            );
+            assert.include(codexPersonal?.message, missingBinary);
+            assert.include(codexPersonal?.message, "Settings → Providers → Codex → Binary path");
           }).pipe(Effect.provide(runtimeServices));
         }),
       );

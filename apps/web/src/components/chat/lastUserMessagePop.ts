@@ -1,15 +1,14 @@
 import type { TurnId } from "@t3tools/contracts";
 
-import { extractTrailingElementContexts } from "../../lib/elementContext";
-import { extractTrailingPreviewAnnotation } from "../../lib/previewAnnotation";
-import { deriveDisplayedUserMessageState } from "../../lib/terminalContext";
-import { parseReviewCommentMessageSegments } from "../../reviewCommentContext";
+import {
+  ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
+  recallableComposerPrompt,
+} from "./composerPromptHistory";
+
+export { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT };
 import type { TimelineEntry } from "../../session-logic";
 import type { ChatMessage, SessionPhase } from "../../types";
 import type { ComposerImageAttachment } from "../../composerDraftStore";
-
-export const ATTACHMENT_ONLY_BOOTSTRAP_PROMPT =
-  "[User attached one or more files without additional text. Respond using the conversation context and the attached files.]";
 
 export const IMAGE_ONLY_MESSAGE_PLACEHOLDER =
   "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
@@ -65,35 +64,14 @@ export function mergePoppedPrompt(currentPrompt: string, poppedPrompt: string): 
     : poppedPrompt;
 }
 
-function stripDisplayedReviewComments(prompt: string): string {
-  const segments = parseReviewCommentMessageSegments(prompt);
-  if (!segments.some((segment) => segment.kind === "review-comment")) {
-    return prompt;
-  }
-  return segments
-    .flatMap((segment) => (segment.kind === "text" ? [segment.text] : []))
-    .join("")
-    .trimEnd();
-}
-
 export function deriveLastUserMessageRestoredText(messageText: string): string {
-  let visibleText = stripDisplayedReviewComments(messageText);
-  while (true) {
-    const extracted = extractTrailingPreviewAnnotation(visibleText);
-    if (!extracted.annotation) break;
-    visibleText = extracted.promptText;
-  }
-
-  visibleText = deriveDisplayedUserMessageState(visibleText).visibleText;
-  visibleText = extractTrailingElementContexts(visibleText).promptText;
+  const visibleText = recallableComposerPrompt(messageText);
   if (
     visibleText === IMAGE_ONLY_MESSAGE_PLACEHOLDER ||
     visibleText === ATTACHMENT_ONLY_BOOTSTRAP_PROMPT
   )
     return "";
-  return visibleText.startsWith("Ultrathink:\n")
-    ? visibleText.slice("Ultrathink:\n".length)
-    : visibleText;
+  return visibleText;
 }
 
 export async function captureLastUserMessageImages(

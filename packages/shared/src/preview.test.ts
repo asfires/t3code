@@ -2,7 +2,6 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   isLoopbackHost,
-  isPreviewableUrl,
   newPreviewTabId,
   normalizePreviewUrl,
   PreviewUrlNormalizationError,
@@ -34,24 +33,6 @@ describe("isLoopbackHost", () => {
     "%s is not loopback",
     (host) => {
       expect(isLoopbackHost(host)).toBe(false);
-    },
-  );
-});
-
-describe("isPreviewableUrl", () => {
-  it.each([
-    "http://localhost:5173",
-    "http://127.0.0.1:3000/path",
-    "http://0.0.0.0:8080",
-    "http://[::1]:5173",
-  ])("%s is previewable", (url) => {
-    expect(isPreviewableUrl(url)).toBe(true);
-  });
-
-  it.each(["https://example.com", "ws://localhost:5173", "file:///etc/passwd", "not-a-url", ""])(
-    "%s is not previewable",
-    (url) => {
-      expect(isPreviewableUrl(url)).toBe(false);
     },
   );
 });

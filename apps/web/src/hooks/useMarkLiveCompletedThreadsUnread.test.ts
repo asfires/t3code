@@ -39,6 +39,7 @@ function makeThread(input: {
     interactionMode: "default",
     branch: "main",
     worktreePath: null,
+    pullRequests: [],
     latestTurn: {
       turnId: TurnId.make(`turn-${input.id}`),
       state,

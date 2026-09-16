@@ -43,6 +43,7 @@ function makeThread(patch: Partial<OrchestrationThread> = {}): OrchestrationThre
     interactionMode: "default",
     branch: null,
     worktreePath: null,
+    pullRequests: [],
     latestTurn: null,
     createdAt: MESSAGE_AT,
     updatedAt: NOW,

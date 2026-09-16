@@ -10,7 +10,7 @@ import {
   type ServerProviderModel,
 } from "@t3tools/contracts";
 import { Badge } from "../ui/badge";
-import { RUNTIME_MODE_CONFIG, RUNTIME_MODE_OPTIONS } from "../chat/runtimeModeConfig";
+import { runtimeModeConfig, runtimeModeOptions } from "../chat/runtimeModeConfig";
 import { TraitsPicker } from "../chat/TraitsPicker";
 import { useClientSettings } from "../../hooks/useSettings";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
@@ -34,7 +34,7 @@ function AppDefaultBadge() {
 }
 
 function RuntimeModeValue({ mode }: { readonly mode: RuntimeMode }) {
-  const option = RUNTIME_MODE_CONFIG[mode];
+  const option = runtimeModeConfig[mode];
   const Icon = option.icon;
   return (
     <span className="inline-flex items-center gap-1.5">
@@ -148,8 +148,8 @@ export function ProviderNewThreadDefaultsSection({
               </SelectValue>
             </SelectTrigger>
             <SelectPopup align="end" alignItemWithTrigger={false}>
-              {RUNTIME_MODE_OPTIONS.map((mode) => {
-                const option = RUNTIME_MODE_CONFIG[mode];
+              {runtimeModeOptions.map((mode) => {
+                const option = runtimeModeConfig[mode];
                 const OptionIcon = option.icon;
                 return (
                   <SelectItem key={mode} value={mode} hideIndicator className="min-w-64 py-2">

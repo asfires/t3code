@@ -1,12 +1,7 @@
 import type { RuntimeMode } from "@t3tools/contracts";
-import { LockIcon, LockOpenIcon, PenLineIcon, SparklesIcon, type LucideIcon } from "lucide-react";
+import { type LucideIcon, LockIcon, LockOpenIcon, PenLineIcon, SparklesIcon } from "lucide-react";
 
-/**
- * Presentation for each permission (runtime) mode, shared by the composer's
- * mode control and settings surfaces that pick a mode, so labels, blurbs, and
- * icons stay identical everywhere.
- */
-export const RUNTIME_MODE_CONFIG: Record<
+export const runtimeModeConfig: Record<
   RuntimeMode,
   { label: string; description: string; icon: LucideIcon }
 > = {
@@ -32,4 +27,4 @@ export const RUNTIME_MODE_CONFIG: Record<
   },
 };
 
-export const RUNTIME_MODE_OPTIONS = Object.keys(RUNTIME_MODE_CONFIG) as RuntimeMode[];
+export const runtimeModeOptions = Object.keys(runtimeModeConfig) as RuntimeMode[];

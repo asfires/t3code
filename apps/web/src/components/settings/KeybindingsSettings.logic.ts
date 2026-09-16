@@ -12,7 +12,7 @@ import {
   parseKeybindingWhenExpression,
 } from "@t3tools/shared/keybindings";
 
-import { formatShortcutLabel } from "../../keybindings";
+import { formatShortcutLabel, shortcutKeyFromEvent } from "../../keybindings";
 import { isMacPlatform } from "../../lib/utils";
 
 export type KeybindingSource = "Default" | "Custom" | "Project";
@@ -210,6 +210,7 @@ export function buildKeybindingRows(
   return rowsWithConflicts.filter((row) => {
     return (
       row.command.toLowerCase().includes(normalizedQuery) ||
+      commandLabel(row.command).toLowerCase().includes(normalizedQuery) ||
       row.key.toLowerCase().includes(normalizedQuery) ||
       row.when.toLowerCase().includes(normalizedQuery) ||
       row.source.toLowerCase().includes(normalizedQuery)
@@ -276,6 +277,7 @@ export function buildKeybindingCommandOptions(
 }
 
 export function commandLabel(command: KeybindingCommand): string {
+  if (command === "thread.copyReference") return "Pull Request: Copy Link or Thread ID";
   const raw = String(command);
   if (raw.startsWith("script.") && raw.endsWith(".run")) {
     return `Run Script: ${titleCaseCommandSegment(raw.slice("script.".length, -".run".length))}`;
@@ -293,11 +295,7 @@ function titleCaseCommandSegment(segment: string): string {
   return words.join(" ");
 }
 
-const KEY_TOKEN_BY_CODE: Readonly<Record<string, string>> = {
-  Backquote: "`",
-};
-
-export function normalizeShortcutKeyToken(key: string, code?: string): string | null {
+function normalizeShortcutKeyToken(key: string): string | null {
   const normalized = key.toLowerCase();
   if (
     normalized === "meta" ||
@@ -325,7 +323,7 @@ export function normalizeShortcutKeyToken(key: string, code?: string): string | 
   }
   if (normalized === "pageup" || normalized === "pagedown") return normalized;
   if (normalized === "dead" || normalized === "unidentified") {
-    return code ? (KEY_TOKEN_BY_CODE[code] ?? null) : null;
+    return null;
   }
   return null;
 }
@@ -336,12 +334,10 @@ export function formatKeybindingInputValue(value: string, platform: string): str
 }
 
 export function keybindingFromKeyboardEvent(
-  event: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey"> & {
-    code?: string;
-  },
+  event: Pick<KeyboardEvent, "key" | "code" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey">,
   platform: string,
 ): string | null {
-  const keyToken = normalizeShortcutKeyToken(event.key, event.code);
+  const keyToken = normalizeShortcutKeyToken(shortcutKeyFromEvent(event));
   if (!keyToken) return null;
 
   const parts: string[] = [];

@@ -6,7 +6,9 @@ import {
 } from "@t3tools/client-runtime/environment";
 import {
   DEFAULT_RUNTIME_MODE,
+  DEFAULT_SERVER_SETTINGS,
   type ModelSelection,
+  type RuntimeMode,
   type ScopedProjectRef,
   type ServerProvider,
   type ServerSettings,
@@ -29,22 +31,17 @@ import {
   getProjectOrderKey,
   selectProjectGroupingSettings,
 } from "../logicalProject";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { resolveDefaultThreadEnvMode } from "@t3tools/shared/threadEnvMode";
 import {
   createModelSelection,
   resolveConfiguredProviderOptionDefaults,
   resolveConfiguredRuntimeMode,
 } from "@t3tools/shared/model";
-import {
-  readProjects,
-  readThreadShell,
-  useProjects,
-  useThread,
-  useServerConfigs,
-} from "../state/entities";
+import { readProjects, readThreadShell, useProjects, useThread } from "../state/entities";
 import { resolveNewDraftStartFromOrigin } from "../lib/chatThreadActions";
 import { readT3ProjectFileDefaultThreadEnvMode } from "../lib/t3ProjectFileDefaults";
-import { primaryServerSettingsAtom } from "../state/server";
+import { environmentServerConfigsAtom } from "../state/server";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
 import { useClientSettings } from "./useSettings";
@@ -101,6 +98,7 @@ export function resolveNewThreadConfiguredState(input: {
   stickyActiveProvider: ModelSelection | null | undefined;
   providers: ReadonlyArray<ServerProvider>;
   settings: Pick<ServerSettings, "providerNewThreadDefaults">;
+  fallbackRuntimeMode?: RuntimeMode | undefined;
 }) {
   const projectModel = resolveSelectableNewThreadSelection(
     input.projectDefaultModel,
@@ -113,7 +111,7 @@ export function resolveNewThreadConfiguredState(input: {
     resolveSelectableNewThreadSelection(input.stickyActiveProvider, input.providers) ??
     resolveAdapterDefaultSelection(input.providers);
   if (!modelSelection) {
-    return { modelSelection: null, runtimeMode: DEFAULT_RUNTIME_MODE };
+    return { modelSelection: null, runtimeMode: input.fallbackRuntimeMode ?? DEFAULT_RUNTIME_MODE };
   }
   const provider = input.providers.find(
     (candidate) => candidate.instanceId === modelSelection.instanceId,
@@ -132,6 +130,7 @@ export function resolveNewThreadConfiguredState(input: {
     // else the app default. It never carries over from the viewed thread.
     runtimeMode:
       resolveConfiguredRuntimeMode(input.settings, modelSelection.instanceId) ??
+      input.fallbackRuntimeMode ??
       DEFAULT_RUNTIME_MODE,
   };
 }
@@ -149,13 +148,7 @@ function pickExplicitWorkspaceOptions(options: NewThreadWorkspaceOptions | undef
 }
 
 export function useNewThreadHandler() {
-  const serverConfigs = useServerConfigs();
-  // New-thread defaults are a user preference, and the settings UI only ever
-  // edits the primary environment's settings.json. Reading the target
-  // environment's own settings here would silently reset remote projects to
-  // the decoded defaults ("local" mode, current branch), since nothing can
-  // set those values on a remote server.
-  const primaryServerSettings = useAtomValue(primaryServerSettingsAtom);
+  const environmentServerConfigs = useAtomValue(environmentServerConfigsAtom);
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const router = useRouter();
   const getCurrentRouteTarget = useCallback(() => {
@@ -178,6 +171,8 @@ export function useNewThreadHandler() {
       // up again and finding whichever draft it happens to hold.
     ): Promise<{ draftId: DraftId; threadId: ThreadId } | null> => {
       const projects = readProjects();
+      const targetServerSettings =
+        environmentServerConfigs.get(projectRef.environmentId)?.settings ?? DEFAULT_SERVER_SETTINGS;
       const {
         getComposerDraft,
         getDraftSessionByLogicalProjectKey,
@@ -230,34 +225,46 @@ export function useNewThreadHandler() {
           candidate.id === projectRef.projectId &&
           candidate.environmentId === projectRef.environmentId,
       );
-      const targetServerConfig = serverConfigs.get(projectRef.environmentId);
-      const targetProviders = targetServerConfig?.providers ?? [];
-      const targetSettings = targetServerConfig?.settings ?? primaryServerSettings;
+      // The resolver applies project overrides and, until the server has
+      // folded them, the aggregate's own legacy fields.
+      const projectSettings = resolveProjectSettings(
+        targetServerSettings,
+        project?.id ?? null,
+        project,
+      );
+      const projectDefaultModelSelection = projectSettings.settings.defaultModelSelection;
+      const projectThreadEnvMode =
+        projectSettings.sources.defaultThreadEnvMode === "project"
+          ? projectSettings.settings.defaultThreadEnvMode
+          : undefined;
+      const targetProviders =
+        environmentServerConfigs.get(projectRef.environmentId)?.providers ?? [];
       const stickyModelSelection = stickyActiveProvider
         ? stickyModelSelectionByProvider[stickyActiveProvider]
         : null;
       const newThreadState = resolveNewThreadConfiguredState({
-        projectDefaultModel: project?.defaultModelSelection,
-        configuredModel: targetSettings.newThreadModel,
+        projectDefaultModel: projectDefaultModelSelection,
+        configuredModel: targetServerSettings.newThreadModel,
         carryModel: carryModelSelection,
         stickyActiveProvider: stickyModelSelection,
         providers: targetProviders,
-        settings: targetSettings,
+        settings: targetServerSettings,
+        fallbackRuntimeMode: projectSettings.settings.defaultRuntimeMode,
       });
       // The shared resolver owns the priority order. The t3.json read is
       // skipped entirely when a higher-priority source decides, and its
       // query atom caches per project after the first call.
       const resolveDefaultEnvMode = async (): Promise<DraftThreadEnvMode> => {
-        const consultProjectFile = project !== undefined && project.defaultThreadEnvMode == null;
+        const consultProjectFile = project !== undefined && projectThreadEnvMode == null;
         return resolveDefaultThreadEnvMode({
-          projectSetting: project?.defaultThreadEnvMode,
+          projectSetting: projectThreadEnvMode,
           projectFile: consultProjectFile
             ? await readT3ProjectFileDefaultThreadEnvMode(
                 project.environmentId,
                 project.workspaceRoot,
               )
             : null,
-          globalDefault: primaryServerSettings.defaultThreadEnvMode,
+          globalDefault: projectSettings.settings.defaultThreadEnvMode,
         });
       };
       const logicalProjectKey = project
@@ -354,14 +361,14 @@ export function useNewThreadHandler() {
               envMode: defaultEnvMode,
               startFromOrigin: resolveNewDraftStartFromOrigin({
                 envMode: defaultEnvMode,
-                newWorktreesStartFromOrigin: primaryServerSettings.newWorktreesStartFromOrigin,
+                newWorktreesStartFromOrigin: projectSettings.settings.newWorktreesStartFromOrigin,
               }),
             };
           }
           if (workspaceContext) {
             setDraftThreadContext(emptyStoredDraftThread.draftId, {
               ...workspaceContext,
-              runtimeMode: newThreadState.runtimeMode,
+              ...(!isDraftAlreadyOpen ? { runtimeMode: newThreadState.runtimeMode } : {}),
               ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
             });
           }
@@ -385,7 +392,7 @@ export function useNewThreadHandler() {
             {
               threadId: emptyStoredDraftThread.threadId,
               ...workspaceContext,
-              runtimeMode: newThreadState.runtimeMode,
+              ...(!isDraftAlreadyOpen ? { runtimeMode: newThreadState.runtimeMode } : {}),
               ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
             },
           );
@@ -496,7 +503,7 @@ export function useNewThreadHandler() {
             options?.startFromOrigin ??
             resolveNewDraftStartFromOrigin({
               envMode: initialEnvMode,
-              newWorktreesStartFromOrigin: primaryServerSettings.newWorktreesStartFromOrigin,
+              newWorktreesStartFromOrigin: projectSettings.settings.newWorktreesStartFromOrigin,
             }),
           runtimeMode: newThreadState.runtimeMode,
           ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
@@ -513,7 +520,7 @@ export function useNewThreadHandler() {
         return { draftId, threadId };
       })();
     },
-    [getCurrentRouteTarget, primaryServerSettings, projectGroupingSettings, router, serverConfigs],
+    [environmentServerConfigs, getCurrentRouteTarget, projectGroupingSettings, router],
   );
 }
 
@@ -524,6 +531,7 @@ export function useHandleNewThread() {
     select: (params) => resolveThreadRouteTarget(params),
   });
   const routeThreadRef = routeTarget?.kind === "server" ? routeTarget.threadRef : null;
+  const routeDraftId = routeTarget?.kind === "draft" ? routeTarget.draftId : null;
   const activeThread = useThread(routeThreadRef);
   const getDraftThread = useComposerDraftStore((store) => store.getDraftThread);
   const activeDraftThread = useComposerDraftStore(() =>
@@ -554,6 +562,7 @@ export function useHandleNewThread() {
       ? scopeProjectRef(orderedProjects[0].environmentId, orderedProjects[0].id)
       : null,
     handleNewThread,
+    routeDraftId,
     routeThreadRef,
   };
 }
