@@ -22,9 +22,10 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { collapseExpandedComposerCursor } from "../../composer-logic";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import type { LastUserMessagePopCandidate } from "./lastUserMessagePop";
+import type { PastedTextDraft } from "../../lib/pastedTextContext";
 import {
   captureLastUserMessageImages,
-  deriveLastUserMessageRestoredText,
+  deriveLastUserMessageRestoredContent,
 } from "./lastUserMessagePop";
 import {
   buildRetractionCommandInput,
@@ -57,6 +58,7 @@ export function useLastUserMessageRetraction(input: {
   optimisticBundle?: {
     prompt: string;
     images: ComposerImageAttachment[];
+    pastedTexts: PastedTextDraft[];
   };
   pendingRecovery: PendingRetractionRecovery | null;
   retractionPending: boolean;
@@ -270,12 +272,16 @@ export function useLastUserMessageRetraction(input: {
     const requestId = CommandId.make(randomUUID());
     const createdAt = new Date().toISOString();
     const sourceThreadRef = scopeThreadRef(activeThread.environmentId, activeThread.id);
-    const prompt =
-      optimisticBundle?.prompt ?? deriveLastUserMessageRestoredText(candidate.message.text);
+    const restoredContent = optimisticBundle
+      ? null
+      : deriveLastUserMessageRestoredContent(candidate.message);
+    const prompt = optimisticBundle?.prompt ?? restoredContent?.prompt ?? "";
     const images = optimisticBundle?.images ?? [];
+    const pastedTexts = optimisticBundle?.pastedTexts ?? restoredContent?.pastedTexts ?? [];
     const bundle = {
       prompt,
       images,
+      pastedTexts,
       modelSelection: activeThread.modelSelection,
       runtimeMode,
       interactionMode,

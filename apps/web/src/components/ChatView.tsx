@@ -301,12 +301,14 @@ import {
   type TerminalContextDraft,
   type TerminalContextSelection,
 } from "../lib/terminalContext";
+import { type PastedTextDraft, pastedTextSummary } from "../lib/pastedTextContext";
 import {
   ensureInlineContextReferences,
   removeInlineContextReference,
   stripInlineContextReferences,
 } from "../lib/composerContextReferences";
 import { serializeLegacyContextMessage } from "@t3tools/shared/composerContextLegacySend";
+import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 import {
   buildMessageContext,
   previewAnnotationContextLabel,
@@ -558,6 +560,7 @@ const sentMessageRecoveryContextByMessageId = new Map<
     startFromOrigin: boolean;
     prompt: string;
     images: ComposerImageAttachment[];
+    pastedTexts: PastedTextDraft[];
   }
 >();
 function useDraftHeroLayoutTransition(isDraftHeroState: boolean) {
@@ -1648,6 +1651,7 @@ export default function ChatView(props: ChatViewProps) {
     (store) => store.setPreviewAnnotations,
   );
   const setComposerDraftReviewComments = useComposerDraftStore((store) => store.setReviewComments);
+  const setComposerDraftPastedTexts = useComposerDraftStore((store) => store.setPastedTexts);
   const setComposerDraftModelSelection = useComposerDraftStore((store) => store.setModelSelection);
   const setComposerDraftRuntimeMode = useComposerDraftStore((store) => store.setRuntimeMode);
   const setComposerDraftInteractionMode = useComposerDraftStore(
@@ -7268,6 +7272,7 @@ export default function ChatView(props: ChatViewProps) {
         images: overflow.filter((attachment) => attachment.type === "image"),
         files: overflow.filter((attachment) => attachment.type === "file"),
         terminalContexts: [],
+        pastedTexts: [],
         previewAnnotations: [],
         reviewComments: [],
         submissionIntent: "foreground",
@@ -7291,6 +7296,10 @@ export default function ChatView(props: ChatViewProps) {
     composerTerminalContextsRef.current = restoredTerminalContexts;
     setComposerDraftTerminalContexts(composerDraftTarget, restoredTerminalContexts);
     const draft = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
+    setComposerDraftPastedTexts(composerDraftTarget, [
+      ...(draft?.pastedTexts ?? []),
+      ...messages.flatMap((message) => message.pastedTexts),
+    ]);
     setComposerDraftPreviewAnnotations(composerDraftTarget, [
       ...(draft?.previewAnnotations ?? []),
       ...messages.flatMap((message) => message.previewAnnotations),
@@ -7422,6 +7431,7 @@ export default function ChatView(props: ChatViewProps) {
       images: sendContextImages,
       files: composerFiles,
       terminalContexts: composerTerminalContexts,
+      pastedTexts: composerPastedTexts,
       previewAnnotations: sendContextPreviewAnnotations,
       reviewComments: composerReviewComments,
     } = queuedMessage ?? sendCtx;
@@ -7484,13 +7494,17 @@ export default function ChatView(props: ChatViewProps) {
       prompt: promptForSend,
       imageCount: composerImages.length + composerFiles.length,
       terminalContexts: composerTerminalContexts,
-      elementContextCount: composerPreviewAnnotations.length + composerReviewComments.length,
+      elementContextCount:
+        composerPreviewAnnotations.length +
+        composerReviewComments.length +
+        composerPastedTexts.length,
     });
     const feedbackCommand =
       ctxSelectedProvider === "codex" &&
       composerImages.length === 0 &&
       composerFiles.length === 0 &&
       sendableComposerTerminalContexts.length === 0 &&
+      composerPastedTexts.length === 0 &&
       composerPreviewAnnotations.length === 0 &&
       composerReviewComments.length === 0
         ? parseCodexFeedbackCommand(trimmed)
@@ -7564,7 +7578,20 @@ export default function ChatView(props: ChatViewProps) {
         effort: ctxSelectedPromptEffort,
         text: followUp.text.trim(),
       });
-      if (composerRef.current?.validateProviderInput(outgoingFollowUpText) === false) {
+      const followUpContext = buildMessageContext({
+        terminalContexts: sendableComposerTerminalContexts,
+        pastedTexts: composerPastedTexts,
+        reviewComments: composerReviewComments,
+        previewAnnotations: composerPreviewAnnotations,
+      });
+      if (
+        composerRef.current?.validateProviderInput(
+          projectComposerContextForProvider({
+            text: outgoingFollowUpText,
+            records: followUpContext?.records ?? [],
+          }),
+        ) === false
+      ) {
         return;
       }
       // The composer is cleared before the send resolves, so hold everything it carried: a
@@ -7572,6 +7599,7 @@ export default function ChatView(props: ChatViewProps) {
       // Snapshot exactly what was sent, copied, so later mutations cannot alias the backup.
       const followUpPromptSnapshot = promptRef.current;
       const followUpTerminalContexts = [...sendableComposerTerminalContexts];
+      const followUpPastedTexts = [...composerPastedTexts];
       const followUpReviewComments = [...composerReviewComments];
       const followUpPreviewAnnotations = [...composerPreviewAnnotations];
       promptRef.current = "";
@@ -7579,11 +7607,7 @@ export default function ChatView(props: ChatViewProps) {
       composerRef.current?.resetCursorState();
       const followUpSent = await onSubmitPlanFollowUp({
         text: followUp.text,
-        context: buildMessageContext({
-          terminalContexts: sendableComposerTerminalContexts,
-          reviewComments: composerReviewComments,
-          previewAnnotations: composerPreviewAnnotations,
-        }),
+        context: followUpContext,
         interactionMode: followUp.interactionMode,
       });
       if (!followUpSent) {
@@ -7593,12 +7617,14 @@ export default function ChatView(props: ChatViewProps) {
           snapshot: {
             prompt: followUpPromptSnapshot,
             terminalContexts: followUpTerminalContexts,
+            pastedTexts: followUpPastedTexts,
             reviewComments: followUpReviewComments,
             previewAnnotations: followUpPreviewAnnotations,
           },
           writePrompt: (prompt) => setComposerDraftPrompt(composerDraftTarget, prompt),
           writeTerminalContexts: (contexts) =>
             setComposerDraftTerminalContexts(composerDraftTarget, [...contexts]),
+          writePastedTexts: (drafts) => setComposerDraftPastedTexts(composerDraftTarget, drafts),
           writeReviewComments: (comments) =>
             setComposerDraftReviewComments(composerDraftTarget, [...comments]),
           writePreviewAnnotations: (annotations) =>
@@ -7672,6 +7698,7 @@ export default function ChatView(props: ChatViewProps) {
         images: [...composerImages],
         files: [...composerFiles],
         terminalContexts: [...composerTerminalContexts],
+        pastedTexts: [...composerPastedTexts],
         previewAnnotations: [...composerPreviewAnnotations],
         reviewComments: [...composerReviewComments],
         submissionIntent,
@@ -7709,6 +7736,7 @@ export default function ChatView(props: ChatViewProps) {
     const composerFilesSnapshot = [...composerFiles];
     const composerAttachmentsSnapshot = [...composerImagesSnapshot, ...composerFilesSnapshot];
     const composerTerminalContextsSnapshot = [...sendableComposerTerminalContexts];
+    const composerPastedTextsSnapshot = [...composerPastedTexts];
     const composerPreviewAnnotationsSnapshot = [...composerPreviewAnnotations];
     const composerReviewCommentsSnapshot: ReviewCommentContext[] = [...composerReviewComments];
     // Expired terminal excerpts are not sent; their chips leave the text with them.
@@ -7726,6 +7754,7 @@ export default function ChatView(props: ChatViewProps) {
     const buildOutgoingMessageContext = (attachmentIds: ReadonlyArray<string>) =>
       buildMessageContext({
         terminalContexts: composerTerminalContextsSnapshot,
+        pastedTexts: composerPastedTextsSnapshot,
         reviewComments: composerReviewCommentsSnapshot,
         previewAnnotations: composerPreviewAnnotationsSnapshot,
         attachments: composerAttachmentsSnapshot.map((attachment, index) => ({
@@ -7743,7 +7772,13 @@ export default function ChatView(props: ChatViewProps) {
       effort: ctxSelectedPromptEffort,
       text: messageTextForSend || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
     });
-    if (composerRef.current?.validateProviderInput(outgoingMessageText) === false) {
+    // Folded pastes ride in the context envelope, so the limit check has to see the projected
+    // text the provider will receive rather than the prompt alone.
+    const projectedOutgoingText = projectComposerContextForProvider({
+      text: outgoingMessageText,
+      records: outgoingMessageContext?.records ?? [],
+    });
+    if (composerRef.current?.validateProviderInput(projectedOutgoingText) === false) {
       // A queued message that no longer fits is held at the head for the
       // user to edit via Cancel, instead of failing on every boundary.
       if (queuedMessage && activeThreadKey) {
@@ -7760,6 +7795,7 @@ export default function ChatView(props: ChatViewProps) {
       startFromOrigin,
       prompt: promptForSend,
       images: composerImagesSnapshot,
+      pastedTexts: composerPastedTextsSnapshot,
     });
     preDispatchCancellationLatchRef.current.arm(messageIdForSend);
     const readLiveAttachmentCapabilities = () => {
@@ -8015,6 +8051,8 @@ export default function ChatView(props: ChatViewProps) {
         titleSeed = `File: ${composerFilesSnapshot[0].name}`;
       } else if (composerTerminalContextsSnapshot.length > 0) {
         titleSeed = formatTerminalContextLabel(composerTerminalContextsSnapshot[0]!);
+      } else if (composerPastedTextsSnapshot.length > 0) {
+        titleSeed = pastedTextSummary(composerPastedTextsSnapshot[0]!.text) || "Pasted text";
       } else if (composerReviewCommentsSnapshot.length > 0) {
         titleSeed = `Review: ${reviewCommentContextLabel(composerReviewCommentsSnapshot[0]!)}`;
       } else if (composerPreviewAnnotationsSnapshot.length > 0) {
@@ -8269,6 +8307,8 @@ export default function ChatView(props: ChatViewProps) {
             composerImagesRef.current.length === 0 &&
             composerFilesRef.current.length === 0 &&
             composerTerminalContextsRef.current.length === 0 &&
+            (useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.pastedTexts
+              .length ?? 0) === 0 &&
             (useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)
               ?.previewAnnotations.length ?? 0) === 0 &&
             (useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.reviewComments
@@ -8291,6 +8331,7 @@ export default function ChatView(props: ChatViewProps) {
         addComposerDraftImages(composerDraftTarget, retryComposerImages);
         addComposerDraftFiles(composerDraftTarget, composerFilesSnapshot);
         setComposerDraftTerminalContexts(composerDraftTarget, composerTerminalContextsSnapshot);
+        setComposerDraftPastedTexts(composerDraftTarget, composerPastedTextsSnapshot);
         setComposerDraftPreviewAnnotations(composerDraftTarget, composerPreviewAnnotationsSnapshot);
         setComposerDraftReviewComments(composerDraftTarget, composerReviewCommentsSnapshot);
         composerRef.current?.resetCursorState({
@@ -9344,6 +9385,7 @@ export default function ChatView(props: ChatViewProps) {
           optimisticBundle: {
             prompt: lastUserMessageRecoveryContext.prompt,
             images: lastUserMessageRecoveryContext.images,
+            pastedTexts: lastUserMessageRecoveryContext.pastedTexts,
           },
         }
       : {}),

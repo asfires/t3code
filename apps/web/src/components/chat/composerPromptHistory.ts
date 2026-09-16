@@ -114,7 +114,13 @@ function stripInlineTerminalLabels(prompt: string, headers: ReadonlyArray<string
  * comments, the Claude ultrathink prefix) are stripped so a recalled prompt
  * never carries stale context from another turn.
  */
-export function recallableComposerPrompt(messageText: string): string {
+export function recallableComposerPrompt(
+  messageText: string,
+  options?: {
+    /** Reference kinds whose chips stay in the text because the caller restores their records. */
+    keepReferenceKinds?: ReadonlySet<string>;
+  },
+): string {
   let prompt = messageText.trim();
   if (prompt.startsWith(CLAUDE_ULTRATHINK_PREFIX)) {
     prompt = prompt.slice(CLAUDE_ULTRATHINK_PREFIX.length);
@@ -145,6 +151,7 @@ export function recallableComposerPrompt(messageText: string): string {
 
   // Recall is text-only: never create dangling chips without their backing records.
   for (const reference of collectComposerContextReferences(prompt).toReversed()) {
+    if (options?.keepReferenceKinds?.has(reference.kind)) continue;
     let { start, end } = reference;
     if (prompt[end] === " ") end += 1;
     else if (prompt[start - 1] === " ") start -= 1;

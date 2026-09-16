@@ -1,8 +1,15 @@
+import { COMPOSER_CONTEXT_PASTED_TEXT_MAX_CHARS } from "@t3tools/contracts";
+
 export const PASTED_TEXT_ATTACHMENT_THRESHOLD_BYTES = 32 * 1024;
+/** A paste this long, or with this many lines, folds into an editable chip. */
+export const PASTED_TEXT_RECORD_MIN_CHARS = 1_000;
+export const PASTED_TEXT_RECORD_MIN_LINES = 20;
+/** Beyond this a record cannot carry the paste; it falls back to a file attachment. */
+export const PASTED_TEXT_RECORD_MAX_CHARS = COMPOSER_CONTEXT_PASTED_TEXT_MAX_CHARS;
 
 const textEncoder = new TextEncoder();
 
-export type PastedTextDisposition = "attachment" | "inline";
+export type PastedTextDisposition = "attachment" | "record" | "inline";
 
 export function isPasteAsTextShortcut(
   event: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey">,
@@ -16,25 +23,52 @@ export function isPasteAsTextShortcut(
   );
 }
 
+/** Whether a paste is long enough to fold into a chip rather than sit in the prompt. */
+export function exceedsPastedTextRecordThreshold(text: string): boolean {
+  if (text.length >= PASTED_TEXT_RECORD_MIN_CHARS) return true;
+  let newlines = 0;
+  for (let index = text.indexOf("\n"); index !== -1; index = text.indexOf("\n", index + 1)) {
+    newlines += 1;
+    if (newlines + 1 >= PASTED_TEXT_RECORD_MIN_LINES) return true;
+  }
+  return false;
+}
+
 /**
- * Large clipboard text becomes a file so an agent can inspect it selectively.
- * The threshold is byte-based: character counts substantially understate the
- * context cost of some Unicode-heavy clipboard contents.
+ * A caller that supports context records folds every long paste into one
+ * editable chip (`record`): the text still reaches the model inline, and the
+ * composer shows a pill instead of a wall of text. Only text a record cannot
+ * carry, or that would push the message past the input limit, becomes a file.
+ *
+ * Without record support, large clipboard text becomes a file so an agent can
+ * inspect it selectively. That threshold is byte-based: character counts
+ * substantially understate the context cost of some Unicode-heavy clipboard
+ * contents.
  */
 export function pastedTextDisposition(input: {
   readonly text: string;
   readonly canAttach: boolean;
   readonly bypassAutoAttachment?: boolean;
   readonly wouldExceedInputLimit?: boolean;
+  readonly supportsRecords?: boolean;
 }): PastedTextDisposition {
-  if (input.bypassAutoAttachment || !input.canAttach || input.text.length === 0) {
+  if (input.bypassAutoAttachment || input.text.length === 0) {
     return "inline";
   }
-  return input.wouldExceedInputLimit ||
-    input.text.length >= PASTED_TEXT_ATTACHMENT_THRESHOLD_BYTES ||
-    textEncoder.encode(input.text).byteLength >= PASTED_TEXT_ATTACHMENT_THRESHOLD_BYTES
-    ? "attachment"
-    : "inline";
+  if (input.supportsRecords) {
+    const recordCanCarry =
+      !input.wouldExceedInputLimit && input.text.length <= PASTED_TEXT_RECORD_MAX_CHARS;
+    if (recordCanCarry) {
+      return exceedsPastedTextRecordThreshold(input.text) ? "record" : "inline";
+    }
+    return input.canAttach ? "attachment" : "inline";
+  }
+  const attachment =
+    input.canAttach &&
+    (input.wouldExceedInputLimit ||
+      input.text.length >= PASTED_TEXT_ATTACHMENT_THRESHOLD_BYTES ||
+      textEncoder.encode(input.text).byteLength >= PASTED_TEXT_ATTACHMENT_THRESHOLD_BYTES);
+  return attachment ? "attachment" : "inline";
 }
 
 /** Stable, human-readable names when a draft contains several folded pastes. */

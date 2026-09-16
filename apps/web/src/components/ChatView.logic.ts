@@ -47,6 +47,7 @@ import * as Schema from "effect/Schema";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentThreadDetails } from "../state/threads";
 import { stripInlineContextReferences } from "~/lib/composerContextReferences";
+import type { PastedTextDraft } from "../lib/pastedTextContext";
 import { filterTerminalContextsWithText, type TerminalContextDraft } from "../lib/terminalContext";
 import type { DraftThreadEnvMode } from "../composerDraftStore";
 import { collapseExpandedComposerCursor, type ComposerSubmissionIntent } from "../composer-logic";
@@ -1432,6 +1433,7 @@ export function shouldRefocusComposerOnWindowFocus(
 export interface PlanFollowUpComposerSnapshot {
   readonly prompt: string;
   readonly terminalContexts: ReadonlyArray<TerminalContextDraft>;
+  readonly pastedTexts: ReadonlyArray<PastedTextDraft>;
   readonly reviewComments: ReadonlyArray<ReviewCommentContext>;
   readonly previewAnnotations: ReadonlyArray<PreviewAnnotationPayload>;
 }
@@ -1445,6 +1447,7 @@ export function restorePlanFollowUpComposer(input: {
   readonly snapshot: PlanFollowUpComposerSnapshot;
   readonly writePrompt: (prompt: string) => void;
   readonly writeTerminalContexts: (contexts: ReadonlyArray<TerminalContextDraft>) => void;
+  readonly writePastedTexts: (drafts: ReadonlyArray<PastedTextDraft>) => void;
   readonly writeReviewComments: (comments: ReadonlyArray<ReviewCommentContext>) => void;
   readonly writePreviewAnnotations: (annotations: ReadonlyArray<PreviewAnnotationPayload>) => void;
   readonly resetCursor: (options: {
@@ -1455,6 +1458,7 @@ export function restorePlanFollowUpComposer(input: {
 }): void {
   input.writePrompt(input.snapshot.prompt);
   input.writeTerminalContexts(input.snapshot.terminalContexts);
+  input.writePastedTexts(input.snapshot.pastedTexts);
   input.writeReviewComments(input.snapshot.reviewComments);
   input.writePreviewAnnotations(input.snapshot.previewAnnotations);
   input.resetCursor({

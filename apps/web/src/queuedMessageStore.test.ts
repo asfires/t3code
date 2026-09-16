@@ -13,6 +13,7 @@ function makeMessage(prompt: string): Omit<QueuedComposerMessage, "id"> {
     images: [],
     files: [],
     terminalContexts: [],
+    pastedTexts: [],
     previewAnnotations: [],
     reviewComments: [],
     submissionIntent: "foreground",

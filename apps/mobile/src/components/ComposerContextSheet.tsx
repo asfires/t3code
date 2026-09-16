@@ -286,6 +286,27 @@ export function ComposerContextSheet(props: {
                     </ScrollView>
                   </View>
                 ) : null}
+                {record.kind === "pasted-text" ? (
+                  <View className="overflow-hidden rounded-xl border border-border bg-card">
+                    <ScrollView
+                      horizontal
+                      showsHorizontalScrollIndicator
+                      contentContainerStyle={{ padding: 12 }}
+                    >
+                      <Text
+                        selectable
+                        className="text-sm text-foreground"
+                        style={{
+                          fontFamily: REVIEW_MONO_FONT_FAMILY,
+                          fontSize: 13,
+                          lineHeight: 20,
+                        }}
+                      >
+                        {record.text}
+                      </Text>
+                    </ScrollView>
+                  </View>
+                ) : null}
                 {record.kind === "review-comment" ? (
                   <>
                     {record.pullRequest ? (

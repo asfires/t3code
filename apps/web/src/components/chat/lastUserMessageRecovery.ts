@@ -23,6 +23,7 @@ import {
   type PersistedComposerImageAttachment,
   useComposerDraftStore,
 } from "../../composerDraftStore";
+import type { PastedTextDraft } from "../../lib/pastedTextContext";
 import { resolveStorage } from "../../lib/storage";
 import { cloneComposerImageForRetry, readFileAsDataUrl } from "../ChatView.logic";
 import { mergePoppedPrompt } from "./lastUserMessagePop";
@@ -44,6 +45,7 @@ function cloneComposerDraft(
         nonPersistedImageIds: [...draft.nonPersistedImageIds],
         persistedAttachments: [...draft.persistedAttachments],
         terminalContexts: [...draft.terminalContexts],
+        pastedTexts: [...draft.pastedTexts],
         previewAnnotations: [...draft.previewAnnotations],
         reviewComments: [...draft.reviewComments],
         modelSelectionByProvider: { ...draft.modelSelectionByProvider },
@@ -135,6 +137,8 @@ export const useRetractionRecoveryStore = create<RetractionRecoveryStoreState>()
 export interface LastUserMessageRestoreBundle {
   prompt: string;
   images: ComposerImageAttachment[];
+  /** Records behind pasted-text chips in `prompt`; absent when the prompt carries none. */
+  pastedTexts?: PastedTextDraft[];
   modelSelection: ModelSelection;
   runtimeMode: RuntimeMode;
   interactionMode: ProviderInteractionMode;
@@ -180,6 +184,9 @@ export async function snapshotLastUserMessageRecovery(input: {
     hidden: true,
   });
   store.setPrompt(input.draftId, input.bundle.prompt);
+  if (input.bundle.pastedTexts?.length) {
+    store.setPastedTexts(input.draftId, input.bundle.pastedTexts);
+  }
   store.addImages(input.draftId, input.bundle.images.map(cloneComposerImageForRetry));
   store.setModelSelection(input.draftId, input.bundle.modelSelection, { replaceOptions: true });
   store.setRuntimeMode(input.draftId, input.bundle.runtimeMode);
@@ -261,6 +268,12 @@ export function applyOptimisticRetractionRecoveryToThread(input: {
   }
 
   store.setPrompt(input.sourceThreadRef, prompt);
+  if (input.bundle.pastedTexts?.length) {
+    store.setPastedTexts(input.sourceThreadRef, [
+      ...(currentDraft?.pastedTexts ?? []),
+      ...input.bundle.pastedTexts,
+    ]);
+  }
   store.addImages(input.sourceThreadRef, images);
   store.setModelSelection(input.sourceThreadRef, input.bundle.modelSelection, {
     replaceOptions: true,
@@ -442,6 +455,12 @@ export function restoreRetractionRecoveryToThread(input: {
   }
 
   store.setPrompt(input.sourceThreadRef, prompt);
+  if (recoveredDraft.pastedTexts.length > 0) {
+    store.setPastedTexts(input.sourceThreadRef, [
+      ...(currentDraft?.pastedTexts ?? []),
+      ...recoveredDraft.pastedTexts,
+    ]);
+  }
   store.addImages(input.sourceThreadRef, images);
   const recoveredModelSelection = recoveredDraft.activeProvider
     ? recoveredDraft.modelSelectionByProvider[recoveredDraft.activeProvider]

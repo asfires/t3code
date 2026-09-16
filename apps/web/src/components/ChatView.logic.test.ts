@@ -2444,6 +2444,7 @@ describe("restorePlanFollowUpComposer", () => {
           text: "output",
         },
       ],
+      pastedTexts: [{ id: "paste-1", createdAt: "2026-09-11T00:00:00.000Z", text: "a long paste" }],
       reviewComments: [
         {
           id: "review-1",
@@ -2461,6 +2462,7 @@ describe("restorePlanFollowUpComposer", () => {
     };
     const writePrompt = vi.fn();
     const writeTerminalContexts = vi.fn();
+    const writePastedTexts = vi.fn();
     const writeReviewComments = vi.fn();
     const writePreviewAnnotations = vi.fn();
     const resetCursor = vi.fn();
@@ -2469,6 +2471,7 @@ describe("restorePlanFollowUpComposer", () => {
       snapshot,
       writePrompt,
       writeTerminalContexts,
+      writePastedTexts,
       writeReviewComments,
       writePreviewAnnotations,
       resetCursor,
@@ -2478,6 +2481,8 @@ describe("restorePlanFollowUpComposer", () => {
     expect(writePrompt).toHaveBeenCalledWith("Follow up on the plan");
     expect(writeTerminalContexts).toHaveBeenCalledTimes(1);
     expect(writeTerminalContexts).toHaveBeenCalledWith(snapshot.terminalContexts);
+    expect(writePastedTexts).toHaveBeenCalledTimes(1);
+    expect(writePastedTexts).toHaveBeenCalledWith(snapshot.pastedTexts);
     expect(writeReviewComments).toHaveBeenCalledTimes(1);
     expect(writeReviewComments).toHaveBeenCalledWith(snapshot.reviewComments);
     expect(writePreviewAnnotations).toHaveBeenCalledTimes(1);

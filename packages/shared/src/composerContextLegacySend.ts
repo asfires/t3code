@@ -26,7 +26,12 @@ export function serializeLegacyContextMessage(input: {
     if (!record) continue;
     used.add(occurrence.contextId);
     const replacement =
-      record.kind === "review-comment" ? renderReviewComment(record) : inlineLabel(record);
+      record.kind === "review-comment"
+        ? renderReviewComment(record)
+        : record.kind === "pasted-text" && "text" in record
+          ? // Old servers have no record channel; the paste goes back to being plain text.
+            record.text
+          : inlineLabel(record);
     text = `${text.slice(0, occurrence.start)}${replacement}${text.slice(occurrence.end)}`;
   }
 

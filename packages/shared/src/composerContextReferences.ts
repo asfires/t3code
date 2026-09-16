@@ -196,6 +196,8 @@ function formatComposerContextProviderPayload(record: KnownComposerContextRecord
         .map((line, index) => `${record.lineStart + index} | ${line}`);
       return [`terminal: ${record.terminalLabel}`, ...lines].join("\n");
     }
+    case "pasted-text":
+      return record.text;
     case "element":
       return formatElementDetails(record).join("\n");
     case "preview-annotation": {

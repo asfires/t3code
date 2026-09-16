@@ -45,6 +45,12 @@ const knownRecords: Record<(typeof COMPOSER_CONTEXT_KINDS)[number], Record<strin
     lineEnd: 514,
     text: "error: boom\n  at main.ts:1",
   },
+  "pasted-text": {
+    ...base,
+    kind: "pasted-text",
+    label: "Pasted text",
+    text: "line one\nline two",
+  },
   element: {
     ...base,
     kind: "element",

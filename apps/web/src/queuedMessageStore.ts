@@ -3,6 +3,7 @@ import { create } from "zustand";
 
 import type { ComposerSubmissionIntent } from "./composer-logic";
 import type { ComposerFileAttachment, ComposerImageAttachment } from "./composerDraftStore";
+import type { PastedTextDraft } from "./lib/pastedTextContext";
 import type { TerminalContextDraft } from "./lib/terminalContext";
 import { randomUUID } from "./lib/utils";
 import type { ReviewCommentContext } from "./reviewCommentContext";
@@ -18,6 +19,7 @@ export interface QueuedComposerMessage {
   images: ComposerImageAttachment[];
   files: ComposerFileAttachment[];
   terminalContexts: TerminalContextDraft[];
+  pastedTexts: PastedTextDraft[];
   previewAnnotations: PreviewAnnotationPayload[];
   reviewComments: ReviewCommentContext[];
   submissionIntent: ComposerSubmissionIntent;

@@ -1147,6 +1147,7 @@ describe("deriveMessagesTimelineRows", () => {
     images: [],
     files: [],
     terminalContexts: [],
+    pastedTexts: [],
     previewAnnotations: [],
     reviewComments: [],
     submissionIntent: "foreground" as const,
