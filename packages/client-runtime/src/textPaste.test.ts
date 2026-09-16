@@ -4,6 +4,7 @@ import {
   exceedsPastedTextRecordThreshold,
   nextPastedTextFileName,
   PASTED_TEXT_ATTACHMENT_THRESHOLD_BYTES,
+  PASTED_TEXT_RECORD_MAX_CHARS,
   PASTED_TEXT_RECORD_MIN_CHARS,
   PASTED_TEXT_RECORD_MIN_LINES,
   isPasteAsTextShortcut,
@@ -61,7 +62,7 @@ describe("pasted text record disposition", () => {
     expect(pastedTextDisposition({ text, canAttach: false, supportsRecords: true })).toBe("record");
   });
 
-  it("keeps short pastes inline and lets the file fold win above its threshold", () => {
+  it("keeps a record past the file threshold and falls back to a file only on overflow", () => {
     expect(pastedTextDisposition({ text: "short", canAttach: true, supportsRecords: true })).toBe(
       "inline",
     );
@@ -71,7 +72,29 @@ describe("pasted text record disposition", () => {
         canAttach: true,
         supportsRecords: true,
       }),
+    ).toBe("record");
+    expect(
+      pastedTextDisposition({
+        text: "x".repeat(PASTED_TEXT_RECORD_MAX_CHARS + 1),
+        canAttach: true,
+        supportsRecords: true,
+      }),
     ).toBe("attachment");
+    expect(
+      pastedTextDisposition({
+        text: "x".repeat(PASTED_TEXT_RECORD_MIN_CHARS),
+        canAttach: true,
+        supportsRecords: true,
+        wouldExceedInputLimit: true,
+      }),
+    ).toBe("attachment");
+    expect(
+      pastedTextDisposition({
+        text: "x".repeat(PASTED_TEXT_RECORD_MAX_CHARS + 1),
+        canAttach: false,
+        supportsRecords: true,
+      }),
+    ).toBe("inline");
     expect(
       pastedTextDisposition({
         text: "x".repeat(PASTED_TEXT_ATTACHMENT_THRESHOLD_BYTES),

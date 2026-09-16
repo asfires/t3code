@@ -5522,8 +5522,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         !activePendingIsResponding);
     const hasAttachmentSlot = countReservedAttachments() < PROVIDER_SEND_TURN_MAX_ATTACHMENTS;
     const selection = selectionOverride ?? composerEditorRef.current?.readSelectionRange();
+    // Folded pastes leave the prompt text but still count against the provider input.
+    const foldedPasteLength = composerPastedTexts.reduce(
+      (total, pasted) => total + pasted.text.length,
+      0,
+    );
     const wouldExceedInputLimit = wouldTextPasteExceedLimit({
-      valueLength: promptRef.current.length,
+      valueLength: promptRef.current.length + foldedPasteLength,
       selection: selection ?? { start: 0, end: 0 },
       textLength: plainText.length,
       maxLength: PROVIDER_SEND_TURN_MAX_INPUT_CHARS,

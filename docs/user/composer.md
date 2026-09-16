@@ -11,13 +11,11 @@ into a **Pasted text** chip so it does not fill the composer. The chip is number
 by its position in the message. The agent receives the text in place, as if you
 had typed it. Select the chip to read or edit the text before sending; delete the
 chip to drop the paste. Select the chip in a sent message to read what was sent.
-
-Pasting 32 KiB or more of text adds that fragment as a text-file attachment
-instead so the agent can inspect it without filling the model context. A
-smaller paste also becomes an attachment when inserting it would exceed the
-message limit. On a hardware keyboard, use `Cmd+Shift+V` on Apple devices or
-`Ctrl+Shift+V` elsewhere to paste as plain editable text instead of a chip or
-an attachment.
+A paste too large for a chip, or one that would exceed the message limit,
+becomes a text-file attachment instead. On mobile, pasting 32 KiB or more of
+text becomes a text-file attachment. On a hardware keyboard, use `Cmd+Shift+V`
+on Apple devices or `Ctrl+Shift+V` elsewhere to paste as plain editable text
+instead.
 
 ## Attach files
 
