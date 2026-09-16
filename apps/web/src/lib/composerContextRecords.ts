@@ -1,4 +1,5 @@
 import {
+  COMPOSER_CONTEXT_PASTED_TEXT_MAX_CHARS,
   COMPOSER_CONTEXT_REVIEW_DIFF_MAX_CHARS,
   COMPOSER_CONTEXT_REVIEW_TEXT_MAX_CHARS,
 } from "@t3tools/contracts";
@@ -11,6 +12,7 @@ import type {
   KnownComposerContextRecord,
   MessageId,
   OrchestrationMessageContext,
+  PastedTextContextRecord,
   PreviewAnnotationContextRecord,
   PreviewAnnotationPayload,
   ReviewCommentContextRecord,
@@ -32,6 +34,11 @@ import {
 import type { ComposerFileAttachment, ComposerImageAttachment } from "~/composerDraftStore";
 import type { AttachmentUploadState } from "./attachmentUploadState";
 import { normalizeElementContextSelection } from "./elementContext";
+import {
+  PASTED_TEXT_CONTEXT_LABEL,
+  normalizePastedText,
+  type PastedTextDraft,
+} from "./pastedTextContext";
 import {
   formatTerminalContextLabel,
   normalizeTerminalContextText,
@@ -152,6 +159,24 @@ export function previewAnnotationContextReference(
     kind: "preview-annotation",
     contextId: previewAnnotationContextId(annotation.id),
     label: previewAnnotationContextLabel(annotation),
+  };
+}
+
+export function pastedTextContextReference(draft: PastedTextDraft): ComposerContextReference {
+  return {
+    kind: "pasted-text",
+    contextId: toKindScopedComposerContextId("pasted-text", draft.id),
+    label: PASTED_TEXT_CONTEXT_LABEL,
+  };
+}
+
+export function pastedTextContextRecord(draft: PastedTextDraft): PastedTextContextRecord {
+  return {
+    version: 1,
+    contextId: toKindScopedComposerContextId("pasted-text", draft.id),
+    kind: "pasted-text",
+    label: PASTED_TEXT_CONTEXT_LABEL,
+    text: clampContextText(normalizePastedText(draft.text), COMPOSER_CONTEXT_PASTED_TEXT_MAX_CHARS),
   };
 }
 
@@ -293,6 +318,7 @@ export function attachmentContextRecord(
 
 export function buildMessageContext(input: {
   terminalContexts: ReadonlyArray<TerminalContextDraft>;
+  pastedTexts?: ReadonlyArray<PastedTextDraft>;
   reviewComments: ReadonlyArray<ReviewCommentContext>;
   previewAnnotations: ReadonlyArray<PreviewAnnotationPayload>;
   attachments?: ReadonlyArray<BoundComposerAttachment>;
@@ -305,6 +331,7 @@ export function buildMessageContext(input: {
   );
   const records: ComposerContextRecord[] = [
     ...input.terminalContexts.map(terminalContextRecord),
+    ...(input.pastedTexts ?? []).map(pastedTextContextRecord),
     ...input.reviewComments.map(reviewCommentContextRecord),
     ...input.previewAnnotations.map((annotation) =>
       previewAnnotationContextRecord(annotation, {
@@ -406,6 +433,14 @@ export function terminalContextDraftFromRecord(
     terminalLabel: record.terminalLabel,
     lineStart: record.lineStart,
     lineEnd: record.lineEnd,
+    text: record.text,
+  };
+}
+
+export function pastedTextDraftFromRecord(record: PastedTextContextRecord): PastedTextDraft {
+  return {
+    id: producerIdFromComposerContextId("pasted-text", record.contextId),
+    createdAt: new Date().toISOString(),
     text: record.text,
   };
 }

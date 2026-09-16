@@ -84,6 +84,19 @@ describe("serializeLegacyContextMessage", () => {
     });
   });
 
+  it("puts a pasted-text record back in place as plain text for an older server", () => {
+    const pasted = {
+      version: 1,
+      contextId: ComposerContextId.make("pasted-text_p1"),
+      kind: "pasted-text",
+      label: "Pasted text",
+      text: "first line\n  second line",
+    } satisfies ComposerContextRecord;
+    const text = `Before ${formatComposerContextReference(pasted)} after`;
+    const legacy = serializeLegacyContextMessage({ text, records: [pasted] });
+    expect(legacy).toBe("Before first line\n  second line after");
+  });
+
   it("inlines a review comment with its diff intact", () => {
     const text = `See ${formatComposerContextReference(review)} here`;
     const legacy = serializeLegacyContextMessage({ text, records: [review] });

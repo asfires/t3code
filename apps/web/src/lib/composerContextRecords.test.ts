@@ -26,6 +26,9 @@ import {
   pullRequestContextKindLabel,
   previewAnnotationContextLabel,
   previewAnnotationContextRecord,
+  pastedTextContextRecord,
+  pastedTextContextReference,
+  pastedTextDraftFromRecord,
   previewAnnotationFromRecord,
   resolveUserMessageContext,
   selectedMessageContextFragment,
@@ -754,5 +757,31 @@ describe("selectedMessageContextFragment", () => {
         markdown: `[b.ts L4](t3-context://v1/review-comment/${review.contextId})`,
       }),
     ).toBeNull();
+  });
+});
+
+describe("pasted text records", () => {
+  const draft = { id: "paste-1", createdAt: "2026-09-16T12:00:00.000Z", text: "a\r\n  b\n" };
+
+  it("builds a wire record the schema accepts and reads it back as a draft", () => {
+    const record = pastedTextContextRecord(draft);
+    expect(record).toEqual({
+      version: 1,
+      contextId: "pasted-text_paste-1",
+      kind: "pasted-text",
+      label: "Pasted text",
+      text: "a\n  b\n",
+    });
+    expect(pastedTextContextReference(draft).contextId).toBe(record.contextId);
+    const context = decodeMessageContext(
+      buildMessageContext({
+        terminalContexts: [],
+        pastedTexts: [draft],
+        reviewComments: [],
+        previewAnnotations: [],
+      }),
+    );
+    expect(context.records).toEqual([record]);
+    expect(pastedTextDraftFromRecord(record)).toMatchObject({ id: "paste-1", text: "a\n  b\n" });
   });
 });

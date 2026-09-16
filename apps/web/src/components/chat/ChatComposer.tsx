@@ -179,6 +179,13 @@ import {
   type TerminalContextDraft,
   type TerminalContextSelection,
 } from "../../lib/terminalContext";
+import {
+  normalizePastedText,
+  parsePastedTextOrdinals,
+  type PastedTextDraft,
+  pastedTextOrdinals,
+  serializePastedTextOrdinals,
+} from "../../lib/pastedTextContext";
 import { useComposerPathSearch } from "../../lib/composerPathSearchState";
 import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
 import {
@@ -196,6 +203,7 @@ import { observeResponsiveBreakpointFade, usePanelAnimationSettings } from "../.
 import { type ComposerPromptEditorHandle, ComposerPromptEditor } from "../ComposerPromptEditor";
 import {
   ComposerContextActionsContext,
+  ComposerPastedTextOrdinalsContext,
   composerContextRecordsFromDraft,
   uploadedContextRecordFromDraft,
 } from "../composerContextPresentation";
@@ -219,6 +227,9 @@ import {
   previewAnnotationContextId,
   previewAnnotationContextRecord,
   previewAnnotationFromRecord,
+  pastedTextContextRecord,
+  pastedTextContextReference,
+  pastedTextDraftFromRecord,
   reviewCommentContextId,
   reviewCommentContextReference,
   reviewCommentContextRecord,
@@ -1260,6 +1271,7 @@ export interface ChatComposerHandle {
     images: ComposerImageAttachment[];
     files: ComposerFileAttachment[];
     terminalContexts: TerminalContextDraft[];
+    pastedTexts: PastedTextDraft[];
     previewAnnotations: PreviewAnnotationPayload[];
     reviewComments: ReviewCommentContext[];
     selectedPromptEffort: string | null;
@@ -1579,6 +1591,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     inlineFileIdSet,
   );
   const composerTerminalContexts = composerDraft.terminalContexts;
+  const composerPastedTexts = composerDraft.pastedTexts;
   const composerPreviewAnnotations = composerDraft.previewAnnotations;
   const composerReviewComments = composerDraft.reviewComments;
   const pendingSnapShotAnimations = useSyncExternalStore(
@@ -1605,6 +1618,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const openPrLink = useOpenPrLink(routeThreadRef);
   const [previewFileId, setPreviewFileId] = useState<string | null>(null);
   const previewFile = composerFiles.find((file) => file.id === previewFileId);
+  const addComposerDraftPastedText = useComposerDraftStore((store) => store.addPastedText);
+  const updateComposerDraftPastedText = useComposerDraftStore((store) => store.updatePastedText);
+  const removeComposerDraftPastedText = useComposerDraftStore((store) => store.removePastedText);
   const composerContextActions = useMemo(
     () => ({
       expandImage: (imageId: string) => {
@@ -1636,13 +1652,35 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       openPullRequest: (event: React.MouseEvent<HTMLElement>, url: string) => {
         openPrLink(event, url);
       },
+      editPastedText: (pastedTextId: string, text: string) => {
+        updateComposerDraftPastedText(composerDraftTarget, pastedTextId, text);
+      },
     }),
-    [composerFiles, composerImages, environmentId, onExpandImage, openPrLink, routeThreadRef],
+    [
+      composerDraftTarget,
+      composerFiles,
+      composerImages,
+      environmentId,
+      onExpandImage,
+      openPrLink,
+      routeThreadRef,
+      updateComposerDraftPastedText,
+    ],
+  );
+  // The map is rebuilt only when the numbering changes, so a keystroke does not repaint chips.
+  const pastedTextOrdinalsKey = useMemo(
+    () => serializePastedTextOrdinals(pastedTextOrdinals(prompt)),
+    [prompt],
+  );
+  const composerPastedTextOrdinals = useMemo(
+    () => parsePastedTextOrdinals(pastedTextOrdinalsKey),
+    [pastedTextOrdinalsKey],
   );
   const composerContextRecords = useMemo(
     () =>
       composerContextRecordsFromDraft({
         terminalContexts: composerTerminalContexts,
+        pastedTexts: composerPastedTexts,
         reviewComments: composerReviewComments,
         previewAnnotations: composerPreviewAnnotations,
         images: composerImages,
@@ -1652,6 +1690,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [
       composerFiles,
       composerImages,
+      composerPastedTexts,
       composerPreviewAnnotations,
       composerReviewComments,
       composerTerminalContexts,
@@ -2185,11 +2224,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         prompt,
         imageCount: composerImages.length + composerFiles.length,
         terminalContexts: composerTerminalContexts,
-        elementContextCount: composerPreviewAnnotations.length + composerReviewComments.length,
+        elementContextCount:
+          composerPreviewAnnotations.length +
+          composerReviewComments.length +
+          composerPastedTexts.length,
       }),
     [
       composerFiles.length,
       composerImages.length,
+      composerPastedTexts.length,
       composerPreviewAnnotations.length,
       composerReviewComments.length,
       composerTerminalContexts,
@@ -2226,6 +2269,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     composerImages.length + composerFiles.length === 0 &&
     composerDraft.persistedAttachments.length === 0 &&
     composerTerminalContexts.length === 0 &&
+    composerPastedTexts.length === 0 &&
     composerPreviewAnnotations.length === 0 &&
     composerReviewComments.length === 0;
 
@@ -2729,6 +2773,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         ...composerTerminalContexts
           .filter((c) => wanted.has(terminalContextReference(c).contextId))
           .map(terminalContextRecord),
+        ...composerPastedTexts
+          .filter((p) => wanted.has(pastedTextContextReference(p).contextId))
+          .map(pastedTextContextRecord),
         ...composerReviewComments
           .filter((c) => wanted.has(reviewCommentContextId(c.id)))
           .map(reviewCommentContextRecord),
@@ -2764,6 +2811,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       activeThread,
       composerFiles,
       composerImages,
+      composerPastedTexts,
       composerPreviewAnnotations,
       composerReviewComments,
       composerTerminalContexts,
@@ -2904,13 +2952,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         const existingRecord =
           existing?.kind === "terminal"
             ? terminalContextRecord(existing.record)
-            : existing?.kind === "review-comment"
-              ? reviewCommentContextRecord(existing.record)
-              : existing?.kind === "preview-annotation"
-                ? previewAnnotationContextRecord(existing.record)
-                : existing
-                  ? (uploadedContextRecordFromDraft(existing) ?? undefined)
-                  : undefined;
+            : existing?.kind === "pasted-text"
+              ? pastedTextContextRecord(existing.record)
+              : existing?.kind === "review-comment"
+                ? reviewCommentContextRecord(existing.record)
+                : existing?.kind === "preview-annotation"
+                  ? previewAnnotationContextRecord(existing.record)
+                  : existing
+                    ? (uploadedContextRecordFromDraft(existing) ?? undefined)
+                    : undefined;
         if (existingRecord && isSameComposerContextPayload(existingRecord, record)) {
           if (record.kind === "preview-annotation" && record.screenshotContextId) {
             skippedDependentAttachmentIds.add(record.screenshotContextId);
@@ -2928,6 +2978,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               appendReference: false,
             });
             rewritten.set(record.contextId, terminalContextReference(draft).contextId);
+            break;
+          }
+          case "pasted-text": {
+            const imported = pastedTextDraftFromRecord(record);
+            const draft = conflicts ? { ...imported, id: randomUUID() } : imported;
+            addComposerDraftPastedText(composerDraftTarget, draft, { appendReference: false });
+            rewritten.set(record.contextId, pastedTextContextReference(draft).contextId);
             break;
           }
           case "review-comment": {
@@ -2977,6 +3034,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [
       activeThread,
       activeThreadId,
+      addComposerDraftPastedText,
       addComposerDraftPreviewAnnotation,
       addComposerDraftReviewComment,
       addComposerDraftTerminalContexts,
@@ -3285,8 +3343,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
    */
   const removedContextPayloadsRef = useRef<{
     terminals: Map<string, TerminalContextDraft>;
+    pastedTexts: Map<string, PastedTextDraft>;
     reviewComments: Map<string, ReviewCommentContext>;
-  }>({ terminals: new Map(), reviewComments: new Map() });
+  }>({ terminals: new Map(), pastedTexts: new Map(), reviewComments: new Map() });
   const removedAttachmentContextPayloadsRef = useRef<RetainedAttachmentContextPayloads>({
     files: new Map(),
     previewAnnotations: new Map(),
@@ -3357,6 +3416,24 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         setComposerDraftTerminalContexts(composerDraftTarget, nextTerminals);
       }
 
+      for (const pasted of composerPastedTexts) {
+        const contextId = pastedTextContextReference(pasted).contextId;
+        if (!referenced.has(contextId)) {
+          retained.pastedTexts.set(contextId, pasted);
+          removeComposerDraftPastedText(composerDraftTarget, pasted.id);
+        }
+      }
+      const livePastedTextIds = new Set<string>(
+        composerPastedTexts.map((pasted) => pastedTextContextReference(pasted).contextId),
+      );
+      for (const contextId of referenced) {
+        if (livePastedTextIds.has(contextId)) continue;
+        const pasted = retained.pastedTexts.get(contextId);
+        if (pasted) {
+          addComposerDraftPastedText(composerDraftTarget, pasted, { appendReference: false });
+        }
+      }
+
       for (const comment of composerReviewComments) {
         const contextId = reviewCommentContextId(comment.id);
         if (!referenced.has(contextId)) {
@@ -3414,6 +3491,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       composerDraftTarget,
       composerTerminalContexts,
       setComposerDraftTerminalContexts,
+      composerPastedTexts,
+      addComposerDraftPastedText,
+      removeComposerDraftPastedText,
       composerReviewComments,
       composerPreviewAnnotations,
       composerImages,
@@ -5448,15 +5528,29 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       textLength: plainText.length,
       maxLength: PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
     });
-    const shouldFold =
-      pastedTextDisposition({
-        text: plainText,
-        bypassAutoAttachment,
-        wouldExceedInputLimit,
-        canAttach: true,
-      }) === "attachment";
-    if (!shouldFold) {
+    const disposition = pastedTextDisposition({
+      text: plainText,
+      bypassAutoAttachment,
+      wouldExceedInputLimit,
+      canAttach: true,
+      // Question answers carry attachments beside the answer and never chips.
+      supportsRecords: !questionAttachmentTarget && pendingUserInputs.length === 0,
+    });
+    if (disposition === "inline") {
       return false;
+    }
+    if (disposition === "record") {
+      const draft: PastedTextDraft = {
+        id: randomUUID(),
+        createdAt: new Date().toISOString(),
+        text: normalizePastedText(plainText),
+      };
+      addComposerDraftPastedText(composerDraftTarget, draft, { appendReference: false });
+      if (!insertAttachmentReferences([pastedTextContextReference(draft)], selection)) {
+        removeComposerDraftPastedText(composerDraftTarget, draft.id);
+        return false;
+      }
+      return true;
     }
 
     const canStageAttachment =
@@ -5873,6 +5967,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         images: composerImagesRef.current,
         files: composerFilesRef.current,
         terminalContexts: composerTerminalContextsRef.current,
+        pastedTexts: composerPastedTexts,
         previewAnnotations: composerPreviewAnnotations,
         reviewComments: composerReviewComments,
         selectedPromptEffort,
@@ -6734,70 +6829,72 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   </Dialog>
                 ) : null}
                 <ComposerContextActionsContext value={composerContextActions}>
-                  <ComposerPromptEditor
-                    editorRef={composerEditorRef}
-                    value={
-                      isComposerApprovalState
-                        ? ""
-                        : activePendingProgress
-                          ? activePendingProgress.customAnswer
-                          : prompt
-                    }
-                    cursor={composerCursor}
-                    contextRecords={composerContextRecords}
-                    buildContextClipboardFragment={buildContextClipboardFragment}
-                    importContextFragment={importContextFragment}
-                    skills={selectedProviderSkills}
-                    containerClassName={cn(isComposerResting && "min-w-0 flex-1")}
-                    expanded={isComposerExpanded}
-                    onBeyondMinimumHeightChange={handleComposerBeyondMinimumHeightChange}
-                    className={cn(
-                      !isMobileViewport &&
-                        (isComposerExpandAvailable || isComposerExpanded) &&
-                        "composer-editor-expand-control-visible pr-8",
-                      showMobilePendingAnswerActions && "max-sm:pb-11",
-                      isComposerResting &&
-                        "max-h-8 min-h-8 overflow-hidden whitespace-pre! leading-8",
-                    )}
-                    placeholderClassName={cn(
-                      isComposerResting &&
-                        "flex items-center overflow-hidden whitespace-nowrap leading-8",
-                    )}
-                    onChange={onPromptChange}
-                    onVisibleSelectionChange={expandComposerForEditorChange}
-                    onCommandKeyDown={onComposerCommandKey}
-                    onPageScrollKeyDown={onPageScrollKeyDown}
-                    onPageScrollKeyUp={onPageScrollKeyUp}
-                    onPageScrollRelease={onPageScrollRelease}
-                    onCitationSubmitAndSend={submitCitationAndSend}
-                    onPaste={onComposerPaste}
-                    placeholder={
-                      isComposerApprovalState
-                        ? (activePendingApproval?.detail ??
-                          "Resolve this approval request to continue")
-                        : activePendingProgress
-                          ? isChoiceOnlyPendingQuestion
-                            ? "Choose an option above"
-                            : "Type your own answer, or leave this blank to use the selected option"
-                          : showPlanFollowUpPrompt && activeProposedPlan
-                            ? "Add feedback to refine the plan, or leave this blank to implement it"
-                            : projectSelectionRequired
-                              ? "Choose a project above to start a thread"
-                              : showProviderUnavailable
-                                ? "Enable a provider in Settings to send a message"
-                                : phase === "disconnected"
-                                  ? DISCONNECTED_COMPOSER_PLACEHOLDER
-                                  : (latestPromptSuggestion ??
-                                    "Ask anything, @tag files/folders, $use skills, or / for commands")
-                    }
-                    disabled={
-                      isConnecting ||
-                      isComposerApprovalState ||
-                      projectSelectionRequired ||
-                      isChoiceOnlyPendingQuestion ||
-                      activePendingIsResponding
-                    }
-                  />
+                  <ComposerPastedTextOrdinalsContext value={composerPastedTextOrdinals}>
+                    <ComposerPromptEditor
+                      editorRef={composerEditorRef}
+                      value={
+                        isComposerApprovalState
+                          ? ""
+                          : activePendingProgress
+                            ? activePendingProgress.customAnswer
+                            : prompt
+                      }
+                      cursor={composerCursor}
+                      contextRecords={composerContextRecords}
+                      buildContextClipboardFragment={buildContextClipboardFragment}
+                      importContextFragment={importContextFragment}
+                      skills={selectedProviderSkills}
+                      containerClassName={cn(isComposerResting && "min-w-0 flex-1")}
+                      expanded={isComposerExpanded}
+                      onBeyondMinimumHeightChange={handleComposerBeyondMinimumHeightChange}
+                      className={cn(
+                        !isMobileViewport &&
+                          (isComposerExpandAvailable || isComposerExpanded) &&
+                          "composer-editor-expand-control-visible pr-8",
+                        showMobilePendingAnswerActions && "max-sm:pb-11",
+                        isComposerResting &&
+                          "max-h-8 min-h-8 overflow-hidden whitespace-pre! leading-8",
+                      )}
+                      placeholderClassName={cn(
+                        isComposerResting &&
+                          "flex items-center overflow-hidden whitespace-nowrap leading-8",
+                      )}
+                      onChange={onPromptChange}
+                      onVisibleSelectionChange={expandComposerForEditorChange}
+                      onCommandKeyDown={onComposerCommandKey}
+                      onPageScrollKeyDown={onPageScrollKeyDown}
+                      onPageScrollKeyUp={onPageScrollKeyUp}
+                      onPageScrollRelease={onPageScrollRelease}
+                      onCitationSubmitAndSend={submitCitationAndSend}
+                      onPaste={onComposerPaste}
+                      placeholder={
+                        isComposerApprovalState
+                          ? (activePendingApproval?.detail ??
+                            "Resolve this approval request to continue")
+                          : activePendingProgress
+                            ? isChoiceOnlyPendingQuestion
+                              ? "Choose an option above"
+                              : "Type your own answer, or leave this blank to use the selected option"
+                            : showPlanFollowUpPrompt && activeProposedPlan
+                              ? "Add feedback to refine the plan, or leave this blank to implement it"
+                              : projectSelectionRequired
+                                ? "Choose a project above to start a thread"
+                                : showProviderUnavailable
+                                  ? "Enable a provider in Settings to send a message"
+                                  : phase === "disconnected"
+                                    ? DISCONNECTED_COMPOSER_PLACEHOLDER
+                                    : (latestPromptSuggestion ??
+                                      "Ask anything, @tag files/folders, $use skills, or / for commands")
+                      }
+                      disabled={
+                        isConnecting ||
+                        isComposerApprovalState ||
+                        projectSelectionRequired ||
+                        isChoiceOnlyPendingQuestion ||
+                        activePendingIsResponding
+                      }
+                    />
+                  </ComposerPastedTextOrdinalsContext>
                 </ComposerContextActionsContext>
                 {isComposerResting ? collapsedComposerImagePreviews : null}
                 {showMobilePendingAnswerActions ? (

@@ -200,7 +200,9 @@ import {
   type TimelineLatestTurn,
   type WorkGroupScrollAnchor,
 } from "./MessagesTimeline.logic";
+import { PastedTextInlineChip } from "./PastedTextInlineChip";
 import { TerminalContextInlineChip } from "./TerminalContextInlineChip";
+import { formatPastedTextLabel, pastedTextOrdinals } from "../../lib/pastedTextContext";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Spinner } from "../ui/spinner";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -1625,6 +1627,7 @@ function QueuedMessageTimelineRow({
   const attachmentCount = queuedMessage.images.length + queuedMessage.files.length;
   const contextCount =
     queuedMessage.terminalContexts.length +
+    queuedMessage.pastedTexts.length +
     queuedMessage.previewAnnotations.length +
     queuedMessage.reviewComments.length;
   const text = queuedMessage.prompt.trim();
@@ -1824,6 +1827,10 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
     (attachment) => !isImageAttachment(attachment) && !isFileAttachment(attachment),
   );
   const resolvedContext = useMemo(() => resolveUserMessageContext(row.message), [row.message]);
+  const messagePastedTextOrdinals = useMemo(
+    () => pastedTextOrdinals(resolvedContext.text),
+    [resolvedContext.text],
+  );
   const previewImages = useMemo(
     () => userImages.filter((image) => image.name.startsWith("preview-annotation-")),
     [userImages],
@@ -1919,6 +1926,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
       return (
         <UserMessageContextReferenceChip
           reference={reference}
+          pastedTextOrdinal={messagePastedTextOrdinals.get(reference.contextId)}
           record={record}
           annotationImage={annotationImage}
           attachment={attachment}
@@ -1936,6 +1944,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
     },
     [
       resolvedContext.recordsById,
+      messagePastedTextOrdinals,
       userImages,
       userFiles,
       previewImages,
@@ -3208,6 +3217,7 @@ function UserMessageElementDetails({
 
 interface UserMessageContextRenderContext {
   reference: ChatMarkdownContextReference;
+  pastedTextOrdinal: number | undefined;
   annotationImage: ChatImageAttachment | null;
   attachment: ChatImageAttachment | ChatFileAttachment | null;
   resolvedTheme: "light" | "dark";
@@ -3352,6 +3362,22 @@ const userMessageContextPresentationRegistry = createContextPresentationRegistry
               detailsMode={definition.capabilities.details}
             />
           </span>
+        ) : (
+          <UnavailableUserMessageContextChip {...context} />
+        ),
+    },
+    {
+      kind: "pasted-text",
+      canRender: (record) => record.kind === "pasted-text",
+      render: (record, context, definition) =>
+        record.kind === "pasted-text" ? (
+          <PastedTextInlineChip
+            surface="transcript"
+            label={formatPastedTextLabel(context.pastedTextOrdinal)}
+            text={record.text}
+            detailsMode={definition.capabilities.details}
+            copyMarkdown={context.copyMarkdown}
+          />
         ) : (
           <UnavailableUserMessageContextChip {...context} />
         ),
@@ -3507,6 +3533,7 @@ const userMessageContextPresentationRegistry = createContextPresentationRegistry
 /** One inline context chip in a sent message, dispatched by the shared presentation registry. */
 function UserMessageContextReferenceChip(props: {
   reference: ChatMarkdownContextReference;
+  pastedTextOrdinal: number | undefined;
   record: KnownComposerContextRecord | undefined;
   annotationImage: ChatImageAttachment | null;
   attachment: ChatImageAttachment | ChatFileAttachment | null;
@@ -3522,6 +3549,7 @@ function UserMessageContextReferenceChip(props: {
   });
   return userMessageContextPresentationRegistry.render(props.reference.kind, props.record, {
     reference: props.reference,
+    pastedTextOrdinal: props.pastedTextOrdinal,
     annotationImage: props.annotationImage,
     attachment: props.attachment,
     resolvedTheme,

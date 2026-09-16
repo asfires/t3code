@@ -20,6 +20,7 @@ export const COMPOSER_CONTEXT_KINDS = [
   "image",
   "file",
   "terminal",
+  "pasted-text",
   "element",
   "preview-annotation",
   "review-comment",
@@ -35,6 +36,8 @@ const KNOWN_KIND_PATTERN = new RegExp(`^(?!(?:${COMPOSER_CONTEXT_KINDS.join("|")
 
 export const COMPOSER_CONTEXT_LABEL_MAX_CHARS = 200;
 export const COMPOSER_CONTEXT_TERMINAL_TEXT_MAX_CHARS = 64_000;
+/** Bounds a folded paste; larger clipboard text becomes a file attachment instead. */
+export const COMPOSER_CONTEXT_PASTED_TEXT_MAX_CHARS = 64_000;
 const COMPOSER_CONTEXT_ELEMENT_HTML_MAX_CHARS = 8_000;
 const COMPOSER_CONTEXT_ELEMENT_STYLES_MAX_CHARS = 8_000;
 /** Exported so producers can clamp to the same boundary the schema enforces, rather than
@@ -123,6 +126,22 @@ export const TerminalContextRecord = Schema.Struct({
   text: BoundedString(COMPOSER_CONTEXT_TERMINAL_TEXT_MAX_CHARS),
 }).check(Schema.makeFilter((record) => record.lineEnd >= record.lineStart));
 export type TerminalContextRecord = typeof TerminalContextRecord.Type;
+
+/**
+ * Clipboard text folded into a chip so a long paste does not swamp the composer. The text
+ * travels inline to the provider, unlike a file attachment, so the agent reads it without a
+ * tool call.
+ */
+export const PastedTextContextRecord = Schema.Struct({
+  ...recordBase,
+  kind: Schema.Literal("pasted-text"),
+  // Not trimmed: indentation and trailing newlines are part of what was pasted.
+  text: Schema.String.check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(COMPOSER_CONTEXT_PASTED_TEXT_MAX_CHARS),
+  ),
+});
+export type PastedTextContextRecord = typeof PastedTextContextRecord.Type;
 
 export const ElementContextSource = Schema.Struct({
   functionName: NullableShortString,
@@ -240,6 +259,7 @@ export const KnownComposerContextRecord = Schema.Union([
   ImageContextRecord,
   FileContextRecord,
   TerminalContextRecord,
+  PastedTextContextRecord,
   ElementContextRecord,
   PreviewAnnotationContextRecord,
   ReviewCommentContextRecord,
