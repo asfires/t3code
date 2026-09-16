@@ -191,6 +191,59 @@ describe("shouldDiscardTransientProviderThread", () => {
   });
 });
 
+describe("ThreadDeletionReactor retraction cleanup", () => {
+  effectIt.effect("removes the retracted draft's worktree and then the branch it minted", () =>
+    Effect.gen(function* () {
+      const calls: string[] = [];
+      const branchDeleted = yield* Deferred.make<void>();
+      const engine = {
+        latestSequence: Effect.succeed(1),
+        streamDomainEvents: Stream.make(deletedEvent()),
+      } as unknown as OrchestrationEngineShape;
+      const providerService = {
+        stopSession: () => Effect.void,
+        discardTransientThread: () => Effect.void,
+      } as unknown as ProviderServiceShape;
+      const terminalManager = {
+        close: () => Effect.void,
+      } as unknown as TerminalManager.TerminalManager["Service"];
+      const layer = ThreadDeletionReactorLive.pipe(
+        Layer.provide(
+          Layer.mock(GitWorkflowService, {
+            removeWorktree: (input) =>
+              Effect.sync(() => {
+                calls.push(`remove:${input.path}`);
+              }),
+            deleteBranch: (input) =>
+              Effect.sync(() => {
+                calls.push(`branch:${input.branch}`);
+                return true;
+              }).pipe(Effect.tap(() => Deferred.succeed(branchDeleted, undefined))),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(ProjectionThreadRepository, {
+            getById: () => Effect.succeed(Option.some(projectedThread())),
+            hasOtherLiveWorktreeReference: () => Effect.succeed(false),
+          }),
+        ),
+        Layer.provide(Layer.succeed(ProviderService, providerService)),
+        Layer.provide(Layer.succeed(TerminalManager.TerminalManager, terminalManager)),
+        Layer.provide(Layer.succeed(OrchestrationEngineService, engine)),
+      );
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const reactor = yield* ThreadDeletionReactor;
+          yield* reactor.start();
+          yield* Deferred.await(branchDeleted);
+          expect(calls).toEqual(["remove:/tmp/project-worktree", "branch:feature/thread"]);
+        }),
+      ).pipe(Effect.provide(layer));
+    }),
+  );
+});
+
 describe("ThreadDeletionReactor drain", () => {
   const now = "2026-01-01T00:00:00.000Z";
   const threadId = ThreadId.make("thread-deletion-reactor-drain");

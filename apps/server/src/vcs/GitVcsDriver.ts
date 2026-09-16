@@ -359,6 +359,14 @@ export class GitVcsDriver extends Context.Service<
     readonly removeWorktree: (
       input: VcsRemoveWorktreeInput,
     ) => Effect.Effect<void, GitCommandError>;
+    /**
+     * Safe delete (`git branch -d`): resolves `false`, without failing, when git refuses
+     * because the branch is checked out or carries commits not reachable from HEAD.
+     */
+    readonly deleteBranch: (input: {
+      readonly cwd: string;
+      readonly branch: string;
+    }) => Effect.Effect<boolean, GitCommandError>;
     /** Drops worktree admin entries whose directory is already gone (`git worktree prune`). */
     readonly pruneWorktrees: (input: {
       readonly cwd: string;

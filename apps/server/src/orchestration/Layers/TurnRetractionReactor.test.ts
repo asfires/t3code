@@ -802,6 +802,7 @@ it("marks terminal provider rollback failure with the correlated activity shape"
         messageId: MESSAGE_ID,
         stage: "provider-rollback",
         retryable: false,
+        silent: true,
       },
     },
   });

@@ -28,8 +28,17 @@ export interface LastUserMessagePopCandidate {
 export function findLastUserMessagePopCandidate(input: {
   messages: ReadonlyArray<ChatMessage>;
 }): LastUserMessagePopCandidate | null {
-  const message = input.messages.findLast((entry) => entry.role === "user");
-  return message && (message.attachments ?? []).every((attachment) => attachment.type === "image")
+  const index = input.messages.findLastIndex((entry) => entry.role === "user");
+  const message = index === -1 ? undefined : input.messages[index];
+  if (!message) return null;
+  // A message the assistant already answered is not what a running turn is
+  // working on, even when that turn has produced nothing yet (a turn started
+  // for a message that was retracted in the meantime, for example).
+  const answered = input.messages
+    .slice(index + 1)
+    .some((entry) => entry.role === "assistant" && entry.text.length > 0);
+  if (answered) return null;
+  return (message.attachments ?? []).every((attachment) => attachment.type === "image")
     ? { message }
     : null;
 }

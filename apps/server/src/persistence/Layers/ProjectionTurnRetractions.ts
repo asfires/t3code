@@ -116,6 +116,27 @@ const make = Effect.gen(function* () {
     `,
   });
 
+  /**
+   * A retraction with no turn to interrupt can complete before provider
+   * startup finishes. The send that follows must still see it: a settled
+   * cancellation is as binding as a pending one.
+   */
+  const getLatestByMessageRow = SqlSchema.findOneOption({
+    Request: CancelProjectionTurnProviderSend,
+    Result: ProjectionTurnRetractionDbRow,
+    execute: ({ threadId, messageId }) => sql`
+      SELECT request_id AS "requestId", thread_id AS "threadId", message_id AS "messageId",
+        baseline_turn_count AS "baselineTurnCount", baseline_checkpoint_ref AS "baselineCheckpointRef",
+        target_turn_id AS "targetTurnId", provider_send_claimed AS "providerSendClaimed",
+        provider_send_state AS "providerSendState", first_user_message AS "firstUserMessage",
+        requested_at AS "requestedAt", status, completed_at AS "completedAt", failed_at AS "failedAt"
+      FROM projection_turn_retractions
+      WHERE thread_id = ${threadId} AND message_id = ${messageId}
+      ORDER BY requested_at DESC
+      LIMIT 1
+    `,
+  });
+
   const markProviderSendCancelledRow = SqlSchema.void({
     Request: ProjectionTurnRetractionRequest,
     execute: ({ requestId }) => sql`
@@ -228,6 +249,14 @@ const make = Effect.gen(function* () {
               }
               if (row.providerSendState === "unclaimed") {
                 yield* markProviderSendCancelledRow({ requestId: row.requestId });
+                return "cancelled" as const;
+              }
+            } else {
+              const settled = yield* getLatestByMessageRow(input);
+              if (
+                Option.isSome(settled) &&
+                mapRow(settled.value).providerSendState === "cancelled"
+              ) {
                 return "cancelled" as const;
               }
             }

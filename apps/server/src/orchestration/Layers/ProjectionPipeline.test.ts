@@ -4640,6 +4640,68 @@ it.effect("restores pending turn-start metadata across projection pipeline resta
   ),
 );
 
+it.effect("keeps a send cancelled after its retraction completes before provider startup", () =>
+  Effect.gen(function* () {
+    const { dbPath } = yield* ServerConfig;
+    const threadId = ThreadId.make("thread-retraction-settled-cancel");
+    const messageId = MessageId.make("message-retraction-settled-cancel");
+    const requestId = CommandId.make("request-retraction-settled-cancel");
+
+    yield* Effect.gen(function* () {
+      const retractions = yield* ProjectionTurnRetractionRepository;
+      yield* retractions.upsertPending({
+        requestId,
+        threadId,
+        messageId,
+        baselineTurnCount: 9,
+        baselineCheckpointRef: CheckpointRef.make(
+          "refs/t3/threads/thread-retraction-settled-cancel/turn/9",
+        ),
+        targetTurnId: null,
+        providerSendClaimed: false,
+        providerSendState: "unclaimed",
+        firstUserMessage: false,
+        requestedAt: "2026-01-01T00:00:01.000Z",
+        status: "requested",
+        completedAt: null,
+        failedAt: null,
+      });
+      // Retract wins before the provider is up, and the reactor completes the
+      // retraction while startup is still in flight.
+      assert.equal(yield* retractions.cancelPendingProviderSend({ threadId, messageId }), true);
+      yield* retractions.markCompleted({
+        requestId,
+        completedAt: "2026-01-01T00:00:01.100Z",
+        targetTurnId: null,
+      });
+      // The turn-start consumer reaches its claim only now; the message is gone.
+      assert.equal(
+        yield* retractions.claimProviderSend({
+          threadId,
+          messageId,
+          claimedAt: "2026-01-01T00:00:02.000Z",
+        }),
+        "cancelled",
+      );
+    }).pipe(
+      Effect.provide(
+        ProjectionTurnRetractionRepositoryLive.pipe(
+          Layer.provide(makeSqlitePersistenceLive(dbPath)),
+        ),
+      ),
+    );
+  }).pipe(
+    Effect.provide(
+      Layer.provideMerge(
+        ServerConfig.layerTest(process.cwd(), {
+          prefix: "t3-retraction-settled-cancel-",
+        }),
+        NodeServices.layer,
+      ),
+    ),
+  ),
+);
+
 it.effect("retains provider-send claim classification across repository restart", () =>
   Effect.gen(function* () {
     const { dbPath } = yield* ServerConfig;
