@@ -9447,6 +9447,85 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect(
+    "rewinds by count when the target settled into the cursor before the session reopened",
+    () => {
+      const forkCalls: Array<Parameters<NonNullable<ClaudeAdapterLiveOptions["forkSession"]>>> = [];
+      const resumeSessionId = "550e8400-e29b-41d4-a716-446655440030";
+      const harness = makeHarness({
+        forkSession: async (...args) => {
+          forkCalls.push(args);
+          return { sessionId: CLAUDE_FORK_SESSION_ID };
+        },
+        getSessionMessages: async (sessionId) => {
+          const history = [
+            claudeHistoryMessage({
+              type: "user",
+              uuid: "human-1",
+              sessionId: resumeSessionId,
+              content: "first",
+            }),
+            claudeHistoryMessage({
+              type: "assistant",
+              uuid: "assistant-1",
+              sessionId: resumeSessionId,
+            }),
+            claudeHistoryMessage({
+              type: "user",
+              uuid: "human-2",
+              sessionId: resumeSessionId,
+              content: "second",
+            }),
+            claudeHistoryMessage({
+              type: "assistant",
+              uuid: "assistant-2",
+              sessionId: resumeSessionId,
+            }),
+          ];
+          return sessionId === CLAUDE_FORK_SESSION_ID
+            ? history.slice(0, 2).map((message) => ({ ...message, uuid: `fork-${message.uuid}` }))
+            : history;
+        },
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        // An interrupt closed the session after the retracted turn settled: the reopened
+        // session knows the cursor (two turns) but holds no turn of its own.
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+          resumeCursor: {
+            threadId: THREAD_ID,
+            resume: resumeSessionId,
+            resumeSessionAt: "assistant-2",
+            turnCount: 2,
+            turnStartMessageIds: ["human-1", "human-2"],
+          },
+        });
+
+        assert.isDefined(adapter.validateRollbackThreadTo);
+        assert.isDefined(adapter.rollbackThreadTo);
+        if (!adapter.validateRollbackThreadTo || !adapter.rollbackThreadTo) return;
+        const target = TurnId.make("settled-target");
+        yield* adapter.validateRollbackThreadTo(session.threadId, 1, target);
+        const snapshot = yield* adapter.rollbackThreadTo(session.threadId, 1, target);
+
+        assert.deepEqual(snapshot.turns, []);
+        assert.deepEqual(forkCalls, [[resumeSessionId, { upToMessageId: "assistant-1" }]]);
+        assert.deepEqual((yield* adapter.listSessions())[0]?.resumeCursor, {
+          threadId: THREAD_ID,
+          resume: CLAUDE_FORK_SESSION_ID,
+          turnCount: 1,
+          turnStartMessageIds: ["fork-human-1"],
+        });
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
   it.effect("rejects an absent target until its stale boundary is rebased", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

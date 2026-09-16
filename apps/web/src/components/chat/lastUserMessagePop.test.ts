@@ -226,6 +226,25 @@ describe("last user message selection", () => {
     ).toEqual({ message: optimistic });
   });
 
+  it("refuses a message the assistant already answered", () => {
+    expect(
+      findLastUserMessagePopCandidate({
+        messages: [
+          message({ id: "user-1", role: "user", text: "yep" }),
+          message({ id: "assistant-1", role: "assistant", text: "A fellow warlock of culture." }),
+        ],
+      }),
+    ).toBeNull();
+    expect(
+      findLastUserMessagePopCandidate({
+        messages: [
+          message({ id: "user-1", role: "user", text: "yep" }),
+          message({ id: "assistant-1", role: "assistant", text: "" }),
+        ],
+      })?.message.id,
+    ).toBe("user-1");
+  });
+
   it("selects the newest user message without checkpoint-race heuristics", () => {
     const completed = message({ id: "completed-user", role: "user" });
     expect(

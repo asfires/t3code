@@ -3369,6 +3369,30 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       input.branch,
     ]);
 
+  const deleteBranch: GitVcsDriver.GitVcsDriver["Service"]["deleteBranch"] = Effect.fn(
+    "deleteBranch",
+  )(function* (input) {
+    const args = ["branch", "-d", "--", input.branch];
+    const result = yield* executeGitWithStableDiagnostics(
+      "GitVcsDriver.deleteBranch",
+      input.cwd,
+      args,
+      {
+        timeoutMs: 10_000,
+        allowNonZeroExit: true,
+      },
+    );
+    if (result.exitCode === 0) {
+      return true;
+    }
+    // A refusal is the safety net working: the branch is checked out somewhere or has
+    // commits nothing else reaches. Leave it for the user rather than force it.
+    yield* Effect.logInfo(
+      `GitVcsDriver.deleteBranch: git branch -d exited with code ${result.exitCode} for ${input.branch} (stderr length ${result.stderr.length}).`,
+    );
+    return false;
+  });
+
   const removeWorktree: GitVcsDriver.GitVcsDriver["Service"]["removeWorktree"] = Effect.fn(
     "removeWorktree",
   )(function* (input) {
@@ -3634,6 +3658,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       withListRefsInvalidation(input.cwd, fetchRemoteTrackingBranch(input)),
     setBranchUpstream: (input) => withListRefsInvalidation(input.cwd, setBranchUpstream(input)),
     removeWorktree: (input) => withListRefsInvalidation(input.cwd, removeWorktree(input)),
+    deleteBranch: (input) => withListRefsInvalidation(input.cwd, deleteBranch(input)),
     pruneWorktrees: (input) => withListRefsInvalidation(input.cwd, pruneWorktrees(input)),
     renameBranch: (input) => withListRefsInvalidation(input.cwd, renameBranch(input)),
     createRef: (input) => withListRefsInvalidation(input.cwd, createRef(input)),

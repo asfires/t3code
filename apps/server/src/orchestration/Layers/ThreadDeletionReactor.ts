@@ -114,8 +114,19 @@ const make = Effect.gen(function* () {
       hasOtherLiveReference,
     });
     if (target === null) return;
+    // The draft minted its branch together with the worktree (`worktree add -b`), so the
+    // branch goes with it. Safe delete only: a branch with real commits stays behind.
+    const branch = thread.value.branch;
     yield* logCleanupCauseUnlessInterrupted({
-      effect: gitWorkflow.removeWorktree({ cwd: target.projectCwd, path: target.path }),
+      effect: gitWorkflow
+        .removeWorktree({ cwd: target.projectCwd, path: target.path })
+        .pipe(
+          Effect.andThen(
+            branch === null
+              ? Effect.void
+              : gitWorkflow.deleteBranch({ cwd: target.projectCwd, branch }).pipe(Effect.asVoid),
+          ),
+        ),
       message: "thread retraction cleanup skipped managed worktree removal",
       threadId: event.payload.threadId,
     });

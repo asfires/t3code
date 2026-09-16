@@ -76,11 +76,12 @@ const isTerminalProviderError = (error: unknown): boolean =>
 const failureDetail = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
-const isProviderAdapterValidationError = Schema.is(ProviderAdapterValidationError);
-const isUnavailableRetainedBoundary = (error: unknown): boolean =>
-  isProviderAdapterValidationError(error) &&
-  error.operation === "rollbackThreadTo" &&
-  /^Provider history has \d+ turns, below retained boundary \d+\.$/.test(error.issue);
+/**
+ * A provider that cannot roll its history back leaves the user's message where it was and
+ * the thread usable. That is not worth an error banner: the client restores the composer it
+ * had before the retraction and moves on.
+ */
+const isSilentRollbackFailure = (error: unknown): boolean => isTerminalProviderError(error);
 
 export class TurnRetractionRetryTicks extends Context.Reference<Stream.Stream<void>>(
   "t3/orchestration/Layers/TurnRetractionReactor/TurnRetractionRetryTicks",
@@ -482,7 +483,7 @@ export const makeTurnRetractionReactor = Effect.gen(function* () {
               stage: "provider-rollback" as const,
               retryable: !isTerminalProviderError(error),
               detail: failureDetail(error),
-              ...(isUnavailableRetainedBoundary(error) ? { silent: true } : {}),
+              ...(isSilentRollbackFailure(error) ? { silent: true } : {}),
             })),
           );
       }
@@ -571,7 +572,7 @@ export const makeTurnRetractionReactor = Effect.gen(function* () {
           stage: "provider-rollback" as const,
           retryable: !isTerminalProviderError(error),
           detail: failureDetail(error),
-          ...(isUnavailableRetainedBoundary(error) ? { silent: true } : {}),
+          ...(isSilentRollbackFailure(error) ? { silent: true } : {}),
         })),
       );
     yield* restoreFilesystem(row, false);

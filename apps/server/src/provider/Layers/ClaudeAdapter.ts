@@ -5798,13 +5798,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             issue: `Provider history has ${lifetimeTurnCount} turns, below retained boundary ${retainedTurnCount}.`,
           });
         }
-        if (lifetimeTurnCount > retainedTurnCount) {
-          return yield* new ProviderAdapterValidationError({
-            provider: PROVIDER,
-            operation: "rollbackThreadTo",
-            issue: `Rollback target '${targetTurnId}' is unavailable while provider history remains above retained boundary ${retainedTurnCount}.`,
-          });
-        }
+        // Above the boundary with the target out of view: the session was reopened after
+        // the target settled into the cursor, so the rollback runs by count instead.
         return;
       }
       const retainedSessionTurnCount = targetIndex >= 0 ? targetIndex : context.turns.length;
@@ -5837,6 +5832,35 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const context = yield* requireSession(threadId);
     if (targetTurnId !== undefined) {
       const targetIndex = context.turns.findIndex((turn) => turn.id === targetTurnId);
+      const targetIsActive = context.turnState?.turnId === targetTurnId;
+      const lifetimeBeforeRollback = context.sessionBaseTurnCount + context.turns.length;
+      if (targetIndex < 0 && !targetIsActive && lifetimeBeforeRollback > retainedTurnCount) {
+        // An interrupt can close the SDK session, and the reopened one only knows the
+        // cursor: the retracted turn is in the count, not in `turns`. Rewind by count,
+        // forking native history when every boundary is known so the provider forgets
+        // the turn too; otherwise rebase the watermark like a target-less rollback.
+        const numTurns = lifetimeBeforeRollback - retainedTurnCount;
+        const boundariesKnown =
+          context.turnStartMessageIds.length === lifetimeBeforeRollback &&
+          context.turnStartMessageIds.every((id) => id !== null);
+        const snapshot = boundariesKnown
+          ? yield* rollbackThread(threadId, numTurns)
+          : yield* applyRollback(
+              context,
+              Math.max(0, context.turns.length - numTurns),
+              numTurns > context.turns.length ? retainedTurnCount : context.sessionBaseTurnCount,
+            );
+        const after = yield* requireSession(threadId);
+        const resultingLifetimeTurnCount = after.sessionBaseTurnCount + snapshot.turns.length;
+        if (resultingLifetimeTurnCount !== retainedTurnCount) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "thread/rollback-to",
+            detail: `Expected ${retainedTurnCount} retained turns, found ${resultingLifetimeTurnCount}.`,
+          });
+        }
+        return snapshot;
+      }
       const nextLength = targetIndex >= 0 ? targetIndex : context.turns.length;
       const retainedTurns = context.turns.slice(0, nextLength);
       const nextSessionBaseTurnCount = retainedTurnCount - nextLength;
