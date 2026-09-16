@@ -27,6 +27,7 @@ function thread(id: string): EnvironmentThreadShell {
     interactionMode: "default",
     branch: null,
     worktreePath: null,
+    pullRequests: [],
     latestTurn: null,
     createdAt: "2026-08-13T12:00:00.000Z",
     updatedAt: "2026-08-13T12:00:00.000Z",

@@ -44,7 +44,6 @@ function cloneComposerDraft(
         nonPersistedImageIds: [...draft.nonPersistedImageIds],
         persistedAttachments: [...draft.persistedAttachments],
         terminalContexts: [...draft.terminalContexts],
-        elementContexts: [...draft.elementContexts],
         previewAnnotations: [...draft.previewAnnotations],
         reviewComments: [...draft.reviewComments],
         modelSelectionByProvider: { ...draft.modelSelectionByProvider },

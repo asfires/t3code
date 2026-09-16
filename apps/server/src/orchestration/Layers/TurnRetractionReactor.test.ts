@@ -142,6 +142,7 @@ function projectedThread(state: MutableState): OrchestrationThread {
     interactionMode: "default",
     branch: null,
     worktreePath: "/tmp/retraction-reactor-workspace",
+    pullRequests: [],
     latestTurn: {
       turnId: TURN_ID,
       state: state.sessionStatus === "running" ? "running" : "interrupted",

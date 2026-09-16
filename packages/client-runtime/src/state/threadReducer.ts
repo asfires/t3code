@@ -10,15 +10,42 @@ import type {
   OrchestrationSession,
   OrchestrationThread,
   OrchestrationThreadActivity,
+  ThreadPullRequestLink,
   TurnId,
 } from "@t3tools/contracts";
 import { CheckpointRef } from "@t3tools/contracts";
 import * as Encoding from "effect/Encoding";
+import { threadPullRequestKeysEqual } from "@t3tools/shared/threadPullRequests";
+import { isImportedAgentSessionMessageId } from "@t3tools/contracts";
+import { compareDateTimeStrings } from "@t3tools/shared/dateTime";
 
 export type ThreadDetailReducerResult =
   | { readonly kind: "updated"; readonly thread: OrchestrationThread }
   | { readonly kind: "deleted" }
   | { readonly kind: "unchanged" };
+
+/** Keep only a legacy route supplied by the server; detail events cannot resolve project hosts. */
+function withPullRequests(
+  thread: OrchestrationThread,
+  pullRequests: ReadonlyArray<ThreadPullRequestLink>,
+  updatedAt: string,
+): ThreadDetailReducerResult {
+  return {
+    kind: "updated",
+    thread: {
+      ...thread,
+      pullRequests,
+      linkedPullRequest:
+        thread.linkedPullRequest &&
+        pullRequests.some(
+          (link) => link.source !== "stack-dismissed" && link.url === thread.linkedPullRequest?.url,
+        )
+          ? thread.linkedPullRequest
+          : null,
+      updatedAt,
+    },
+  };
+}
 
 const proposedPlanOrder = O.combine<OrchestrationThread["proposedPlans"][number]>(
   O.mapInput(O.String, (p) => p.createdAt),
@@ -99,6 +126,7 @@ export function applyThreadDetailEvent(
           interactionMode: event.payload.interactionMode,
           branch: event.payload.branch,
           worktreePath: event.payload.worktreePath,
+          branchPullRequest: null,
           latestTurn: null,
           createdAt: event.payload.createdAt,
           updatedAt: event.payload.updatedAt,
@@ -106,9 +134,11 @@ export function applyThreadDetailEvent(
           settledOverride: null,
           settledAt: null,
           unsettledAt: null,
+          activeOrderKey: null,
           snoozedUntil: null,
           snoozedAt: null,
           deletedAt: null,
+          pullRequests: [],
           messages: [],
           proposedPlans: [],
           activities: [],
@@ -145,6 +175,7 @@ export function applyThreadDetailEvent(
           settledOverride: "settled",
           settledAt: event.payload.settledAt,
           unsettledAt: null,
+          activeOrderKey: null,
           updatedAt: event.payload.updatedAt,
         },
       };
@@ -229,6 +260,9 @@ export function applyThreadDetailEvent(
         thread: {
           ...thread,
           ...(event.payload.title !== undefined ? { title: event.payload.title } : {}),
+          ...(event.payload.titleState !== undefined
+            ? { titleState: event.payload.titleState }
+            : {}),
           ...(event.payload.titleRegeneration !== undefined
             ? { titleRegeneration: event.payload.titleRegeneration }
             : {}),
@@ -242,9 +276,49 @@ export function applyThreadDetailEvent(
           ...(event.payload.linkedPullRequest !== undefined
             ? { linkedPullRequest: event.payload.linkedPullRequest }
             : {}),
+          ...(event.payload.branchPullRequest !== undefined
+            ? { branchPullRequest: event.payload.branchPullRequest }
+            : {}),
+          ...(event.payload.activeOrderKey !== undefined
+            ? { activeOrderKey: event.payload.activeOrderKey }
+            : {}),
           updatedAt: event.payload.updatedAt,
         },
       };
+
+    case "thread.pull-request-linked": {
+      const link = event.payload.link;
+      const others = thread.pullRequests.filter(
+        (existing) => !threadPullRequestKeysEqual(existing, link),
+      );
+      return withPullRequests(thread, [...others, link], event.payload.updatedAt);
+    }
+
+    case "thread.pull-request-unlinked":
+      return withPullRequests(
+        thread,
+        thread.pullRequests.filter(
+          (existing) => !threadPullRequestKeysEqual(existing, event.payload),
+        ),
+        event.payload.updatedAt,
+      );
+
+    case "thread.pull-request-synced": {
+      if (
+        !thread.pullRequests.some((existing) => threadPullRequestKeysEqual(existing, event.payload))
+      ) {
+        return { kind: "unchanged" };
+      }
+      return withPullRequests(
+        thread,
+        thread.pullRequests.map((existing) =>
+          threadPullRequestKeysEqual(existing, event.payload)
+            ? { ...existing, snapshot: event.payload.snapshot, stack: event.payload.stack }
+            : existing,
+        ),
+        event.payload.updatedAt,
+      );
+    }
 
     case "thread.runtime-mode-set":
       return {
@@ -345,33 +419,32 @@ export function applyThreadDetailEvent(
         ...(event.payload.attachments !== undefined
           ? { attachments: event.payload.attachments }
           : {}),
+        ...(event.payload.context !== undefined ? { context: event.payload.context } : {}),
         turnId: event.payload.turnId,
         streaming: event.payload.streaming,
         createdAt: event.payload.createdAt,
         updatedAt: event.payload.updatedAt,
       };
 
-      const existingMessage = thread.messages.find((entry) => entry.id === message.id);
-      const messages = existingMessage
-        ? Arr.map(thread.messages, (entry) =>
-            entry.id !== message.id
-              ? entry
-              : {
-                  ...entry,
-                  text: message.streaming
-                    ? `${entry.text}${message.text}`
-                    : message.text.length > 0
-                      ? message.text
-                      : entry.text,
-                  streaming: message.streaming,
-                  ...(message.turnId !== undefined ? { turnId: message.turnId } : {}),
-                  ...(message.streaming ? {} : { updatedAt: message.updatedAt }),
-                  ...(message.attachments !== undefined
-                    ? { attachments: message.attachments }
-                    : {}),
-                },
-          )
-        : Arr.append(thread.messages, message);
+      let found = false;
+      const messages = thread.messages.map((entry) => {
+        if (entry.id !== message.id) return entry;
+        found = true;
+        return {
+          ...entry,
+          text: message.streaming
+            ? `${entry.text}${message.text}`
+            : message.text.length > 0
+              ? message.text
+              : entry.text,
+          streaming: message.streaming,
+          ...(message.turnId !== undefined ? { turnId: message.turnId } : {}),
+          ...(message.streaming ? {} : { updatedAt: message.updatedAt }),
+          ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
+          ...(message.context !== undefined ? { context: message.context } : {}),
+        };
+      });
+      if (!found) messages.push(message);
       // Update latestTurn for assistant messages bound to a turn. A completed
       // assistant message only settles the turn once the session is no longer
       // running it — providers may emit several assistant messages per turn
@@ -557,7 +630,10 @@ export function applyThreadDetailEvent(
         (thread.latestTurn === null || thread.latestTurn.turnId === event.payload.turnId)
           ? {
               turnId: event.payload.turnId,
-              state: checkpointStatusToTurnState(event.payload.status),
+              state:
+                thread.latestTurn?.state === "interrupted"
+                  ? "interrupted"
+                  : checkpointStatusToTurnState(event.payload.status),
               requestedAt: thread.latestTurn?.requestedAt ?? event.payload.completedAt,
               startedAt: thread.latestTurn?.startedAt ?? event.payload.completedAt,
               completedAt: event.payload.completedAt,
@@ -841,56 +917,41 @@ function retainMessagesAfterRevert(
     if (excludedMessageIds.has(message.id)) {
       continue;
     }
-    if (message.role === "system") {
+    if (message.role === "system" || isImportedAgentSessionMessageId(message.id)) {
       retainedMessageIds.add(message.id);
-      continue;
-    }
-    if (message.turnId !== null && retainedTurnIds.has(message.turnId)) {
+    } else if (message.turnId !== null && retainedTurnIds.has(message.turnId)) {
       retainedMessageIds.add(message.id);
     }
   }
 
-  const retainedUserCount = messages.filter(
-    (message) => message.role === "user" && retainedMessageIds.has(message.id),
-  ).length;
-  const missingUserCount = Math.max(0, turnCount - retainedUserCount);
-  const fallbackUserMessages = messages
-    .filter(
+  for (const role of ["user", "assistant"] as const) {
+    const retainedCount = messages.filter(
       (message) =>
-        message.role === "user" &&
-        !excludedMessageIds.has(message.id) &&
-        !retainedMessageIds.has(message.id) &&
-        (message.turnId === null || retainedTurnIds.has(message.turnId)),
-    )
-    .toSorted(
-      (left, right) =>
-        left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
-    )
-    .slice(0, missingUserCount);
-  for (const message of fallbackUserMessages) {
-    retainedMessageIds.add(message.id);
+        message.role === role &&
+        !isImportedAgentSessionMessageId(message.id) &&
+        retainedMessageIds.has(message.id),
+    ).length;
+    const missingCount = Math.max(0, turnCount - retainedCount);
+    const fallbackMessages = messages
+      .filter(
+        (message) =>
+          message.role === role &&
+          !excludedMessageIds.has(message.id) &&
+          !retainedMessageIds.has(message.id) &&
+          (message.turnId === null || retainedTurnIds.has(message.turnId)),
+      )
+      // `.sort()`, not `.toSorted()`: `.filter()` above already returned a fresh array, and
+      // this is shared with mobile, which runs on Hermes and has no ES2023 array methods.
+      .sort(
+        (left, right) =>
+          compareDateTimeStrings(left.createdAt, right.createdAt) ||
+          left.id.localeCompare(right.id),
+      )
+      .slice(0, missingCount);
+    for (const message of fallbackMessages) {
+      retainedMessageIds.add(message.id);
+    }
   }
 
-  const retainedAssistantCount = messages.filter(
-    (message) => message.role === "assistant" && retainedMessageIds.has(message.id),
-  ).length;
-  const missingAssistantCount = Math.max(0, turnCount - retainedAssistantCount);
-  const fallbackAssistantMessages = messages
-    .filter(
-      (message) =>
-        message.role === "assistant" &&
-        !excludedMessageIds.has(message.id) &&
-        !retainedMessageIds.has(message.id) &&
-        (message.turnId === null || retainedTurnIds.has(message.turnId)),
-    )
-    .toSorted(
-      (left, right) =>
-        left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
-    )
-    .slice(0, missingAssistantCount);
-  for (const message of fallbackAssistantMessages) {
-    retainedMessageIds.add(message.id);
-  }
-
-  return messages.filter((message) => retainedMessageIds.has(message.id));
+  return Arr.filter(messages, (message) => retainedMessageIds.has(message.id));
 }

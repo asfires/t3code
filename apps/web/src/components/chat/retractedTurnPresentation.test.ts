@@ -69,8 +69,8 @@ function timelineWorkingRowIds(isWorking: boolean) {
     latestTurn: null,
     isWorking,
     activeTurnStartedAt: "2026-08-11T12:00:00.000Z",
-    turnDiffSummaryByAssistantMessageId: new Map(),
-    revertTurnCountByUserMessageId: new Map(),
+    turnDiffSummaries: [],
+    supportsConversationRollback: false,
   }).map((row) => row.kind);
 }
 

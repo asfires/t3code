@@ -45,18 +45,21 @@ interface ProviderTransferBudget {
 }
 
 // These caps leave roughly 30% headroom above the client projection of the
-// deterministic 9 MB retained-result fixture. Full MCP results stay in
-// persistence, so accidentally shipping them again exceeds these caps by
-// orders of magnitude. The CI report preserves exact values for review.
+// deterministic 9 MB retained-result fixture. Upstream ships only a summary of
+// each tool result; this fork projects the leading MAX_PROJECTED_TOOL_RESULT_CHARS
+// of every result so the timeline can show real output, which is why the wire
+// caps sit well above upstream's. Shipping the full 9 MB result again would
+// still exceed them by orders of magnitude. The CI report preserves exact
+// values for review.
 const TRANSFER_BUDGET = {
-  totalWireBytes: 15_500,
-  threadSnapshotWireBytes: 7_500,
-  measuredTurnWebSocketWireBytes: 8_000,
-  measuredTurnWebSocketDecodedBytes: 68_000,
+  totalWireBytes: 190_000,
+  threadSnapshotWireBytes: 165_000,
+  measuredTurnWebSocketWireBytes: 27_000,
+  measuredTurnWebSocketDecodedBytes: 160_000,
   measuredTurnWebSocketMessages: 21,
 } satisfies ProviderTransferBudget;
 
-export const TRANSFER_BUDGETS: Readonly<Record<string, ProviderTransferBudget>> = {
+const TRANSFER_BUDGETS: Readonly<Record<string, ProviderTransferBudget>> = {
   codex: TRANSFER_BUDGET,
   claudeAgent: TRANSFER_BUDGET,
 };

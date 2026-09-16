@@ -10,9 +10,16 @@ notice.
 Server updates restart the connection and can interrupt active agents and
 terminal commands. Saved threads, settings, and project files remain.
 
-**Settings → General → Continue threads after server updates** is off by default.
-Enable it to resume supported active threads once the replacement server is
-ready. Terminal commands may still be interrupted.
+**Settings → General → Continue threads after restarts** is off by default.
+Enable it to resume supported active threads after an update, crash, or machine
+restart. Changes are saved to connected environments that support this setting;
+update older servers first. If a supported environment was offline or has a
+different value, use **Apply to all** in Settings after it connects.
+T3 Code must start again on that machine;
+the setting does not enable automatic startup. Terminal commands may still be
+interrupted, and threads without saved provider resume state need a new message.
+If you previously enabled continuation for updates, enable this setting once
+to allow recovery without a connected client.
 
 ## Update a connected server
 
@@ -24,21 +31,21 @@ The offered action depends on how the server runs:
 | **Update the desktop app** | Update the desktop app on the machine running the server, then reopen it if needed.                                                                                                             |
 | **Copy update command**    | Stop the command-line server on its host and relaunch with the copied command, keeping your usual startup options.                                                                              |
 
-For a background service, run the matching version's CLI on the host:
+On the host, run:
 
 ```sh
-npx t3@<client-version> service update
+t3 update <client-version>
 ```
 
-Replace `<client-version>` with the version shown in the notice. Using
-`@latest` only resolves the mismatch if your client is on that release. An older
-service launcher may require this local update before it supports remote updates
-and rollback.
+Replace `<client-version>` with the version shown in the notice. The command
+asks before restarting the background service; if you decline, run
+`t3 service restart` when you are ready. For a server you started by hand,
+stop it and start it again afterwards with your usual options such as `--host`
+or `--tailscale-serve`.
 
-For a foreground server, the copied command is `npx t3@<client-version>`. Add
-`serve` if you normally run without a browser, and preserve options such as
-`--host` or `--tailscale-serve`. See
-[background services](./background-service.md) for service management.
+If you run the server with `npx` rather than an installed `t3`, there is
+nothing to update on the host: stop the server and relaunch it as
+`npx t3@<client-version>` with the same subcommand and options.
 
 ## If an update fails
 
