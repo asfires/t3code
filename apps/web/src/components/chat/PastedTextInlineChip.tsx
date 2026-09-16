@@ -1,3 +1,4 @@
+import { PROVIDER_SEND_TURN_MAX_INPUT_CHARS } from "@t3tools/contracts";
 import { ClipboardPasteIcon } from "lucide-react";
 import { useState } from "react";
 
@@ -91,7 +92,9 @@ function PastedTextEditDialog(props: {
             <span>
               {draft.trim().length === 0
                 ? "Closing removes this pasted text."
-                : "Changes apply when you close."}
+                : draft.length > PROVIDER_SEND_TURN_MAX_INPUT_CHARS
+                  ? `Over the ${PROVIDER_SEND_TURN_MAX_INPUT_CHARS.toLocaleString("en-US")}-character message limit.`
+                  : "Changes apply when you close."}
             </span>
           </div>
         </DialogPanel>

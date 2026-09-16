@@ -1,5 +1,4 @@
 import {
-  COMPOSER_CONTEXT_PASTED_TEXT_MAX_CHARS,
   COMPOSER_CONTEXT_REVIEW_DIFF_MAX_CHARS,
   COMPOSER_CONTEXT_REVIEW_TEXT_MAX_CHARS,
 } from "@t3tools/contracts";
@@ -176,7 +175,9 @@ export function pastedTextContextRecord(draft: PastedTextDraft): PastedTextConte
     contextId: toKindScopedComposerContextId("pasted-text", draft.id),
     kind: "pasted-text",
     label: PASTED_TEXT_CONTEXT_LABEL,
-    text: clampContextText(normalizePastedText(draft.text), COMPOSER_CONTEXT_PASTED_TEXT_MAX_CHARS),
+    // Never clamped: a paste is the user's content. Over the limit, the send is refused
+    // with the same message as an over-long prompt instead of quietly losing the tail.
+    text: normalizePastedText(draft.text),
   };
 }
 
