@@ -16,14 +16,7 @@ import {
 } from "../composerInlineChip";
 import { ContextChipPopover, ContextChipShell } from "../contextChipParts";
 import { Button } from "../ui/button";
-import {
-  Dialog,
-  DialogFooter,
-  DialogHeader,
-  DialogPanel,
-  DialogPopup,
-  DialogTitle,
-} from "../ui/dialog";
+import { Dialog, DialogHeader, DialogPanel, DialogPopup, DialogTitle } from "../ui/dialog";
 import { Textarea } from "../ui/textarea";
 
 interface PastedTextInlineChipProps {
@@ -56,22 +49,24 @@ function PastedTextChipContent(props: { label: string }) {
 
 /**
  * Editing happens in a dialog rather than the chip itself: a paste that earned a chip is
- * long, and a Lexical decorator is a poor host for a multi-line editor. The draft record is
- * rewritten on save; the chip keeps its id and place in the prompt. Saving nothing removes
- * the chip, the same as deleting it in the prompt.
+ * long, and a Lexical decorator is a poor host for a multi-line editor. Closing the dialog
+ * commits: the draft record is rewritten and the chip keeps its id and place in the prompt,
+ * or the chip is removed when nothing is left, the same as deleting it in the prompt.
  */
 function PastedTextEditDialog(props: {
   label: string;
   text: string;
-  onOpenChange: (open: boolean) => void;
-  onSave: (text: string) => void;
+  onClose: (text: string) => void;
 }) {
   // Mounted only while open, so the draft starts from the current text every time.
   const [draft, setDraft] = useState(props.text);
-  const removes = draft.trim().length === 0;
-  const canSave = draft !== props.text;
   return (
-    <Dialog open onOpenChange={props.onOpenChange}>
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) props.onClose(draft);
+      }}
+    >
       <DialogPopup className="max-w-3xl">
         <DialogHeader>
           <DialogTitle>{props.label}</DialogTitle>
@@ -84,27 +79,22 @@ function PastedTextEditDialog(props: {
             spellCheck={false}
             onChange={(event) => setDraft(event.currentTarget.value)}
             onKeyDown={(event) => {
-              if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && canSave) {
+              if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
                 event.preventDefault();
-                props.onSave(draft);
+                props.onClose(draft);
               }
             }}
             style={{ minHeight: "40vh", maxHeight: "60vh", resize: "vertical" }}
           />
-          <div className="text-secondary-label text-[11px]">{formatPastedTextStats(draft)}</div>
+          <div className="flex items-center justify-between gap-3 text-secondary-label text-[11px]">
+            <span>{formatPastedTextStats(draft)}</span>
+            <span>
+              {draft.trim().length === 0
+                ? "Closing removes this pasted text."
+                : "Changes apply when you close."}
+            </span>
+          </div>
         </DialogPanel>
-        <DialogFooter>
-          <Button variant="ghost" onClick={() => props.onOpenChange(false)}>
-            Cancel
-          </Button>
-          <Button
-            variant={removes ? "destructive" : undefined}
-            disabled={!canSave}
-            onClick={() => props.onSave(draft)}
-          >
-            {removes ? "Remove" : "Save"}
-          </Button>
-        </DialogFooter>
       </DialogPopup>
     </Dialog>
   );
@@ -141,10 +131,9 @@ export function PastedTextInlineChip(props: PastedTextInlineChipProps) {
           <PastedTextEditDialog
             label={label}
             text={text}
-            onOpenChange={setEditing}
-            onSave={(next) => {
-              onEdit(next);
+            onClose={(next) => {
               setEditing(false);
+              if (next !== text) onEdit(next);
             }}
           />
         ) : null}
