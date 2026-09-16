@@ -1,9 +1,10 @@
-import { MessageId, TurnId } from "@t3tools/contracts";
+import { ComposerContextId, MessageId, TurnId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { TimelineEntry, WorkLogEntry } from "../../session-logic";
 import type { ChatMessage } from "../../types";
 import {
+  deriveLastUserMessageRestoredContent,
   deriveLastUserMessageRestoredText,
   findLastUserMessagePopCandidate,
   IMAGE_ONLY_MESSAGE_PLACEHOLDER,
@@ -273,6 +274,49 @@ describe("last user message restored text", () => {
   it("turns the image-only placeholder back into an empty prompt", () => {
     expect(deriveLastUserMessageRestoredText(IMAGE_ONLY_MESSAGE_PLACEHOLDER)).toBe("");
     expect(deriveLastUserMessageRestoredText(ATTACHMENT_ONLY_BOOTSTRAP_PROMPT)).toBe("");
+  });
+
+  it("keeps pasted-text chips and rebuilds their drafts, dropping other context", () => {
+    const restored = deriveLastUserMessageRestoredContent({
+      text: "Fix [Pasted text](t3-context://v1/pasted-text/p1) with [T1](t3-context://v1/terminal/t1)",
+      context: {
+        version: 1,
+        records: [
+          {
+            version: 1,
+            contextId: ComposerContextId.make("p1"),
+            kind: "pasted-text",
+            label: "Pasted text",
+            text: "line one\nline two",
+          },
+          {
+            version: 1,
+            contextId: ComposerContextId.make("t1"),
+            kind: "terminal",
+            label: "T1",
+            terminalId: "term-1",
+            terminalLabel: "Terminal 1",
+            lineStart: 1,
+            lineEnd: 1,
+            text: "ls",
+          },
+        ],
+      },
+    });
+    expect(restored.pastedTexts).toEqual([
+      { id: "p1", createdAt: expect.any(String), text: "line one\nline two" },
+    ]);
+    expect(restored.prompt).toBe(
+      "Fix [Pasted text](t3-context://v1/pasted-text/pasted-text_p1) with",
+    );
+  });
+
+  it("drops a pasted-text chip whose record is missing", () => {
+    expect(
+      deriveLastUserMessageRestoredContent({
+        text: "Fix [Pasted text](t3-context://v1/pasted-text/p1) now",
+      }),
+    ).toEqual({ prompt: "Fix now", pastedTexts: [] });
   });
 
   it("merges with an in-progress draft using stash restore semantics", () => {

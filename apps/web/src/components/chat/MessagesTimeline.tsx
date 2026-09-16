@@ -3371,12 +3371,13 @@ const userMessageContextPresentationRegistry = createContextPresentationRegistry
       canRender: (record) => record.kind === "pasted-text",
       render: (record, context, definition) =>
         record.kind === "pasted-text" ? (
+          // Copies as the text itself: a paste is the user's content, not a pointer to it.
           <PastedTextInlineChip
             surface="transcript"
             label={formatPastedTextLabel(context.pastedTextOrdinal)}
             text={record.text}
             detailsMode={definition.capabilities.details}
-            copyMarkdown={context.copyMarkdown}
+            copyMarkdown={record.text}
           />
         ) : (
           <UnavailableUserMessageContextChip {...context} />

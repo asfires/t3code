@@ -129,6 +129,40 @@ describe("last user message recovery draft", () => {
     });
   });
 
+  it("carries pasted-text drafts through the hidden recovery draft and back", async () => {
+    const pasted = { id: "paste-1", createdAt: "2026-09-16T12:00:00.000Z", text: "long paste" };
+    const prompt = "Fix [Pasted text](t3-context://v1/pasted-text/pasted-text_paste-1) please";
+    await snapshotLastUserMessageRecovery({
+      requestId,
+      messageId,
+      sourceThreadRef,
+      projectRef,
+      draftId,
+      futureThreadId,
+      createdAt: "2026-08-11T12:00:00.000Z",
+      bundle: {
+        prompt,
+        images: [],
+        pastedTexts: [pasted],
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.6" },
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        envMode: "local",
+        baseBranch: null,
+        startFromOrigin: false,
+      },
+    });
+    const hidden = useComposerDraftStore.getState().getComposerDraft(draftId);
+    expect(hidden?.prompt).toBe(prompt);
+    expect(hidden?.pastedTexts).toEqual([pasted]);
+
+    const restored = restoreRetractionRecoveryToThread({ requestId, sourceThreadRef });
+    expect(restored?.prompt).toBe(prompt);
+    const draft = useComposerDraftStore.getState().getComposerDraft(sourceThreadRef);
+    expect(draft?.prompt).toBe(prompt);
+    expect(draft?.pastedTexts).toEqual([pasted]);
+  });
+
   it("maps and navigates only a capability-gated correlated first-message completion", async () => {
     await snapshotLastUserMessageRecovery({
       requestId,
