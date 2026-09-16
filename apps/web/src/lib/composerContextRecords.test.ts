@@ -784,4 +784,17 @@ describe("pasted text records", () => {
     expect(context.records).toEqual([record]);
     expect(pastedTextDraftFromRecord(record)).toMatchObject({ id: "paste-1", text: "a\n  b\n" });
   });
+
+  it("carries a long paste intact instead of clamping it", () => {
+    const text = "x".repeat(100_000);
+    const context = decodeMessageContext(
+      buildMessageContext({
+        terminalContexts: [],
+        pastedTexts: [{ ...draft, text }],
+        reviewComments: [],
+        previewAnnotations: [],
+      }),
+    );
+    expect(context.records[0]).toMatchObject({ kind: "pasted-text", text });
+  });
 });

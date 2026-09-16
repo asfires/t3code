@@ -36,8 +36,13 @@ const KNOWN_KIND_PATTERN = new RegExp(`^(?!(?:${COMPOSER_CONTEXT_KINDS.join("|")
 
 export const COMPOSER_CONTEXT_LABEL_MAX_CHARS = 200;
 export const COMPOSER_CONTEXT_TERMINAL_TEXT_MAX_CHARS = 64_000;
-/** Bounds a folded paste; larger clipboard text becomes a file attachment instead. */
-export const COMPOSER_CONTEXT_PASTED_TEXT_MAX_CHARS = 64_000;
+/**
+ * Bounds a folded paste; larger clipboard text becomes a file attachment instead. Equal to
+ * the provider input limit (`PROVIDER_SEND_TURN_MAX_INPUT_CHARS`, which this module cannot
+ * import) so a paste the message can carry is never cut short, and one it cannot is
+ * refused at send with the ordinary over-the-limit message rather than truncated.
+ */
+export const COMPOSER_CONTEXT_PASTED_TEXT_MAX_CHARS = 120_000;
 const COMPOSER_CONTEXT_ELEMENT_HTML_MAX_CHARS = 8_000;
 const COMPOSER_CONTEXT_ELEMENT_STYLES_MAX_CHARS = 8_000;
 /** Exported so producers can clamp to the same boundary the schema enforces, rather than
