@@ -1,3 +1,4 @@
+import { planPastedText } from "../../lib/pastedTextPaste";
 import { DESKTOP_PASTE_AS_TEXT_EVENT } from "../../lib/desktopPasteAsText";
 import { runtimeModeConfig, runtimeModeOptions } from "./runtimeModeConfig";
 import { useRightPanelStore } from "~/rightPanelStore";
@@ -37,15 +38,9 @@ import {
   ProviderInstanceId,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
-  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
 } from "@t3tools/contracts";
 import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
-import {
-  isPasteAsTextShortcut,
-  nextPastedTextFileName,
-  pastedTextDisposition,
-  wouldTextPasteExceedLimit,
-} from "@t3tools/client-runtime/text-paste";
+import { isPasteAsTextShortcut, nextPastedTextFileName } from "@t3tools/client-runtime/text-paste";
 import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
 import { createModelSelection, normalizeModelSlug } from "@t3tools/shared/model";
 import { USAGE_LIMITS_COMMAND } from "@t3tools/shared/usageLimits";
@@ -227,6 +222,7 @@ import {
   previewAnnotationContextId,
   previewAnnotationContextRecord,
   previewAnnotationFromRecord,
+  buildMessageContext,
   pastedTextContextRecord,
   pastedTextContextReference,
   pastedTextDraftFromRecord,
@@ -3073,6 +3069,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   useEffect(() => {
     setProviderInputSubmissionError(null);
   }, [
+    composerPastedTexts,
     composerPreviewAnnotations,
     composerReviewComments,
     composerTerminalContexts,
@@ -3964,7 +3961,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   }, [promptHistoryTargetKey]);
 
   const replacePromptFromHistory = useCallback(
-    (nextPrompt: string) => {
+    (nextPrompt: string, pastedTexts: PastedTextDraft[]) => {
+      useComposerDraftStore.getState().setPastedTexts(composerDraftTarget, pastedTexts);
       promptRef.current = nextPrompt;
       setComposerDraftPrompt(composerDraftTarget, nextPrompt);
       setComposerCursor(collapseExpandedComposerCursor(nextPrompt, nextPrompt.length));
@@ -4007,13 +4005,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         entries: buildComposerPromptHistoryEntries(promptHistoryMessagesRef.current),
         position: promptHistoryPositionRef.current,
         currentPrompt: promptRef.current,
+        currentPastedTexts:
+          useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.pastedTexts ?? [],
       });
       if (!step) return false;
       promptHistoryPositionRef.current = step.position;
-      replacePromptFromHistory(step.prompt);
+      replacePromptFromHistory(step.prompt, step.pastedTexts);
       return true;
     },
     [
+      composerDraftTarget,
       composerTerminalContextsRef,
       composerFilesRef,
       composerImagesRef,
@@ -4469,6 +4470,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     // records so the restore can resolve every chip.
     const stashedRecords: ComposerContextRecord[] = [
       ...composerTerminalContextsRef.current.map(terminalContextRecord),
+      ...composerPastedTexts.map(pastedTextContextRecord),
       ...composerReviewComments.map(reviewCommentContextRecord),
       ...composerPreviewAnnotations.map((annotation) =>
         previewAnnotationContextRecord(annotation, {
@@ -4579,6 +4581,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       promptRef.current = "";
       clearComposerDraftPromptAndImages(stashTarget);
       clearComposerDraftTerminalContexts(stashTarget);
+      for (const pasted of composerPastedTexts) {
+        removeComposerDraftPastedText(stashTarget, pasted.id);
+      }
       for (const comment of composerReviewComments) {
         removeComposerDraftReviewComment(stashTarget, comment.id);
       }
@@ -4680,6 +4685,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   }, [
     clearComposerDraftPromptAndImages,
     clearComposerDraftTerminalContexts,
+    composerPastedTexts,
+    removeComposerDraftPastedText,
     setComposerDraftPrompt,
     composerDraftTarget,
     composerFilesRef,
@@ -5527,22 +5534,31 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         !activePendingIsResponding);
     const hasAttachmentSlot = countReservedAttachments() < PROVIDER_SEND_TURN_MAX_ATTACHMENTS;
     const selection = selectionOverride ?? composerEditorRef.current?.readSelectionRange();
-    // Folded pastes leave the prompt text but still count against the provider input.
-    const foldedPasteLength = composerPastedTexts.reduce(
-      (total, pasted) => total + pasted.text.length,
-      0,
-    );
-    const wouldExceedInputLimit = wouldTextPasteExceedLimit({
-      valueLength: promptRef.current.length + foldedPasteLength,
-      selection: selection ?? { start: 0, end: 0 },
-      textLength: plainText.length,
-      maxLength: PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
-    });
-    const disposition = pastedTextDisposition({
-      text: plainText,
+    const draft: PastedTextDraft = {
+      id: randomUUID(),
+      createdAt: new Date().toISOString(),
+      text: normalizePastedText(plainText),
+    };
+    const { disposition, wouldExceedInputLimit } = planPastedText({
+      prompt: promptRef.current,
+      selection: selection ?? { start: promptRef.current.length, end: promptRef.current.length },
+      draft,
+      records: [
+        ...(buildMessageContext({
+          terminalContexts: composerTerminalContexts,
+          pastedTexts: composerPastedTexts,
+          reviewComments: composerReviewComments,
+          previewAnnotations: composerPreviewAnnotations,
+        })?.records ?? []),
+        ...[...composerImages, ...composerFiles].flatMap((attachment) => {
+          const record = uploadedAttachmentContextRecord(
+            attachment,
+            uploadsByImageId[attachment.id],
+          );
+          return record ? [record] : [];
+        }),
+      ],
       bypassAutoAttachment,
-      wouldExceedInputLimit,
-      canAttach: true,
       // Question answers carry attachments beside the answer and never chips.
       supportsRecords: !questionAttachmentTarget && pendingUserInputs.length === 0,
     });
@@ -5550,11 +5566,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       return false;
     }
     if (disposition === "record") {
-      const draft: PastedTextDraft = {
-        id: randomUUID(),
-        createdAt: new Date().toISOString(),
-        text: normalizePastedText(plainText),
-      };
       addComposerDraftPastedText(composerDraftTarget, draft, { appendReference: false });
       if (!insertAttachmentReferences([pastedTextContextReference(draft)], selection)) {
         removeComposerDraftPastedText(composerDraftTarget, draft.id);

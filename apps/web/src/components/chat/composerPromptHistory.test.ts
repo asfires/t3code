@@ -2,6 +2,11 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { buildPlanImplementationPrompt } from "../../proposedPlan";
 import {
+  pastedTextContextRecord,
+  pastedTextContextReference,
+} from "../../lib/composerContextRecords";
+import { formatInlineContextReference } from "../../lib/composerContextReferences";
+import {
   ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
   buildComposerPromptHistoryEntries,
   recallableComposerPrompt,
@@ -100,6 +105,91 @@ describe("recallableComposerPrompt", () => {
 });
 
 describe("buildComposerPromptHistoryEntries", () => {
+  const pasted = {
+    id: "paste",
+    text: "  pasted\ncontents\n",
+    createdAt: "2026-09-17T12:00:00.000Z",
+  };
+  const chip = formatInlineContextReference(pastedTextContextReference(pasted));
+
+  it("recalls paste-only messages and carries their records through backward and forward steps", () => {
+    const history = buildComposerPromptHistoryEntries([
+      { id: "plain", role: "user", text: "older prompt" },
+      {
+        id: "paste",
+        role: "user",
+        text: chip,
+        context: { version: 1, records: [pastedTextContextRecord(pasted)] },
+      },
+    ]);
+    const newest = stepComposerPromptHistory({
+      direction: "backward",
+      entries: history,
+      position: null,
+      currentPrompt: "",
+    });
+    expect(newest?.prompt).toBe(chip);
+    expect(newest?.pastedTexts).toEqual([{ ...pasted, createdAt: expect.any(String) }]);
+    // Editing the dialog changes the payload without changing the chip token. History must
+    // leave that edited draft alone instead of silently replacing it with another prompt.
+    expect(
+      stepComposerPromptHistory({
+        direction: "forward",
+        entries: history,
+        position: newest!.position,
+        currentPrompt: newest!.prompt,
+        currentPastedTexts: [{ ...pasted, text: "edited draft" }],
+      }),
+    ).toBeNull();
+    const older = stepComposerPromptHistory({
+      direction: "backward",
+      entries: history,
+      position: newest!.position,
+      currentPrompt: newest!.prompt,
+      currentPastedTexts: newest!.pastedTexts,
+    });
+    expect(older?.pastedTexts).toEqual([]);
+    const newer = stepComposerPromptHistory({
+      direction: "forward",
+      entries: history,
+      position: older!.position,
+      currentPrompt: older!.prompt,
+    });
+    expect(newer?.pastedTexts[0]?.text).toBe(pasted.text);
+    expect(
+      stepComposerPromptHistory({
+        direction: "forward",
+        entries: history,
+        position: newer!.position,
+        currentPrompt: newer!.prompt,
+        currentPastedTexts: newer!.pastedTexts,
+      }),
+    ).toEqual({ position: null, prompt: "", pastedTexts: [] });
+  });
+
+  it("does not collapse the same chip id when its contents changed between sends", () => {
+    const history = buildComposerPromptHistoryEntries(
+      [pasted.text, "changed contents"].map((text, index) => ({
+        id: String(index),
+        role: "user",
+        text: chip,
+        context: { version: 1, records: [pastedTextContextRecord({ ...pasted, text })] },
+      })),
+    );
+    expect(history.map((entry) => entry.pastedTexts[0]?.text)).toEqual([
+      pasted.text,
+      "changed contents",
+    ]);
+  });
+
+  it("recalls a pre-sync pasted block as an editable chip", () => {
+    const history = buildComposerPromptHistoryEntries([
+      { id: "legacy", role: "user", text: "\uE000t3-pasted-text:5:hello\uE001" },
+    ]);
+    expect(history[0]?.pastedTexts[0]?.text).toBe("hello");
+    expect(history[0]?.prompt).toContain("t3-context://v1/pasted-text/");
+  });
+
   it("keeps user messages with text, oldest first", () => {
     expect(entries.map((entry) => entry.prompt)).toEqual(["first", "second", "third"]);
   });
@@ -112,9 +202,9 @@ describe("buildComposerPromptHistoryEntries", () => {
       { id: "m4", role: "user", text: "same" },
     ]);
     expect(collapsed).toEqual([
-      { id: "m2", prompt: "same" },
-      { id: "m3", prompt: "other" },
-      { id: "m4", prompt: "same" },
+      { id: "m2", prompt: "same", pastedTexts: [] },
+      { id: "m3", prompt: "other", pastedTexts: [] },
+      { id: "m4", prompt: "same", pastedTexts: [] },
     ]);
   });
 });
@@ -126,7 +216,11 @@ describe("stepComposerPromptHistory", () => {
 
   it("walks back from the newest entry", () => {
     const first = backward(null, "");
-    expect(first).toEqual({ position: { entryId: "m3", recalled: "third" }, prompt: "third" });
+    expect(first).toEqual({
+      position: { entryId: "m3", recalled: "third" },
+      prompt: "third",
+      pastedTexts: [],
+    });
     expect(backward(first!.position, "third")?.prompt).toBe("second");
   });
 
@@ -137,7 +231,11 @@ describe("stepComposerPromptHistory", () => {
   it("walks forward and empties the composer past the newest entry", () => {
     const newer = forward({ entryId: "m2", recalled: "second" }, "second");
     expect(newer?.prompt).toBe("third");
-    expect(forward(newer!.position, "third")).toEqual({ position: null, prompt: "" });
+    expect(forward(newer!.position, "third")).toEqual({
+      position: null,
+      prompt: "",
+      pastedTexts: [],
+    });
   });
 
   it("treats an edited recall as a fresh draft", () => {

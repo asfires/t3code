@@ -13,6 +13,7 @@ import type {
 } from "@t3tools/contracts";
 import { renderAssistantCitationsAsText } from "@t3tools/shared/assistantCitations";
 import { encodeComposerContextFragment } from "@t3tools/shared/composerContextClipboard";
+import { upgradeLegacyContextMessage } from "@t3tools/shared/composerContextLegacy";
 import {
   parseComposerContextHref,
   collectComposerContextReferences,
@@ -1466,7 +1467,19 @@ function renderFeedEntry(
   }
 
   if (entry.type === "message") {
-    const { message } = entry;
+    const legacy =
+      entry.message.role === "user" &&
+      !entry.message.context &&
+      entry.message.text.includes("\uE000t3-pasted-text:")
+        ? upgradeLegacyContextMessage(entry.message.text)
+        : null;
+    const message = legacy
+      ? {
+          ...entry.message,
+          text: legacy.text,
+          context: { version: 1 as const, records: legacy.records },
+        }
+      : entry.message;
     const isUser = message.role === "user";
     const renderedText = renderAssistantCitationsAsText(message.text);
     const styles = isUser ? markdownStyles.user : markdownStyles.assistant;

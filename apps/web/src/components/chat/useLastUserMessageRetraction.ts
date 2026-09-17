@@ -1,4 +1,4 @@
-import { CommandId } from "@t3tools/contracts";
+import { CommandId, PROVIDER_SEND_TURN_MAX_ATTACHMENTS } from "@t3tools/contracts";
 import type {
   MessageId,
   ProviderInteractionMode,
@@ -11,13 +11,22 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { useCallback, useEffect, useRef, type RefObject } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, type RefObject } from "react";
 
 import type { ComposerHandleRef } from "../../composerHandleContext";
-import type { ComposerImageAttachment, DraftThreadEnvMode } from "../../composerDraftStore";
+import {
+  useComposerDraftStore,
+  type ComposerFileAttachment,
+  type ComposerImageAttachment,
+  type DraftThreadEnvMode,
+} from "../../composerDraftStore";
+import { prepareRevertedMessageAttachments } from "../ChatView.logic";
+import { readPreparedConnection } from "../../state/session";
+import { releaseDraftAttachments } from "../../lib/attachmentUploadQueue";
+import { prepareLastUserMessageFiles } from "./lastUserMessageFiles";
 import { newDraftId, newThreadId, randomUUID } from "../../lib/utils";
 import { threadEnvironment } from "../../state/threads";
-import type { Thread } from "../../types";
+import { isFileAttachment, type Thread } from "../../types";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { collapseExpandedComposerCursor } from "../../composer-logic";
 import { stackedThreadToast, toastManager } from "../ui/toast";
@@ -58,6 +67,7 @@ export function useLastUserMessageRetraction(input: {
   optimisticBundle?: {
     prompt: string;
     images: ComposerImageAttachment[];
+    files: ComposerFileAttachment[];
     pastedTexts: PastedTextDraft[];
   };
   pendingRecovery: PendingRetractionRecovery | null;
@@ -69,6 +79,10 @@ export function useLastUserMessageRetraction(input: {
   composerRef: ComposerHandleRef;
   promptRef: RefObject<string>;
   composerImagesRef: RefObject<ComposerImageAttachment[]>;
+  composerFilesRef: RefObject<ComposerFileAttachment[]>;
+  createAttachmentAssetUrl: Parameters<
+    typeof prepareRevertedMessageAttachments
+  >[0]["createAssetUrl"];
   onOptimisticRetractionStarted: (input: { requestId: CommandId; messageId: MessageId }) => void;
   onOptimisticRetractionFailed: (input: { requestId: CommandId; messageId: MessageId }) => void;
   navigateToRecoveryDraft: (draftId: PendingRetractionRecovery["draftId"]) => void;
@@ -91,6 +105,8 @@ export function useLastUserMessageRetraction(input: {
     composerRef,
     promptRef,
     composerImagesRef,
+    composerFilesRef,
+    createAttachmentAssetUrl,
     onOptimisticRetractionStarted,
     onOptimisticRetractionFailed,
     navigateToRecoveryDraft,
@@ -103,21 +119,22 @@ export function useLastUserMessageRetraction(input: {
     (restored: NonNullable<ReturnType<typeof restoreRetractionRecoveryToThread>>) => {
       promptRef.current = restored.prompt;
       composerImagesRef.current = restored.images;
+      composerFilesRef.current = restored.files;
       composerRef.current?.resetCursorState({
         cursor: collapseExpandedComposerCursor(restored.prompt, restored.prompt.length),
         prompt: restored.prompt,
         detectTrigger: true,
       });
       window.requestAnimationFrame(() => composerRef.current?.focusAtEnd());
-      if (restored.unrestoredImageNames.length > 0) {
+      if (restored.unrestoredAttachmentNames.length > 0) {
         toastManager.add({
           type: "warning",
-          title: "Some images could not be restored",
-          description: `${restored.unrestoredImageNames.join(", ")} could not be restored to the composer.`,
+          title: "Some attachments could not be restored",
+          description: `${restored.unrestoredAttachmentNames.join(", ")} could not be restored to the composer.`,
         });
       }
     },
-    [composerImagesRef, composerRef, promptRef],
+    [composerImagesRef, composerFilesRef, composerRef, promptRef],
   );
 
   const failPendingRetraction = useCallback(
@@ -159,6 +176,16 @@ export function useLastUserMessageRetraction(input: {
     [applyRestoredComposer, onOptimisticRetractionFailed],
   );
 
+  const currentTargetRef = useRef<{
+    activeThread: Thread | undefined;
+    candidate: LastUserMessagePopCandidate | null;
+  } | null>({ activeThread, candidate });
+  useLayoutEffect(() => {
+    currentTargetRef.current = { activeThread, candidate };
+    return () => {
+      currentTargetRef.current = null;
+    };
+  }, [activeThread, candidate]);
   const dispatchesRef = useRef(new Set<string>());
   const recoveryPreparationRef = useRef(false);
   const dispatchPendingRetraction = useCallback(
@@ -270,17 +297,99 @@ export function useLastUserMessageRetraction(input: {
     recoveryPreparationRef.current = true;
 
     const requestId = CommandId.make(randomUUID());
-    const createdAt = new Date().toISOString();
     const sourceThreadRef = scopeThreadRef(activeThread.environmentId, activeThread.id);
     const restoredContent = optimisticBundle
       ? null
       : deriveLastUserMessageRestoredContent(candidate.message);
-    const prompt = optimisticBundle?.prompt ?? restoredContent?.prompt ?? "";
-    const images = optimisticBundle?.images ?? [];
+    let prompt = optimisticBundle?.prompt ?? restoredContent?.prompt ?? "";
+    let images = optimisticBundle?.images ?? [];
     const pastedTexts = optimisticBundle?.pastedTexts ?? restoredContent?.pastedTexts ?? [];
+    const sourceFiles =
+      optimisticBundle?.files ??
+      (candidate.message.attachments ?? [])
+        .filter(isFileAttachment)
+        .map((attachment): ComposerFileAttachment => ({ ...attachment, file: null }));
+    let files: ComposerFileAttachment[] = [];
+    try {
+      if (sourceFiles.length > 0) {
+        const assertAttachmentRoom = () => {
+          const current = useComposerDraftStore.getState().getComposerDraft(sourceThreadRef);
+          const sentAttachmentCount = optimisticBundle
+            ? images.length + sourceFiles.length
+            : (candidate.message.attachments?.length ?? 0);
+          if (
+            (current?.images.length ?? 0) + (current?.files.length ?? 0) + sentAttachmentCount >
+            PROVIDER_SEND_TURN_MAX_ATTACHMENTS
+          ) {
+            throw new Error(
+              "Make room for this message's attachments in the composer before retracting.",
+            );
+          }
+        };
+        assertAttachmentRoom();
+        const prepared = await prepareLastUserMessageFiles({
+          environmentId: activeThread.environmentId,
+          prompt,
+          files: sourceFiles,
+          loadFile: async (attachment) => {
+            const connection = readPreparedConnection(activeThread.environmentId);
+            if (!connection) throw new Error("The environment is not connected.");
+            const restored = await prepareRevertedMessageAttachments({
+              message: {
+                ...candidate.message,
+                attachments: [
+                  candidate.message.attachments?.filter(isFileAttachment)[
+                    sourceFiles.indexOf(attachment)
+                  ] ?? attachment,
+                ],
+              },
+              environmentId: activeThread.environmentId,
+              httpBaseUrl: connection.httpBaseUrl,
+              createAssetUrl: createAttachmentAssetUrl,
+            });
+            return restored[0]!;
+          },
+        });
+        files = prepared.files;
+        prompt = prepared.prompt;
+        assertAttachmentRoom();
+        if (!optimisticBundle) {
+          const captured = await captureLastUserMessageImages({
+            ...candidate.message,
+            attachments:
+              candidate.message.attachments?.filter((attachment) => attachment.type === "image") ??
+              [],
+          });
+          if (captured.failedNames.length > 0) {
+            throw new Error(`Could not restore attachments: ${captured.failedNames.join(", ")}`);
+          }
+          images = captured.images;
+          assertAttachmentRoom();
+        }
+      }
+    } catch (error) {
+      releaseDraftAttachments(files);
+      recoveryPreparationRef.current = false;
+      toastManager.add({
+        type: "error",
+        title: "Message could not be retracted",
+        description: errorMessage(error),
+      });
+      return;
+    }
+    if (
+      currentTargetRef.current?.activeThread?.id !== activeThread.id ||
+      currentTargetRef.current?.activeThread?.environmentId !== activeThread.environmentId ||
+      currentTargetRef.current?.candidate?.message.id !== candidate.message.id
+    ) {
+      releaseDraftAttachments(files);
+      recoveryPreparationRef.current = false;
+      return;
+    }
     const bundle = {
       prompt,
       images,
+      files,
       pastedTexts,
       modelSelection: activeThread.modelSelection,
       runtimeMode,
@@ -289,6 +398,7 @@ export function useLastUserMessageRetraction(input: {
       baseBranch: activeThreadBranch,
       startFromOrigin,
     };
+    const createdAt = new Date().toISOString();
     const draftId = newDraftId();
     rememberOptimisticRetractionComposer({ requestId, sourceThreadRef });
     const snapshotPromise = beginOptimisticRetraction({
@@ -330,8 +440,17 @@ export function useLastUserMessageRetraction(input: {
       });
     });
 
-    if (!optimisticBundle && (candidate.message.attachments?.length ?? 0) > 0) {
-      void captureLastUserMessageImages(candidate.message).then(async (captured) => {
+    if (
+      !optimisticBundle &&
+      sourceFiles.length === 0 &&
+      candidate.message.attachments?.some((attachment) => attachment.type === "image")
+    ) {
+      void captureLastUserMessageImages({
+        ...candidate.message,
+        attachments: candidate.message.attachments.filter(
+          (attachment) => attachment.type === "image",
+        ),
+      }).then(async (captured) => {
         const appended = await appendImagesToOptimisticRetractionRecovery({
           requestId,
           sourceThreadRef,
@@ -361,6 +480,7 @@ export function useLastUserMessageRetraction(input: {
     activeThread,
     activeThreadBranch,
     candidate,
+    createAttachmentAssetUrl,
     dispatchPendingRetraction,
     envMode,
     interactionMode,

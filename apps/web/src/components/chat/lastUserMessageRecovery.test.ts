@@ -9,7 +9,11 @@ import {
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { DraftId, useComposerDraftStore } from "../../composerDraftStore";
+import {
+  DraftId,
+  useComposerDraftStore,
+  type ComposerFileAttachment,
+} from "../../composerDraftStore";
 import {
   applyOptimisticRetractionRecoveryToThread,
   buildRetractionCommandInput,
@@ -42,6 +46,114 @@ beforeEach(() => {
 });
 
 describe("last user message recovery draft", () => {
+  it.each([true, false])(
+    "restores file attachments after retraction (first message: %s)",
+    async (firstUserMessage) => {
+      const file: ComposerFileAttachment = {
+        type: "file",
+        id: "recovered-file",
+        name: "pasted-text-4.txt",
+        mimeType: "text/plain",
+        sizeBytes: 126950,
+        file: null,
+        uploadedAttachmentId: "pending-recovery-txt",
+        uploadEnvironmentId: environmentId,
+        source: { _tag: "pasted-text" },
+      };
+      const bundle = {
+        prompt: "Read [pasted-text-4.txt](t3-context://v1/file/file_recovered-file)",
+        images: [],
+        files: [file],
+        modelSelection: { instanceId: ProviderInstanceId.make("codex-personal"), model: "gpt-5.6" },
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        envMode: "local" as const,
+        baseBranch: "main",
+        startFromOrigin: false,
+      };
+      await snapshotLastUserMessageRecovery({
+        requestId,
+        messageId,
+        sourceThreadRef,
+        projectRef,
+        draftId,
+        futureThreadId,
+        createdAt: "2026-09-17T12:00:00.000Z",
+        bundle,
+        firstUserMessage,
+      });
+      const completion = {
+        threadId: sourceThreadId,
+        retraction: {
+          requestId,
+          messageId,
+          turnId: null,
+          firstUserMessage,
+          completedAt: "2026-09-17T12:00:01.000Z",
+        },
+      };
+      if (firstUserMessage) {
+        const navigate = vi.fn();
+        expect(
+          handoffCompletedFirstMessageRetraction({
+            capabilityEnabled: true,
+            environmentId,
+            completion,
+            navigate,
+          }),
+        ).toBe(true);
+        expect(navigate).toHaveBeenCalledWith({
+          to: "/draft/$draftId",
+          params: { draftId },
+          replace: true,
+        });
+      } else {
+        expect(handoffCompletedMidThreadRetraction({ environmentId, completion })?.files).toEqual([
+          file,
+        ]);
+      }
+      const restored = useComposerDraftStore
+        .getState()
+        .getComposerDraft(firstUserMessage ? draftId : sourceThreadRef);
+      expect(restored?.files).toEqual([file]);
+      expect(restored?.prompt).toBe(bundle.prompt);
+    },
+  );
+
+  it("preserves a recovered file alongside a new draft file with the same display name", () => {
+    const file: ComposerFileAttachment = {
+      type: "file",
+      id: "recovered-file",
+      name: "notes.txt",
+      mimeType: "text/plain",
+      sizeBytes: 4,
+      file: new File(["sent"], "notes.txt"),
+      uploadedAttachmentId: "pending-recovery-txt",
+      uploadEnvironmentId: environmentId,
+    };
+    useComposerDraftStore
+      .getState()
+      .addFiles(sourceThreadRef, [
+        { ...file, id: "unsent-file", file: new File(["edit"], "notes.txt") },
+      ]);
+    const restored = applyOptimisticRetractionRecoveryToThread({
+      sourceThreadRef,
+      bundle: {
+        prompt: "Read [notes.txt](t3-context://v1/file/file_recovered-file)",
+        images: [],
+        files: [file],
+        modelSelection: { instanceId: ProviderInstanceId.make("codex-personal"), model: "gpt-5.6" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        envMode: "local",
+        baseBranch: "main",
+        startFromOrigin: false,
+      },
+    });
+    expect(restored.files.map((entry) => entry.id)).toEqual(["unsent-file", "recovered-file"]);
+    expect(restored.unrestoredAttachmentNames).toEqual([]);
+  });
+
   it("reuses the persisted request ID and message correlation for reconnect dispatches", () => {
     const recovery = {
       requestId,
@@ -360,7 +472,7 @@ describe("last user message recovery draft", () => {
 
     expect(restored).toMatchObject({
       prompt: "typed while pending\n\noriginal sent text",
-      unrestoredImageNames: [],
+      unrestoredAttachmentNames: [],
     });
     expect(useComposerDraftStore.getState().getComposerDraft(sourceThreadRef)).toMatchObject({
       prompt: "typed while pending\n\noriginal sent text",
