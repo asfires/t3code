@@ -2,6 +2,61 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { upgradeLegacyContextMessage } from "./composerContextLegacy.ts";
 
+describe("legacy pasted text", () => {
+  const paste = (text: string) => `\uE000t3-pasted-text:${text.length}:${text}\uE001`;
+
+  it("restores multiple ordered chips without parsing context tags inside their payloads", () => {
+    const first = "  α😀\n<terminal_context>\n- Build line 1:\n  output\n</terminal_context>\n";
+    const second = "<review_comment>literal pasted markup</review_comment>\n";
+    const upgraded = upgradeLegacyContextMessage(
+      `before ${paste(first)} between ${paste(second)} after`,
+    );
+    expect(upgraded.records).toMatchObject([
+      { kind: "pasted-text", text: first },
+      { kind: "pasted-text", text: second },
+    ]);
+    expect(upgraded.text).toBe(
+      "before [Pasted text](t3-context://v1/pasted-text/legacy_pasted-text_1) between [Pasted text](t3-context://v1/pasted-text/legacy_pasted-text_2) after",
+    );
+  });
+
+  it("upgrades other legacy context alongside a paste", () => {
+    const upgraded = upgradeLegacyContextMessage(
+      `${paste("hello")} @build:1\n<terminal_context>\n- Build line 1:\n  output\n</terminal_context>`,
+    );
+    expect(upgraded.records).toMatchObject([
+      { kind: "terminal", text: "output" },
+      { kind: "pasted-text", text: "hello" },
+    ]);
+    expect(upgraded.text).toContain("t3-context://v1/pasted-text/");
+    expect(upgraded.text).toContain("t3-context://v1/terminal/");
+  });
+
+  it("keeps oversized pastes whole as text and strips empty wrappers", () => {
+    const text = "x".repeat(120_001);
+    expect(upgradeLegacyContextMessage(paste(text))).toEqual({ text, records: [] });
+    expect(upgradeLegacyContextMessage(`before${paste("")}after`)).toEqual({
+      text: "beforeafter",
+      records: [],
+    });
+  });
+
+  it.each([
+    "\uE000t3-pasted-text:99:short\uE001",
+    "\uE000t3-pasted-text:no:hello\uE001",
+    "\uE000t3-pasted-text:5:hello",
+  ])("preserves malformed markers: %s", (text) => {
+    expect(upgradeLegacyContextMessage(text)).toEqual({ text, records: [] });
+  });
+
+  it("leaves malformed markers intact while finding a later valid paste", () => {
+    const malformed = "\uE000t3-pasted-text:99999999999999999:bad\uE001";
+    const upgraded = upgradeLegacyContextMessage(`${malformed} ${paste("ok")}`);
+    expect(upgraded.text).toContain(malformed);
+    expect(upgraded.records).toMatchObject([{ kind: "pasted-text", text: "ok" }]);
+  });
+});
+
 describe("upgradeLegacyContextMessage", () => {
   const review =
     '<review_comment sectionId="s" filePath="f.ts" startIndex="1" endIndex="1">note</review_comment>';

@@ -543,8 +543,8 @@ import {
 import { useAssetUrls } from "../assets/assetUrls";
 import {
   ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
-  recallableComposerPrompt,
-} from "./chat/composerPromptHistory";
+  restoreComposerPrompt,
+} from "./chat/composerPromptRecovery";
 
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_QUEUED_MESSAGES: QueuedComposerMessage[] = [];
@@ -560,6 +560,7 @@ const sentMessageRecoveryContextByMessageId = new Map<
     startFromOrigin: boolean;
     prompt: string;
     images: ComposerImageAttachment[];
+    files: ComposerFileAttachment[];
     pastedTexts: PastedTextDraft[];
   }
 >();
@@ -7096,7 +7097,8 @@ export default function ChatView(props: ChatViewProps) {
           if (result._tag === "Failure") throw squashAtomCommandFailure(result);
         });
         const currentPrompt = store.getComposerDraft(composerDraftTarget)?.prompt ?? "";
-        const restoredPrompt = recallableComposerPrompt(message.text);
+        const restored = restoreComposerPrompt(message, randomUUID);
+        const restoredPrompt = restored.prompt;
         const nextPrompt =
           restoredPrompt.length === 0
             ? currentPrompt
@@ -7104,6 +7106,9 @@ export default function ChatView(props: ChatViewProps) {
               ? `${currentPrompt}\n\n${restoredPrompt}`
               : restoredPrompt;
         store.setPrompt(composerDraftTarget, nextPrompt);
+        for (const pasted of restored.pastedTexts) {
+          store.addPastedText(composerDraftTarget, pasted, { appendReference: false });
+        }
         const images: ComposerImageAttachment[] = [];
         const restoredFiles: ComposerFileAttachment[] = [];
         files.forEach((file, index) => {
@@ -7795,6 +7800,7 @@ export default function ChatView(props: ChatViewProps) {
       startFromOrigin,
       prompt: promptForSend,
       images: composerImagesSnapshot,
+      files: composerFilesSnapshot,
       pastedTexts: composerPastedTextsSnapshot,
     });
     preDispatchCancellationLatchRef.current.arm(messageIdForSend);
@@ -9385,6 +9391,7 @@ export default function ChatView(props: ChatViewProps) {
           optimisticBundle: {
             prompt: lastUserMessageRecoveryContext.prompt,
             images: lastUserMessageRecoveryContext.images,
+            files: lastUserMessageRecoveryContext.files,
             pastedTexts: lastUserMessageRecoveryContext.pastedTexts,
           },
         }
@@ -9398,6 +9405,8 @@ export default function ChatView(props: ChatViewProps) {
     composerRef,
     promptRef,
     composerImagesRef,
+    composerFilesRef,
+    createAttachmentAssetUrl,
     onOptimisticRetractionStarted,
     onOptimisticRetractionFailed,
     navigateToRecoveryDraft,

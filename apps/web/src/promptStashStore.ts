@@ -1,4 +1,8 @@
-import { ComposerContextRecord, ForwardCompatibleArray } from "@t3tools/contracts";
+import {
+  ComposerContextRecord,
+  ForwardCompatibleArray,
+  PastedTextContextRecord,
+} from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { create } from "zustand";
 
@@ -7,6 +11,12 @@ import {
   PersistedComposerImageAttachment,
 } from "./composerDraftStore";
 import { createMemoryStorage, type StateStorage } from "./lib/storage";
+
+// Stashes are drafts: editing a paste beyond the send limit must not make it disappear on reload.
+const StashedContextRecord = Schema.Union([
+  Schema.Struct({ ...PastedTextContextRecord.fields, text: Schema.String }),
+  ComposerContextRecord,
+]);
 
 export const PROMPT_STASH_STORAGE_KEY = "t3code:prompt-stash:v2";
 /**
@@ -61,7 +71,7 @@ const StashEntrySchema = Schema.Struct({
    * annotations). Images and files have their own fields above. Optional: older entries
    * decode without it.
    */
-  records: Schema.optionalKey(ForwardCompatibleArray(ComposerContextRecord)),
+  records: Schema.optionalKey(ForwardCompatibleArray(StashedContextRecord)),
 });
 export type PromptStashEntry = typeof StashEntrySchema.Type;
 

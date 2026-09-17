@@ -255,7 +255,7 @@ describe("last user message selection", () => {
   });
 });
 
-it("keeps messages with file attachments in history until files can be restored", () => {
+it("allows messages with file attachments to be retracted", () => {
   expect(
     findLastUserMessagePopCandidate({
       messages: [
@@ -267,7 +267,7 @@ it("keeps messages with file attachments in history until files can be restored"
         },
       ],
     }),
-  ).toBeNull();
+  ).toMatchObject({ message: { id: "with-file" } });
 });
 
 describe("last user message restored text", () => {

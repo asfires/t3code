@@ -16,6 +16,7 @@ import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
 import {
+  type ComposerFileAttachment,
   type ComposerImageAttachment,
   type ComposerThreadDraftState,
   type DraftId,
@@ -23,6 +24,7 @@ import {
   type PersistedComposerImageAttachment,
   useComposerDraftStore,
 } from "../../composerDraftStore";
+import { releaseDraftAttachments } from "../../lib/attachmentUploadQueue";
 import type { PastedTextDraft } from "../../lib/pastedTextContext";
 import { resolveStorage } from "../../lib/storage";
 import { cloneComposerImageForRetry, readFileAsDataUrl } from "../ChatView.logic";
@@ -42,6 +44,7 @@ function cloneComposerDraft(
     ? {
         ...draft,
         images: [...draft.images],
+        files: [...draft.files],
         nonPersistedImageIds: [...draft.nonPersistedImageIds],
         persistedAttachments: [...draft.persistedAttachments],
         terminalContexts: [...draft.terminalContexts],
@@ -137,6 +140,7 @@ export const useRetractionRecoveryStore = create<RetractionRecoveryStoreState>()
 export interface LastUserMessageRestoreBundle {
   prompt: string;
   images: ComposerImageAttachment[];
+  files?: ComposerFileAttachment[];
   /** Records behind pasted-text chips in `prompt`; absent when the prompt carries none. */
   pastedTexts?: PastedTextDraft[];
   modelSelection: ModelSelection;
@@ -188,6 +192,7 @@ export async function snapshotLastUserMessageRecovery(input: {
     store.setPastedTexts(input.draftId, input.bundle.pastedTexts);
   }
   store.addImages(input.draftId, input.bundle.images.map(cloneComposerImageForRetry));
+  store.addFiles(input.draftId, input.bundle.files ?? [], { allowDuplicates: true });
   store.setModelSelection(input.draftId, input.bundle.modelSelection, { replaceOptions: true });
   store.setRuntimeMode(input.draftId, input.bundle.runtimeMode);
   store.setInteractionMode(input.draftId, input.bundle.interactionMode);
@@ -250,7 +255,7 @@ export function applyOptimisticRetractionRecoveryToThread(input: {
     existingImages.map((image) => JSON.stringify([image.mimeType, image.sizeBytes, image.name])),
   );
   const images: ComposerImageAttachment[] = [];
-  const unrestoredImageNames: string[] = [];
+  const unrestoredAttachmentNames: string[] = [];
   for (const recoveredImage of input.bundle.images) {
     const key = JSON.stringify([
       recoveredImage.mimeType,
@@ -258,8 +263,11 @@ export function applyOptimisticRetractionRecoveryToThread(input: {
       recoveredImage.name,
     ]);
     if (existingIds.has(recoveredImage.id) || existingKeys.has(key)) continue;
-    if (existingImages.length + images.length >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
-      unrestoredImageNames.push(recoveredImage.name);
+    if (
+      existingImages.length + (currentDraft?.files.length ?? 0) + images.length >=
+      PROVIDER_SEND_TURN_MAX_ATTACHMENTS
+    ) {
+      unrestoredAttachmentNames.push(recoveredImage.name);
       continue;
     }
     existingIds.add(recoveredImage.id);
@@ -275,6 +283,13 @@ export function applyOptimisticRetractionRecoveryToThread(input: {
     ]);
   }
   store.addImages(input.sourceThreadRef, images);
+  store.addFiles(input.sourceThreadRef, input.bundle.files ?? [], { allowDuplicates: true });
+  const restoredFileIds = new Set(
+    store.getComposerDraft(input.sourceThreadRef)?.files.map((file) => file.id),
+  );
+  for (const file of input.bundle.files ?? []) {
+    if (!restoredFileIds.has(file.id)) unrestoredAttachmentNames.push(file.name);
+  }
   store.setModelSelection(input.sourceThreadRef, input.bundle.modelSelection, {
     replaceOptions: true,
   });
@@ -284,7 +299,8 @@ export function applyOptimisticRetractionRecoveryToThread(input: {
   return {
     prompt,
     images: [...existingImages, ...images],
-    unrestoredImageNames,
+    files: store.getComposerDraft(input.sourceThreadRef)?.files ?? [],
+    unrestoredAttachmentNames,
   };
 }
 
@@ -353,7 +369,8 @@ export function discardRetractionRecovery(input: {
 export interface AppliedRetractionRecovery {
   prompt: string;
   images: ComposerImageAttachment[];
-  unrestoredImageNames: string[];
+  files: ComposerFileAttachment[];
+  unrestoredAttachmentNames: string[];
 }
 
 export function restoreOptimisticRetractionComposer(
@@ -362,6 +379,12 @@ export function restoreOptimisticRetractionComposer(
   const snapshot = optimisticComposerSnapshots.get(requestId);
   if (!snapshot) return null;
   optimisticComposerSnapshots.delete(requestId);
+  const retainedIds = new Set(snapshot.draft?.files.map((file) => file.id));
+  releaseDraftAttachments(
+    (useComposerDraftStore.getState().draftsByThreadKey[snapshot.threadKey]?.files ?? []).filter(
+      (file) => !retainedIds.has(file.id),
+    ),
+  );
   useComposerDraftStore.setState((state) => {
     if (snapshot.draft) {
       return {
@@ -377,7 +400,8 @@ export function restoreOptimisticRetractionComposer(
   return {
     prompt: snapshot.draft?.prompt ?? "",
     images: snapshot.draft?.images ?? [],
-    unrestoredImageNames: [],
+    files: snapshot.draft?.files ?? [],
+    unrestoredAttachmentNames: [],
   };
 }
 
@@ -437,7 +461,7 @@ export function restoreRetractionRecoveryToThread(input: {
     existingImages.map((image) => JSON.stringify([image.mimeType, image.sizeBytes, image.name])),
   );
   const images: ComposerImageAttachment[] = [];
-  const unrestoredImageNames: string[] = [];
+  const unrestoredAttachmentNames: string[] = [];
   for (const recoveredImage of recoveredDraft.images) {
     const key = JSON.stringify([
       recoveredImage.mimeType,
@@ -445,8 +469,11 @@ export function restoreRetractionRecoveryToThread(input: {
       recoveredImage.name,
     ]);
     if (existingIds.has(recoveredImage.id) || existingKeys.has(key)) continue;
-    if (existingImages.length + images.length >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
-      unrestoredImageNames.push(recoveredImage.name);
+    if (
+      existingImages.length + (currentDraft?.files.length ?? 0) + images.length >=
+      PROVIDER_SEND_TURN_MAX_ATTACHMENTS
+    ) {
+      unrestoredAttachmentNames.push(recoveredImage.name);
       continue;
     }
     existingIds.add(recoveredImage.id);
@@ -462,6 +489,13 @@ export function restoreRetractionRecoveryToThread(input: {
     ]);
   }
   store.addImages(input.sourceThreadRef, images);
+  store.addFiles(input.sourceThreadRef, recoveredDraft.files, { allowDuplicates: true });
+  const restoredFileIds = new Set(
+    store.getComposerDraft(input.sourceThreadRef)?.files.map((file) => file.id),
+  );
+  for (const file of recoveredDraft.files) {
+    if (!restoredFileIds.has(file.id)) unrestoredAttachmentNames.push(file.name);
+  }
   const recoveredModelSelection = recoveredDraft.activeProvider
     ? recoveredDraft.modelSelectionByProvider[recoveredDraft.activeProvider]
     : undefined;
@@ -477,7 +511,8 @@ export function restoreRetractionRecoveryToThread(input: {
   return {
     prompt,
     images: [...existingImages, ...images],
-    unrestoredImageNames,
+    files: store.getComposerDraft(input.sourceThreadRef)?.files ?? [],
+    unrestoredAttachmentNames,
   };
 }
 

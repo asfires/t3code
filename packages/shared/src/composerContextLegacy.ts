@@ -1,4 +1,6 @@
 import {
+  COMPOSER_CONTEXT_MAX_RECORDS,
+  COMPOSER_CONTEXT_PASTED_TEXT_MAX_CHARS,
   type ComposerContextId,
   ComposerContextRecord,
   type ElementContextRecord,
@@ -313,7 +315,65 @@ function replaceReviewBlocks(
   return parts.join("");
 }
 
+/** Reads the fork's old length-prefixed pastes before parsing any context inside them. */
 export function upgradeLegacyContextMessage(text: string): UpgradedLegacyContext {
+  const startMarker = "\uE000t3-pasted-text:";
+  if (!text.includes(startMarker)) return upgradeLegacyContextBlocks(text);
+
+  let token = "\uE002";
+  while (text.includes(token)) token += "\uE002";
+  const pastes: string[] = [];
+  const parts: string[] = [];
+  let cursor = 0;
+  let searchFrom = 0;
+  for (;;) {
+    const start = text.indexOf(startMarker, searchFrom);
+    if (start === -1) break;
+    const lengthStart = start + startMarker.length;
+    const lengthEnd = text.indexOf(":", lengthStart);
+    const rawLength = lengthEnd < 0 ? "" : text.slice(lengthStart, lengthEnd);
+    const length = Number(rawLength);
+    const contentStart = lengthEnd + 1;
+    const contentEnd = contentStart + length;
+    searchFrom = lengthStart;
+    if (!/^\d+$/.test(rawLength) || !Number.isSafeInteger(length) || text[contentEnd] !== "\uE001")
+      continue;
+
+    parts.push(text.slice(cursor, start), `${token}${pastes.length}${token}`);
+    pastes.push(text.slice(contentStart, contentEnd));
+    cursor = contentEnd + 1;
+    searchFrom = cursor;
+  }
+  if (pastes.length === 0) return upgradeLegacyContextBlocks(text);
+  parts.push(text.slice(cursor));
+  const upgraded = upgradeLegacyContextBlocks(parts.join(""));
+  const records = [...upgraded.records];
+  const restored = upgraded.text.replace(
+    new RegExp(`${token}(\\d+)${token}`, "g"),
+    (_, index: string) => {
+      const payload = pastes[Number(index)]!;
+      // Old drafts had no record cap. Keep oversized content whole as plain text.
+      if (
+        !payload.length ||
+        payload.length > COMPOSER_CONTEXT_PASTED_TEXT_MAX_CHARS ||
+        records.length >= COMPOSER_CONTEXT_MAX_RECORDS
+      )
+        return payload;
+      const record = {
+        version: 1 as const,
+        kind: "pasted-text" as const,
+        contextId: legacyId("pasted-text", Number(index) + 1),
+        label: "Pasted text",
+        text: payload,
+      };
+      records.push(record);
+      return formatComposerContextReference(record);
+    },
+  );
+  return { text: restored, records };
+}
+
+function upgradeLegacyContextBlocks(text: string): UpgradedLegacyContext {
   if (!LEGACY_MARKERS.test(text)) return { text, records: [] };
 
   const terminalEntries: ParsedEntry[] = [];
