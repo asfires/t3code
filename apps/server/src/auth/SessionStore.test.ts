@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { EnvironmentId } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -250,6 +251,30 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
           }),
           TestClock.layer(),
         ),
+      ),
+    ),
+  );
+
+  it.effect("issues sessions with the configured default TTL", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionStore.SessionStore;
+      const issuedAt = yield* DateTime.now;
+      const issued = yield* sessions.issue({ subject: "long-lived" });
+
+      expect(issued.expiresAt.epochMilliseconds - issuedAt.epochMilliseconds).toBe(
+        Duration.toMillis(Duration.days(365)),
+      );
+
+      yield* TestClock.adjust(Duration.days(364));
+      expect((yield* sessions.verify(issued.token)).sessionId).toBe(issued.sessionId);
+
+      yield* TestClock.adjust(Duration.days(2));
+      expect((yield* Effect.flip(sessions.verify(issued.token)))._tag).toBe(
+        "SessionTokenExpiredError",
+      );
+    }).pipe(
+      Effect.provide(
+        Layer.merge(makeSessionStoreLayer({ sessionTtl: Duration.days(365) }), TestClock.layer()),
       ),
     ),
   );

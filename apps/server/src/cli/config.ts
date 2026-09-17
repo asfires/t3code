@@ -299,6 +299,7 @@ export const resolveServerConfig = (
     );
     const devAuthToken =
       mode === "web" && devUrl !== undefined ? yield* DevAuthTokenConfig : undefined;
+    const sessionTtl = yield* SessionTtlConfig;
     const explicitBaseDir = resolveOptionPrecedence(
       normalizedFlags.baseDir,
       Option.fromUndefinedOr(env.t3Home),
@@ -407,6 +408,7 @@ export const resolveServerConfig = (
       staticDir,
       devUrl,
       ...(devAuthToken === undefined ? {} : { devAuthToken }),
+      ...(sessionTtl === undefined ? {} : { sessionTtl }),
       devAllowedOrigins: env.devAllowedOrigins,
       noBrowser,
       startupPresentation,
@@ -506,4 +508,10 @@ export const DurationFromString = Schema.String.pipe(
       encode: (duration) => Effect.succeed(Duration.format(duration)),
     }),
   ),
+);
+
+// Read lazily inside resolveServerConfig: this must follow DurationFromString at module load.
+const SessionTtlConfig = Config.schema(DurationFromString, "T3CODE_SESSION_TTL").pipe(
+  Config.option,
+  Config.map(Option.getOrUndefined),
 );

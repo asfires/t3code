@@ -498,6 +498,7 @@ export const make = Effect.gen(function* () {
   const cookieName = resolveSessionCookieName(cookieInput);
   const legacyCookieName = resolveLegacySessionCookieName(cookieInput);
   const devAuth = resolveReusableDevAuth(serverConfig);
+  const defaultSessionTtl = serverConfig.sessionTtl ?? DEFAULT_SESSION_TTL;
   if (devAuth) {
     yield* authSessions
       .createIfAbsent({
@@ -655,7 +656,7 @@ export const make = Effect.gen(function* () {
       );
       const issuedAt = yield* DateTime.now;
       const expiresAt = DateTime.add(issuedAt, {
-        milliseconds: Duration.toMillis(input?.ttl ?? DEFAULT_SESSION_TTL),
+        milliseconds: Duration.toMillis(input?.ttl ?? defaultSessionTtl),
       });
       const claims: SessionClaims = {
         v: 1,
