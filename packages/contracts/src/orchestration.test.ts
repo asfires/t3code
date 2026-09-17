@@ -848,6 +848,7 @@ it.effect("decodes pre-retraction snapshots without new optional state", () =>
       updatedAt: "2026-01-01T00:00:00.000Z",
     });
     const thread = snapshot.threads[0];
+    assert.isDefined(thread);
     const shell = yield* decodeOrchestrationThreadShell({
       ...common,
       latestUserMessageAt: null,
@@ -856,10 +857,10 @@ it.effect("decodes pre-retraction snapshots without new optional state", () =>
       hasActionableProposedPlan: false,
     });
 
-    assert.strictEqual(thread?.settledOverride, null);
-    assert.strictEqual(thread?.settledAt, null);
-    assert.strictEqual(thread?.managedWorktree, undefined);
-    assert.strictEqual(thread?.turnRetraction, undefined);
+    assert.strictEqual(thread.settledOverride, null);
+    assert.strictEqual(thread.settledAt, null);
+    assert.strictEqual(thread.managedWorktree, undefined);
+    assert.strictEqual(thread.turnRetraction, undefined);
     assert.strictEqual(shell.settledOverride, null);
     assert.strictEqual(shell.settledAt, null);
 
