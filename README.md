@@ -55,8 +55,9 @@ curl -fsSL https://raw.githubusercontent.com/asfires/t3code/main/scripts/install
 This downloads the fork's newest self-contained build from
 [this repository's releases](https://github.com/asfires/t3code/releases) and
 puts `t3` in `~/.local/bin`. It needs no Node, no package manager, and no
-compiler. If your shell reports `command not found` afterwards, that directory
-is not on your `PATH` yet; the installer prints the line to add.
+compiler. If that directory is not on your `PATH` yet, the installer adds it to
+your zsh, bash, or fish profile, so open a new terminal before running `t3`.
+Set `T3CODE_NO_MODIFY_PATH=1` to leave your profile alone.
 
 | Task                                             | Command              |
 | ------------------------------------------------ | -------------------- |

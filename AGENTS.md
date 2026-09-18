@@ -230,8 +230,9 @@ section by keeping the fork's version.
   and date-based (`2026.918.4`), on the stable channel; never reuse upstream's
   numbers. Only cut a release when Adam asks. Three values are fork-local and
   keep the fork's side in an upstream sync: `README.md`,
-  `CLI_RELEASE_REPOSITORY` in `packages/shared/src/cliRelease.ts`, and `repo`
-  in `scripts/install.sh`.
+  `CLI_RELEASE_REPOSITORY` in `packages/shared/src/cliRelease.ts`, and in
+  `scripts/install.sh` the `repo` value and the block that adds the bin
+  directory to the shell profile.
 - Upstream syncs are explicit and discretionary, done as a
   `sync-upstream-<date>` branch PR'd into fork `main` — never a bare pull of
   upstream into `main`.
