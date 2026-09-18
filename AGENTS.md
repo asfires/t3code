@@ -223,6 +223,14 @@ section by keeping the fork's version.
   Never add a fork migration to `Migrations.ts`: the Effect Migrator is a
   high-water mark, so a fork ID in upstream's sequence either skips upstream's
   next migration or crashes on it at the following sync.
+- Fork builds ship through `.github/workflows/fork-release.yml`, never upstream's
+  `release.yml`. `gh workflow run fork-release.yml` publishes a GitHub Release
+  with Linux x64 and macOS arm64 CLI archives under upstream's nightly version
+  format, which is what `scripts/install.sh`, `t3 update`, and the background
+  service download. Only cut a release when Adam asks. Three values are
+  fork-local and keep the fork's side in an upstream sync: `README.md`,
+  `CLI_RELEASE_REPOSITORY` in `packages/shared/src/cliRelease.ts`, and the
+  `repo` and default `channel` in `scripts/install.sh`.
 - Upstream syncs are explicit and discretionary, done as a
   `sync-upstream-<date>` branch PR'd into fork `main` — never a bare pull of
   upstream into `main`.
