@@ -1,5 +1,5 @@
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
-import { CheckIcon, ChevronDownIcon, SearchIcon } from "lucide-react";
+import { CheckIcon, ChevronDownIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   isFontFamilyAvailable,
@@ -14,7 +14,7 @@ import {
 import {
   Combobox,
   ComboboxEmpty,
-  ComboboxInput,
+  ComboboxSearchInput,
   ComboboxItem,
   ComboboxListVirtualized,
   ComboboxPopup,
@@ -271,35 +271,22 @@ export function FontFamilyPicker({
         <ChevronDownIcon className="-me-1 size-3 opacity-50" />
       </ComboboxTrigger>
       <ComboboxPopup align="end" className="flex w-72 flex-col">
-        <div className="shrink-0 px-3 pt-2.5">
-          <div className="relative -translate-y-px border-b border-border/70 pb-1.5 transition-colors focus-within:border-ring">
-            <SearchIcon
-              aria-hidden="true"
-              className="pointer-events-none absolute top-1.5 left-0 size-4 shrink-0 text-muted-foreground/55"
-            />
-            <ComboboxInput
-              className="[&_input]:h-6.5 [&_input]:ps-5 [&_input]:font-sans [&_input]:leading-6.5"
-              inputClassName="rounded-none bg-transparent text-sm"
-              placeholder="Search or enter a font…"
-              showTrigger={false}
-              size="sm"
-              unstyled
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-            />
-          </div>
-          {enumeration.status !== "granted" ? (
-            <p className="pt-1.5 text-[10px] leading-snug text-muted-foreground/70">
-              {enumeration.status === "denied"
-                ? "Installed font list access is blocked. Enter an exact family name or update the browser permission."
-                : enumeration.status === "unsupported"
-                  ? "This browser cannot list installed fonts. Enter an exact family name."
-                  : enumeration.isLoading
-                    ? "Loading installed fonts…"
-                    : "Open the picker to load installed fonts, or enter an exact family name."}
-            </p>
-          ) : null}
-        </div>
+        <ComboboxSearchInput
+          placeholder="Search or enter a font…"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+        {enumeration.status !== "granted" ? (
+          <p className="px-3 pt-1.5 text-[10px] leading-snug text-muted-foreground/70">
+            {enumeration.status === "denied"
+              ? "Installed font list access is blocked. Enter an exact family name or update the browser permission."
+              : enumeration.status === "unsupported"
+                ? "This browser cannot list installed fonts. Enter an exact family name."
+                : enumeration.isLoading
+                  ? "Loading installed fonts…"
+                  : "Open the picker to load installed fonts, or enter an exact family name."}
+          </p>
+        ) : null}
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           <ComboboxEmpty>No fonts found.</ComboboxEmpty>
           <div className="relative min-h-0 max-h-72 w-full flex-1 overflow-hidden">

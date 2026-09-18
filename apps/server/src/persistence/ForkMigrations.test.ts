@@ -10,6 +10,7 @@ import {
   forkMigrationManifest,
   forkMigrationsTable,
   runAllMigrations,
+  runForkMigrations,
 } from "./ForkMigrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
@@ -119,15 +120,23 @@ freshLayer()(
     it.effect("adopts only rows whose name matches a fork migration", () =>
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
-        yield* applyLegacyForkMigrations;
         const takenId = legacyForkRow(forkMigrationEntries.length);
-        yield* sql`
-        UPDATE effect_sql_migrations SET name = 'ApplicationEventSource' WHERE migration_id = ${takenId}
-      `;
+        // The non-fork ledger entry represents real upstream schema, including
+        // the columns later upstream migrations rely on.
+        yield* runMigrations({ toMigrationInclusive: takenId });
+        for (const [id, name, migration] of forkMigrationEntries) {
+          yield* migration;
+          if (legacyForkRow(id) < takenId) {
+            yield* sql`
+              UPDATE effect_sql_migrations SET name = ${name}
+              WHERE migration_id = ${legacyForkRow(id)}
+            `;
+          }
+        }
 
         const result = yield* runAllMigrations();
 
-        // The renamed row stays put and, since it is above the fork's legacy
+        // The upstream row stays put and, since it is above the adopted fork
         // range, the fork migration it displaced re-runs under its own ledger.
         assert.deepEqual(
           result.fork.map(([id]) => id),
@@ -176,6 +185,32 @@ freshLayer()("ForkMigrations when the fork ledger already holds a different migr
         ...forkMigrationManifest.map(([id]) => legacyForkRow(id)),
       ]);
       assert.deepEqual(yield* readIds(forkMigrationsTable), [forkMigrationEntries.length]);
+    }),
+  );
+});
+
+freshLayer()("ForkMigrations after the previous upstream sync", (it) => {
+  it.effect("adds upstream schema without re-running fork projection rebuilds", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 52 });
+      yield* runForkMigrations();
+      yield* sql`
+        INSERT INTO projection_state (projector, last_applied_sequence, updated_at)
+        VALUES ('projection.threads', 42, '2026-09-18T00:00:00.000Z')
+      `;
+      const result = yield* runAllMigrations();
+      assert.deepEqual(result, {
+        upstream: migrationManifest.filter(([id]) => id > 52),
+        fork: [],
+      });
+      const state = yield* sql<{ readonly sequence: number }>`
+        SELECT last_applied_sequence AS sequence FROM projection_state
+        WHERE projector = 'projection.threads'
+      `;
+      assert.deepEqual(state, [{ sequence: 42 }]);
+      const viewedFiles = yield* sql`SELECT * FROM pull_request_files_viewed`;
+      assert.deepEqual(viewedFiles, []);
     }),
   );
 });

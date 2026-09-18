@@ -50,7 +50,7 @@ function PastedTextChipContent(props: { label: string }) {
 
 /**
  * Editing happens in a dialog rather than the chip itself: a paste that earned a chip is
- * long, and a Lexical decorator is a poor host for a multi-line editor. Closing the dialog
+ * long, and an inline chip is a poor host for a multi-line editor. Closing the dialog
  * commits: the draft record is rewritten and the chip keeps its id and place in the prompt,
  * or the chip is removed when nothing is left, the same as deleting it in the prompt.
  */
