@@ -73,6 +73,7 @@ import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { withWorkspaceLease } from "../../workspace/workspaceLease.ts";
 import * as Clock from "effect/Clock";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ServerActivation } from "../../serverActivation.ts";
@@ -432,7 +433,13 @@ describe("ProviderCommandReactor", () => {
           },
         }),
     );
-    const runSetupScript = vi.fn(() => Effect.succeed({ status: "no-script" as const }));
+    // The real runner opens a terminal, which takes the worktree's workspace lease.
+    const runSetupScript = vi.fn((input: { readonly worktreePath: string }) =>
+      withWorkspaceLease(
+        NodePath.resolve(input.worktreePath),
+        Effect.succeed({ status: "no-script" as const }),
+      ),
+    );
     const pruneWorktrees = vi.fn((_: { readonly cwd: string }) => Effect.void);
     const refreshStatus = vi.fn((_: string) =>
       Effect.succeed({

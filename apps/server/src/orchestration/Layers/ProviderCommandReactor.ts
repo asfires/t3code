@@ -668,12 +668,28 @@ const make = Effect.gen(function* () {
       cwd: managedWorktree.projectCwd,
       ...recoveryPlan,
     });
-    yield* projectSetupScriptRunner.runForThread({
-      threadId: input.thread.id,
-      projectId: input.thread.projectId,
-      projectCwd: managedWorktree.projectCwd,
-      worktreePath: managedWorktree.path,
-    });
+    // Opening the setup terminal takes this worktree's workspace lease, which
+    // the turn start already holds. Fork so it queues behind the turn start
+    // instead of deadlocking on it.
+    yield* projectSetupScriptRunner
+      .runForThread({
+        threadId: input.thread.id,
+        projectId: input.thread.projectId,
+        projectCwd: managedWorktree.projectCwd,
+        worktreePath: managedWorktree.path,
+      })
+      .pipe(
+        Effect.catchCause((cause) =>
+          Cause.hasInterruptsOnly(cause)
+            ? Effect.void
+            : Effect.logWarning("failed to run setup script for recreated worktree", {
+                threadId: input.thread.id,
+                worktreePath: managedWorktree.path,
+                cause: Cause.pretty(cause),
+              }),
+        ),
+        Effect.forkScoped,
+      );
     yield* Effect.logInfo("recreated missing managed thread worktree", {
       threadId: input.thread.id,
       branch: input.thread.branch,
