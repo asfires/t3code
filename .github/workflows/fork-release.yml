@@ -10,6 +10,7 @@ on:
       - scripts/smoke-cli-archive.ts
       - apps/server/scripts/**
       - apps/server/vite.config.ts
+      - pnpm-workspace.yaml
 
 permissions:
   contents: read
