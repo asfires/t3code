@@ -12,13 +12,8 @@ can control them.
 
 Everything upstream ships, plus:
 
-- **Retract a sent message with `Escape`.** From the moment you send until the
-  agent produces visible output, `Escape` pulls the message back into the
-  composer, stops the agent, and rolls the provider session back so the
-  retracted turn is truly gone from the model's context. Works for Claude and
-  Codex.
 - **Pasted-text chips.** Large pastes fold into an editable, numbered chip
-  instead of filling the composer, and survive retraction and draft recovery.
+  instead of filling the composer, and survive draft recovery.
 - **New thread defaults.** Pick the model every new thread starts with, and set
   per-provider defaults for reasoning effort, context window, speed, and
   permission mode under Settings.

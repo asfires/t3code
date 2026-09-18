@@ -1892,10 +1892,6 @@ const make = Effect.gen(function* () {
 
       const now = event.createdAt;
       const eventTurnId = toTurnId(event.turnId);
-      if (eventTurnId !== undefined && thread.completedRetractionTurnId === eventTurnId) {
-        // Completed retractions suppress late provider events without a second history read.
-        return;
-      }
       const activeTurnId = thread.session?.activeTurnId ?? null;
       const isTerminalTurn = event.type === "turn.completed" || event.type === "turn.aborted";
       const isCompactedThreadState =

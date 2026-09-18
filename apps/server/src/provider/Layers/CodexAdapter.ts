@@ -29,7 +29,6 @@ import {
   type TurnTokenUsage,
   ProviderApprovalDecision,
   ThreadId,
-  type TurnId,
   ProviderSendTurnInput,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -38,7 +37,6 @@ import * as Crypto from "effect/Crypto";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Queue from "effect/Queue";
-import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -81,16 +79,12 @@ import {
 } from "./codexUsageLimits.ts";
 const isCodexAppServerProcessExitedError = Schema.is(CodexErrors.CodexAppServerProcessExitedError);
 const isCodexAppServerTransportError = Schema.is(CodexErrors.CodexAppServerTransportError);
-const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 const isCodexSessionRuntimeThreadIdMissingError = Schema.is(
   CodexSessionRuntimeThreadIdMissingError,
 );
 const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
 
 const PROVIDER = ProviderDriverKind.make("codex");
-
-const isThreadRevertUnavailable = (error: CodexSessionRuntimeError): boolean =>
-  isCodexAppServerRequestError(error) && error.code === -32601;
 
 export interface CodexAdapterLiveOptions {
   readonly instanceId?: ProviderInstanceId;
@@ -111,7 +105,6 @@ interface CodexAdapterSessionContext {
   readonly scope: Scope.Closeable;
   readonly runtime: CodexSessionRuntimeShape;
   readonly eventFiber: Fiber.Fiber<void, never>;
-  lastStartedTurnId: TurnId | undefined;
   readonly turnTokenUsage: CodexTurnTokenUsageState;
   stopped: boolean;
 }
@@ -2473,7 +2466,6 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           scope: sessionScope,
           runtime,
           eventFiber,
-          lastStartedTurnId: undefined,
           turnTokenUsage,
           stopped: false,
         });
@@ -2525,7 +2517,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       input.modelSelection?.instanceId === boundInstanceId
         ? getCodexServiceTierOptionValue(input.modelSelection)
         : undefined;
-    const result = yield* session.runtime
+    return yield* session.runtime
       .sendTurn({
         ...(input.input !== undefined ? { input: input.input } : {}),
         ...(input.modelSelection?.instanceId === boundInstanceId
@@ -2541,8 +2533,6 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
       })
       .pipe(Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/start", cause)));
-    session.lastStartedTurnId = result.turnId;
-    return result;
   });
 
   const requireSession = Effect.fn("requireSession")(function* (threadId: ThreadId) {
@@ -2622,105 +2612,6 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     );
   };
 
-  const rollbackThreadTo: NonNullable<CodexAdapterShape["rollbackThreadTo"]> = Effect.fn(
-    "rollbackThreadTo",
-  )(function* (threadId, retainedTurnCount, targetTurnId) {
-    if (!Number.isInteger(retainedTurnCount) || retainedTurnCount < 0) {
-      return yield* new ProviderAdapterValidationError({
-        provider: PROVIDER,
-        operation: "rollbackThreadTo",
-        issue: "retainedTurnCount must be an integer >= 0.",
-      });
-    }
-    const session = yield* requireSession(threadId);
-    if (targetTurnId !== undefined) {
-      const revertResult = yield* session.runtime.revertThread(targetTurnId).pipe(Effect.result);
-      if (Result.isSuccess(revertResult)) {
-        if (session.lastStartedTurnId === targetTurnId) {
-          session.lastStartedTurnId = undefined;
-        }
-        return {
-          threadId,
-          turns: revertResult.success.turns,
-        };
-      }
-      if (!isThreadRevertUnavailable(revertResult.failure)) {
-        return yield* mapCodexRuntimeError(threadId, "thread/revert", revertResult.failure);
-      }
-    }
-    const current = yield* readThread(threadId);
-    const targetIndex =
-      targetTurnId === undefined ? -1 : current.turns.findIndex((turn) => turn.id === targetTurnId);
-    if (targetTurnId === undefined && current.turns.length < retainedTurnCount) {
-      return yield* new ProviderAdapterValidationError({
-        provider: PROVIDER,
-        operation: "rollbackThreadTo",
-        issue: `Provider history has ${current.turns.length} turns, below retained boundary ${retainedTurnCount}.`,
-      });
-    }
-    // A resumed Codex thread can report a durable turn count that already
-    // equals T3's checkpoint boundary while its live context still contains
-    // the just-interrupted turn. Prefer the concrete provider turn id over
-    // count arithmetic. If thread/read has not exposed a turn started by this
-    // runtime yet, one native rollback still removes that hidden live turn.
-    const hiddenCurrentRuntimeTarget =
-      targetTurnId !== undefined && targetIndex < 0 && session.lastStartedTurnId === targetTurnId;
-    const remainingDelta =
-      targetIndex >= 0
-        ? current.turns.length - targetIndex
-        : hiddenCurrentRuntimeTarget
-          ? 1
-          : targetTurnId !== undefined
-            ? 0
-            : current.turns.length - retainedTurnCount;
-    // thread/rollback returns the post-rollback snapshot. Use that response
-    // for the first verification instead of immediately calling thread/read:
-    // recent Codex app-server builds can briefly serve the pre-rollback turn
-    // from thread/read after the mutation has already committed. Treating
-    // that lagging read as failure leaves a durable T3 retraction pending and
-    // repeatedly rolls back the same provider turn.
-    const rolledBack =
-      remainingDelta > 0 ? yield* rollbackThread(threadId, remainingDelta) : undefined;
-    const verified = rolledBack ?? (yield* readThread(threadId));
-    if (targetTurnId !== undefined) {
-      if (verified.turns.some((turn) => turn.id === targetTurnId)) {
-        return yield* new ProviderAdapterRequestError({
-          provider: PROVIDER,
-          method: "thread/rollback-to",
-          detail: `Provider history still contains retracted turn '${targetTurnId}'.`,
-        });
-      }
-      const expectedVisibleTurns =
-        targetIndex >= 0
-          ? current.turns.slice(0, targetIndex)
-          : hiddenCurrentRuntimeTarget
-            ? current.turns
-            : undefined;
-      if (
-        expectedVisibleTurns !== undefined &&
-        (verified.turns.length !== expectedVisibleTurns.length ||
-          verified.turns.some((turn, index) => turn.id !== expectedVisibleTurns[index]?.id))
-      ) {
-        return yield* new ProviderAdapterRequestError({
-          provider: PROVIDER,
-          method: "thread/rollback-to",
-          detail: `Provider rollback for '${targetTurnId}' did not preserve the preceding turn history.`,
-        });
-      }
-      if (session.lastStartedTurnId === targetTurnId) {
-        session.lastStartedTurnId = undefined;
-      }
-      return verified;
-    }
-    if (verified.turns.length !== retainedTurnCount) {
-      return yield* new ProviderAdapterRequestError({
-        provider: PROVIDER,
-        method: "thread/rollback-to",
-        detail: `Expected ${retainedTurnCount} retained turns, found ${verified.turns.length}.`,
-      });
-    }
-    return verified;
-  });
   const uploadFeedback: CodexAdapterShape["uploadFeedback"] = (input) =>
     requireSession(input.threadId).pipe(
       Effect.flatMap((session) => session.runtime.uploadFeedback(input.reason)),
@@ -2785,18 +2676,6 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       yield* stopSessionInternal(session);
     });
 
-  const discardTransientThread: NonNullable<CodexAdapterShape["discardTransientThread"]> = (
-    threadId,
-  ) =>
-    requireSession(threadId).pipe(
-      Effect.flatMap((session) => session.runtime.deleteThread),
-      Effect.mapError((cause) =>
-        cause._tag === "ProviderAdapterSessionNotFoundError"
-          ? cause
-          : mapCodexRuntimeError(threadId, "thread/delete", cause),
-      ),
-    );
-
   const listSessions: CodexAdapterShape["listSessions"] = () =>
     Effect.forEach(
       Array.from(sessions.values()).filter((session) => !session.stopped),
@@ -2833,12 +2712,10 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     interruptTurn,
     readThread,
     rollbackThread,
-    rollbackThreadTo,
     uploadFeedback,
     respondToRequest,
     respondToUserInput,
     stopSession,
-    discardTransientThread,
     listSessions,
     hasSession,
     stopAll,

@@ -65,19 +65,9 @@ const StoredShellSnapshotJson = Schema.fromJsonString(StoredShellSnapshot);
 // exists for rollback safety: a pre-pagination client would decode a windowed
 // v2 record, silently drop the unknown `page` field, and treat the partial
 // thread as complete forever. Older entries fail to decode → cold cache.
-// v4 invalidates snapshots cached before the wire projection retained tool
-// output fields (result/aggregatedOutput); a warm cache resumes via
-// `afterSequence` and would otherwise show stripped payloads forever.
-// v5 invalidates snapshots cached before server fork migration 004 deleted
-// orphaned retracted messages out-of-band: the deletion emits no events, so
-// a warm cache resuming via `afterSequence` would render the ghost messages
-// forever. Any server-side row surgery needs a bump here to reach clients.
-// v6 pairs with server fork migration 005's full projection rebuild.
-// v7 pairs with server fork migration 006, which rebuilds again now that the
-// turns projector retains checkpointless turns across replayed reverts.
-// v8 also reloads pre-thinking caches so settled reasoning roles are recovered.
+// v9 reloads snapshots after the thread schema changed.
 const StoredThreadSnapshot = Schema.Struct({
-  schemaVersion: Schema.Literal(8),
+  schemaVersion: Schema.Literal(9),
   environmentId: EnvironmentId,
   threadId: ThreadId,
   snapshot: OrchestrationThreadDetailSnapshot,
@@ -690,7 +680,7 @@ export const connectionStorageLayer = Layer.effectContext(
       saveThread: (environmentId, snapshot) =>
         Effect.gen(function* () {
           const encoded = yield* encodeStoredThreadSnapshot({
-            schemaVersion: 8,
+            schemaVersion: 9,
             environmentId,
             threadId: snapshot.thread.id,
             snapshot,

@@ -217,10 +217,6 @@ export interface CodexSessionRuntimeShape {
   readonly rollbackThread: (
     numTurns: number,
   ) => Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
-  readonly revertThread: (
-    beforeTurnId: TurnId,
-  ) => Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
-  readonly deleteThread: Effect.Effect<void, CodexSessionRuntimeError>;
   readonly uploadFeedback: (
     reason?: string,
   ) => Effect.Effect<EffectCodexSchema.V2FeedbackUploadResponse, CodexSessionRuntimeError>;
@@ -723,53 +719,6 @@ interface CodexThreadOpenClient {
     CodexErrors.CodexAppServerError
   >;
 }
-
-interface CodexThreadDeleteClient {
-  readonly request: (
-    method: "thread/delete",
-    payload: CodexRpc.ClientRequestParamsByMethod["thread/delete"],
-  ) => Effect.Effect<
-    CodexRpc.ClientRequestResponsesByMethod["thread/delete"],
-    CodexErrors.CodexAppServerError
-  >;
-}
-
-interface CodexThreadRevertClient {
-  readonly request: (
-    method: string,
-    payload?: unknown,
-  ) => Effect.Effect<unknown, CodexErrors.CodexAppServerError>;
-}
-
-const CodexThreadRevertResponse = Schema.Struct({
-  thread: Schema.Struct({
-    id: Schema.String,
-  }),
-});
-const decodeCodexThreadRevertResponse = Schema.decodeUnknownEffect(CodexThreadRevertResponse);
-
-export const deleteCodexThread = (
-  client: CodexThreadDeleteClient,
-  threadId: string,
-): Effect.Effect<void, CodexErrors.CodexAppServerError> =>
-  client.request("thread/delete", { threadId }).pipe(Effect.asVoid);
-
-export const revertCodexThread = Effect.fn("revertCodexThread")(function* (
-  client: CodexThreadRevertClient,
-  threadId: string,
-  beforeTurnId: TurnId,
-) {
-  const response = yield* client.request("thread/revert", { threadId, beforeTurnId });
-  return yield* decodeCodexThreadRevertResponse(response).pipe(
-    Effect.mapError((cause) =>
-      CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
-        "decode-response-payload",
-        cause,
-        { method: "thread/revert" },
-      ),
-    ),
-  );
-});
 
 export const openCodexThread = (input: {
   readonly client: CodexThreadOpenClient;
@@ -2593,22 +2542,6 @@ export const makeCodexSessionRuntime = (
           });
           return snapshot;
         }),
-      revertThread: (beforeTurnId) =>
-        Effect.gen(function* () {
-          const providerThreadId = yield* readProviderThreadId;
-          const response = yield* revertCodexThread(client.raw, providerThreadId, beforeTurnId);
-          yield* updateSession(sessionRef, {
-            status: "ready",
-            activeTurnId: undefined,
-          });
-          return {
-            threadId: response.thread.id,
-            turns: [],
-          };
-        }),
-      deleteThread: Effect.flatMap(readProviderThreadId, (providerThreadId) =>
-        deleteCodexThread(client, providerThreadId),
-      ),
       uploadFeedback: (reason) =>
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;

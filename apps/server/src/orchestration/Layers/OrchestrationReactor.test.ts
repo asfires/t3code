@@ -13,7 +13,6 @@ import * as ThreadSettlementReactor from "../ThreadSettlementReactor.ts";
 import * as PullRequestSyncReactor from "../PullRequestSyncReactor.ts";
 import * as ThreadPullRequestReactor from "../ThreadPullRequestReactor.ts";
 import { OrchestrationReactor } from "../Services/OrchestrationReactor.ts";
-import { TurnRetractionReactor } from "../Services/TurnRetractionReactor.ts";
 import { makeOrchestrationReactor } from "./OrchestrationReactor.ts";
 import * as AgentAwarenessRelay from "../../relay/AgentAwarenessRelay.ts";
 import { StorageCleanup } from "../../storageCleanup.ts";
@@ -62,18 +61,8 @@ describe("OrchestrationReactor", () => {
         ),
         Layer.provideMerge(
           Layer.succeed(CheckpointReactor, {
-            ensurePreTurnBaseline: () => Effect.succeed(null),
             start: () => {
               started.push("checkpoint-reactor");
-              return Effect.void;
-            },
-            drain: Effect.void,
-          }),
-        ),
-        Layer.provideMerge(
-          Layer.succeed(TurnRetractionReactor, {
-            start: () => {
-              started.push("turn-retraction-reactor");
               return Effect.void;
             },
             drain: Effect.void,
@@ -136,7 +125,6 @@ describe("OrchestrationReactor", () => {
       "provider-runtime-ingestion",
       "provider-command-reactor",
       "checkpoint-reactor",
-      "turn-retraction-reactor",
       "thread-deletion-reactor",
       "thread-pull-request-reactor",
       "thread-settlement-reactor",

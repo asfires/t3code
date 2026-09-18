@@ -141,43 +141,6 @@ function hasQueuedTurnStartForThread(
   );
 }
 
-function newestUserMessage(thread: OrchestrationReadModel["threads"][number]) {
-  return thread.messages
-    .filter((message) => message.role === "user")
-    .toSorted(
-      (left, right) =>
-        right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id),
-    )[0];
-}
-
-function turnHasVisibleAssistantOutput(
-  thread: OrchestrationReadModel["threads"][number],
-  turnId: string,
-): boolean {
-  if (
-    thread.messages.some(
-      (message) =>
-        message.role === "assistant" && message.turnId === turnId && message.text.length > 0,
-    )
-  ) {
-    return true;
-  }
-  if (
-    thread.activities.some(
-      (activity) =>
-        activity.turnId === turnId &&
-        activity.kind !== "task.progress" &&
-        activity.kind !== "task.started",
-    )
-  ) {
-    return true;
-  }
-  if (thread.proposedPlans.some((plan) => plan.turnId === turnId)) {
-    return true;
-  }
-  return thread.checkpoints.some((checkpoint) => checkpoint.turnId === turnId);
-}
-
 function findPullRequestLink(
   thread: Pick<OrchestrationThread, "pullRequests">,
   key: ThreadPullRequestKey,
@@ -1543,12 +1506,6 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
-      if (targetThread.turnRetraction?.status === "requested") {
-        return yield* new OrchestrationCommandInvariantError({
-          commandType: command.type,
-          detail: `Thread '${command.threadId}' has pending retraction '${targetThread.turnRetraction.requestId}' and cannot start a new turn.`,
-        });
-      }
       const sourceProposedPlan = command.sourceProposedPlan;
       const sourceThread = sourceProposedPlan
         ? yield* requireThread({
@@ -1733,100 +1690,6 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           threadId: command.threadId,
           ...(command.turnId !== undefined ? { turnId: command.turnId } : {}),
           createdAt: command.createdAt,
-        },
-      };
-    }
-
-    case "thread.turn.retract": {
-      const thread = yield* requireThread({
-        readModel,
-        command,
-        threadId: command.threadId,
-      });
-      const latestUserMessage = newestUserMessage(thread);
-      if (latestUserMessage?.id !== command.messageId) {
-        return yield* new OrchestrationCommandInvariantError({
-          commandType: command.type,
-          detail: `Message '${command.messageId}' is not the newest user message on thread '${command.threadId}'.`,
-        });
-      }
-      if (thread.turnRetraction?.status === "requested") {
-        return yield* new OrchestrationCommandInvariantError({
-          commandType: command.type,
-          detail: `Thread '${command.threadId}' already has pending retraction '${thread.turnRetraction.requestId}'.`,
-        });
-      }
-
-      const queued = hasQueuedTurnStartForThread(thread, command.createdAt);
-      const starting = thread.session?.status === "starting" && queued;
-      const targetTurnId =
-        thread.session?.status === "running" &&
-        thread.session.activeTurnId !== null &&
-        thread.latestTurn?.turnId === thread.session.activeTurnId
-          ? thread.session.activeTurnId
-          : null;
-      if (!queued && !starting && targetTurnId === null) {
-        return yield* new OrchestrationCommandInvariantError({
-          commandType: command.type,
-          detail: `Thread '${command.threadId}' has no queued, starting, or matching running turn to retract.`,
-        });
-      }
-      if (targetTurnId !== null && turnHasVisibleAssistantOutput(thread, targetTurnId)) {
-        const eventBase = yield* withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt: command.createdAt,
-          commandId: command.commandId,
-        });
-        return {
-          ...eventBase,
-          type: "thread.activity-appended",
-          payload: {
-            threadId: command.threadId,
-            activity: {
-              id: eventBase.eventId,
-              tone: "error",
-              kind: "turn.retract.failed",
-              summary: "Message retract failed",
-              payload: {
-                requestId: command.commandId,
-                messageId: command.messageId,
-                stage: "eligibility",
-                retryable: false,
-                detail: `Turn '${targetTurnId}' already has assistant-visible output and can no longer be retracted.`,
-                silent: true,
-              },
-              turnId: targetTurnId,
-              createdAt: command.createdAt,
-            },
-          },
-        };
-      }
-
-      const baselineTurnCount = thread.checkpoints.reduce(
-        (latest, checkpoint) => Math.max(latest, checkpoint.checkpointTurnCount),
-        0,
-      );
-      return {
-        ...(yield* withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt: command.createdAt,
-          commandId: command.commandId,
-        })),
-        type: "thread.turn-interrupt-requested",
-        payload: {
-          threadId: command.threadId,
-          ...(targetTurnId !== null ? { turnId: targetTurnId } : {}),
-          createdAt: command.createdAt,
-          retraction: {
-            requestId: command.commandId,
-            messageId: command.messageId,
-            targetTurnId,
-            baselineTurnCount,
-            firstUserMessage:
-              thread.messages.filter((message) => message.role === "user").length === 1,
-          },
         },
       };
     }
@@ -2404,70 +2267,6 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           turnCount: command.turnCount,
         },
       };
-    }
-
-    case "thread.turn.retract.complete": {
-      const thread = yield* requireThread({
-        readModel,
-        command,
-        threadId: command.threadId,
-      });
-      const retraction = thread.turnRetraction;
-      if (retraction?.status !== "requested" || retraction.requestId !== command.requestId) {
-        return yield* new OrchestrationCommandInvariantError({
-          commandType: command.type,
-          detail: `Thread '${command.threadId}' has no matching pending retraction '${command.requestId}'.`,
-        });
-      }
-
-      const revertedEvent: Omit<OrchestrationEvent, "sequence"> = {
-        ...(yield* withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt: command.createdAt,
-          commandId: command.commandId,
-        })),
-        type: "thread.reverted",
-        payload: {
-          threadId: command.threadId,
-          turnCount: retraction.baselineTurnCount,
-          retraction: {
-            requestId: retraction.requestId,
-            messageId: retraction.messageId,
-            turnId: command.targetTurnId ?? retraction.targetTurnId,
-            firstUserMessage: retraction.firstUserMessage,
-            completedAt: command.createdAt,
-          },
-        },
-      };
-      if (!retraction.firstUserMessage) {
-        return revertedEvent;
-      }
-
-      const deletedEvent: Omit<OrchestrationEvent, "sequence"> = {
-        ...(yield* withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt: command.createdAt,
-          commandId: command.commandId,
-        })),
-        type: "thread.deleted",
-        payload: {
-          threadId: command.threadId,
-          deletedAt: command.createdAt,
-          retraction: {
-            requestId: retraction.requestId,
-            messageId: retraction.messageId,
-            firstUserMessage: true,
-            ...(thread.managedWorktree != null
-              ? {
-                  managedWorktreeCreatedForCommandId: thread.managedWorktree.createdForCommandId,
-                }
-              : {}),
-          },
-        },
-      };
-      return [revertedEvent, deletedEvent];
     }
 
     case "thread.activity.append": {

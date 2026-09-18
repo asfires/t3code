@@ -113,15 +113,6 @@ characters and uses SQLite's ASCII case-insensitive matching.
 The full command list and the current defaults are shown in **Settings** → **Keybindings**, which
 always matches the build you are running. Use that rather than a copied list.
 
-With focus anywhere in the chat view, press `Escape` to retract the message you just sent and move
-it back into the composer for editing, while the agent stops in the background. This
-works from the instant you send until the agent shows
-assistant text, a tool call, a command, or another activity for that turn. Agent thinking does not
-close this short window. Retracting a thread's first message returns you to the draft page. The
-shortcut is built into the chat view and is not configurable. Retraction restores text, images,
-and file attachments, including large pasted text saved as files. Files may take a moment to
-restore. If a file cannot be recovered, the message stays in the conversation.
-
 Note that `chat.new` and `chat.newLocal` both create a thread through the same path. A new thread
 inherits the project you were in, along with model and mode selections. Branch, worktree, and
 environment mode always come from your configured defaults, not from the thread you were looking

@@ -142,6 +142,7 @@ function makeFakeCodexAdapter(
 ) {
   const sessions = new Map<ThreadId, ProviderSession>();
   const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
+  const runtimeEventsSubscribed = Deferred.makeUnsafe<void>();
 
   const startSession = vi.fn((input: ProviderSessionStartInput) =>
     Effect.sync(() => {
@@ -225,10 +226,6 @@ function makeFakeCodexAdapter(
     }),
   );
 
-  const discardTransientThread = vi.fn(
-    (_threadId: ThreadId): Effect.Effect<void, ProviderAdapterError> => Effect.void,
-  );
-
   const listSessions = vi.fn((): Effect.Effect<ReadonlyArray<ProviderSession>> =>
     Effect.sync(() => Array.from(sessions.values())),
   );
@@ -261,14 +258,6 @@ function makeFakeCodexAdapter(
       Effect.succeed({ threadId, turns: [] }),
   );
 
-  const rollbackThreadTo = vi.fn(
-    (
-      threadId: ThreadId,
-      _retainedTurnCount: number,
-      _targetTurnId?: TurnId,
-    ): Effect.Effect<{ threadId: ThreadId; turns: readonly [] }, ProviderAdapterError> =>
-      Effect.succeed({ threadId, turns: [] }),
-  );
   const uploadFeedback = vi.fn(
     (
       input: ProviderUploadFeedbackInput,
@@ -302,16 +291,20 @@ function makeFakeCodexAdapter(
     respondToRequest,
     respondToUserInput,
     stopSession,
-    ...(provider === CODEX_DRIVER ? { discardTransientThread } : {}),
     listSessions,
     hasSession,
     readThread,
     rollbackThread,
-    rollbackThreadTo,
     ...(provider === CODEX_DRIVER ? { uploadFeedback } : {}),
     stopAll,
     get streamEvents() {
-      return Stream.fromPubSub(runtimeEventPubSub);
+      return Stream.unwrap(
+        Effect.gen(function* () {
+          const subscription = yield* PubSub.subscribe(runtimeEventPubSub);
+          yield* Deferred.succeed(runtimeEventsSubscribed, undefined);
+          return Stream.fromSubscription(subscription);
+        }),
+      );
     },
   };
 
@@ -333,6 +326,7 @@ function makeFakeCodexAdapter(
   return {
     adapter,
     emit,
+    awaitRuntimeEventsSubscription: Deferred.await(runtimeEventsSubscribed),
     updateSession,
     startSession,
     sendTurn,
@@ -341,12 +335,10 @@ function makeFakeCodexAdapter(
     respondToRequest,
     respondToUserInput,
     stopSession,
-    discardTransientThread,
     listSessions,
     hasSession,
     readThread,
     rollbackThread,
-    rollbackThreadTo,
     uploadFeedback,
     stopAll,
   };
@@ -1577,7 +1569,6 @@ routing.layer("ProviderServiceLive routing", (it) => {
         threadId,
         resume: "resume-after-relative-rollback",
         resumeSessionAt: "assistant-before-relative-target",
-        pinResumeSessionAt: true,
         turnCount: 21,
       };
       routing.claude.rollbackThread.mockImplementationOnce((adapterThreadId) =>
@@ -1600,16 +1591,6 @@ routing.layer("ProviderServiceLive routing", (it) => {
       assert.equal(Option.isSome(persisted), true);
       if (Option.isSome(persisted)) {
         assert.deepEqual(persisted.value.resumeCursor, rolledBackCursor);
-        const runtimePayload = persisted.value.runtimePayload;
-        assert.equal(
-          runtimePayload !== null &&
-            typeof runtimePayload === "object" &&
-            !Array.isArray(runtimePayload) &&
-            "lastRuntimeEvent" in runtimePayload
-            ? runtimePayload.lastRuntimeEvent
-            : undefined,
-          "provider.rollbackConversation",
-        );
       }
       assert.deepEqual(routing.claude.rollbackThread.mock.calls.at(-1), [threadId, 1]);
       yield* provider.stopSession({ threadId });
@@ -1619,105 +1600,146 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
-  it.effect("persists the provider resume cursor after absolute rollback", () =>
+  it.effect("persists Claude's advanced resume cursor when a turn completes", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;
       const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
-      const threadId = asThreadId("thread-rollback-cursor");
-      const targetTurnId = asTurnId("turn-rollback-cursor");
-      const session = yield* provider.startSession(threadId, {
+      const threadId = asThreadId("thread-claude-completed-cursor");
+      const turnId = asTurnId("turn-claude-completed-cursor");
+      const cursorBeforeTurn = {
+        threadId,
+        resume: "claude-session-completed-cursor",
+        resumeSessionAt: "assistant-u1",
+        turnCount: 1,
+      };
+      const cursorAfterTurn = {
+        ...cursorBeforeTurn,
+        resumeSessionAt: "assistant-u2",
+        turnCount: 2,
+      };
+
+      yield* provider.startSession(threadId, {
         provider: CLAUDE_AGENT_DRIVER,
         providerInstanceId: claudeAgentInstanceId,
         threadId,
         runtimeMode: "full-access",
       });
-      const rolledBackCursor = {
-        threadId,
-        resume: "resume-after-rollback",
-        resumeSessionAt: "assistant-before-target",
-        turnCount: 22,
-      };
-      routing.claude.rollbackThreadTo.mockImplementationOnce((adapterThreadId) =>
-        Effect.sync(() => {
-          routing.claude.updateSession(adapterThreadId, (existing) => ({
-            ...existing,
-            status: "ready",
-            resumeCursor: rolledBackCursor,
-          }));
-          return { threadId: adapterThreadId, turns: [] };
+      routing.claude.updateSession(threadId, (session) => ({
+        ...session,
+        resumeCursor: cursorBeforeTurn,
+      }));
+      routing.claude.sendTurn.mockImplementationOnce((input) =>
+        Effect.succeed({
+          threadId: input.threadId,
+          turnId,
+          resumeCursor: cursorBeforeTurn,
         }),
       );
+      yield* provider.sendTurn({ threadId, input: "advance the cursor", attachments: [] });
 
-      yield* provider.rollbackConversationTo({
-        threadId: session.threadId,
-        retainedTurnCount: 22,
-        targetTurnId,
-      });
-
-      const persisted = yield* directory.getBinding(threadId);
-      assert.equal(Option.isSome(persisted), true);
-      if (Option.isSome(persisted)) {
-        assert.deepEqual(persisted.value.resumeCursor, rolledBackCursor);
-        const runtimePayload = persisted.value.runtimePayload;
-        assert.equal(
-          runtimePayload !== null &&
-            typeof runtimePayload === "object" &&
-            !Array.isArray(runtimePayload) &&
-            "lastRuntimeEvent" in runtimePayload
-            ? runtimePayload.lastRuntimeEvent
-            : undefined,
-          "provider.rollbackConversationTo",
-        );
-      }
-      assert.deepEqual(routing.claude.rollbackThreadTo.mock.calls.at(-1), [
+      const completion = yield* Stream.filter(
+        provider.streamEvents,
+        (event) => event.type === "turn.completed" && event.threadId === threadId,
+      ).pipe(Stream.runHead, Effect.forkChild({ startImmediately: true }));
+      routing.claude.updateSession(threadId, (session) => ({
+        ...session,
+        status: "ready",
+        resumeCursor: cursorAfterTurn,
+      }));
+      yield* routing.claude.awaitRuntimeEventsSubscription;
+      routing.claude.emit({
+        type: "turn.completed",
+        eventId: asEventId("evt-claude-completed-cursor"),
+        provider: CLAUDE_AGENT_DRIVER,
+        createdAt: "2026-01-01T00:00:01.000Z",
         threadId,
-        22,
-        targetTurnId,
-      ]);
+        turnId,
+        payload: { state: "completed" },
+      });
+      yield* Fiber.join(completion);
+
+      const persistedAfterCompletion = yield* directory.getBinding(threadId);
+      assert.equal(Option.isSome(persistedAfterCompletion), true);
+      if (Option.isSome(persistedAfterCompletion)) {
+        assert.deepEqual(persistedAfterCompletion.value.resumeCursor, cursorAfterTurn);
+      }
+
       yield* provider.stopSession({ threadId });
+      const persistedAfterStop = yield* directory.getBinding(threadId);
+      assert.equal(Option.isSome(persistedAfterStop), true);
+      if (Option.isSome(persistedAfterStop)) {
+        assert.deepEqual(persistedAfterStop.value.resumeCursor, cursorAfterTurn);
+      }
       routing.claude.startSession.mockClear();
-      routing.claude.rollbackThreadTo.mockClear();
+      routing.claude.sendTurn.mockClear();
       routing.claude.stopSession.mockClear();
     }),
   );
 
-  it.effect("discards only provider threads whose adapter explicitly supports it", () =>
+  it.effect("recovers Claude with the live resume cursor captured while stopping", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;
-      const codexThreadId = asThreadId("transient-codex-thread");
-      const claudeThreadId = asThreadId("transient-claude-thread");
-      yield* provider.startSession(codexThreadId, {
-        provider: CODEX_DRIVER,
-        providerInstanceId: codexInstanceId,
-        threadId: codexThreadId,
-        runtimeMode: "full-access",
-      });
-      yield* provider.startSession(claudeThreadId, {
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const threadId = asThreadId("thread-claude-stopped-cursor");
+      const turnId = asTurnId("turn-claude-stopped-cursor");
+      const cursorBeforeTurn = {
+        threadId,
+        resume: "claude-session-stopped-cursor",
+        resumeSessionAt: "assistant-u1",
+        turnCount: 1,
+      };
+      const cursorAfterTurn = {
+        ...cursorBeforeTurn,
+        resumeSessionAt: "assistant-u2",
+        turnCount: 2,
+      };
+
+      yield* provider.startSession(threadId, {
         provider: CLAUDE_AGENT_DRIVER,
         providerInstanceId: claudeAgentInstanceId,
-        threadId: claudeThreadId,
+        threadId,
         runtimeMode: "full-access",
       });
-      routing.codex.discardTransientThread.mockClear();
-      routing.claude.discardTransientThread.mockClear();
+      routing.claude.updateSession(threadId, (session) => ({
+        ...session,
+        resumeCursor: cursorBeforeTurn,
+      }));
+      routing.claude.sendTurn.mockImplementationOnce((input) =>
+        Effect.succeed({
+          threadId: input.threadId,
+          turnId,
+          resumeCursor: cursorBeforeTurn,
+        }),
+      );
+      yield* provider.sendTurn({ threadId, input: "advance the cursor", attachments: [] });
+      routing.claude.updateSession(threadId, (session) => ({
+        ...session,
+        status: "ready",
+        resumeCursor: cursorAfterTurn,
+      }));
 
-      yield* provider.discardTransientThread({ threadId: codexThreadId });
-      yield* provider.discardTransientThread({ threadId: claudeThreadId });
+      yield* provider.stopSession({ threadId });
+      const persistedAfterStop = yield* directory.getBinding(threadId);
+      assert.equal(Option.isSome(persistedAfterStop), true);
+      if (Option.isSome(persistedAfterStop)) {
+        assert.deepEqual(persistedAfterStop.value.resumeCursor, cursorAfterTurn);
+      }
 
-      assert.deepEqual(routing.codex.discardTransientThread.mock.calls, [[codexThreadId]]);
-      assert.equal(routing.claude.discardTransientThread.mock.calls.length, 0);
-
-      yield* provider.stopSession({ threadId: codexThreadId });
-      yield* provider.stopSession({ threadId: claudeThreadId });
-      routing.codex.startSession.mockClear();
-      routing.codex.stopSession.mockClear();
-      routing.codex.discardTransientThread.mockClear();
       routing.claude.startSession.mockClear();
+      routing.claude.sendTurn.mockClear();
+      yield* provider.sendTurn({ threadId, input: "resume after reap", attachments: [] });
+
+      assert.equal(routing.claude.startSession.mock.calls.length, 1);
+      const resumedStartInput = routing.claude.startSession.mock.calls[0]?.[0];
+      assert.equal(resumedStartInput?.threadId, threadId);
+      assert.deepEqual(resumedStartInput?.resumeCursor, cursorAfterTurn);
+
+      yield* provider.stopSession({ threadId });
+      routing.claude.startSession.mockClear();
+      routing.claude.sendTurn.mockClear();
       routing.claude.stopSession.mockClear();
-      routing.claude.discardTransientThread.mockClear();
     }),
   );
-
   it.effect.each([CODEX_DRIVER, CLAUDE_AGENT_DRIVER, CURSOR_DRIVER])(
     "rejects missing, file, and saved workspace paths before starting %s",
     (driver) =>
@@ -2879,147 +2901,6 @@ routing.layer("ProviderServiceLive routing", (it) => {
         assert.equal(startPayload.threadId, initial.threadId);
       }
       assert.equal(routing.codex.sendTurn.mock.calls.length, 1);
-    }),
-  );
-
-  it.effect("persists Claude's advanced resume cursor when a turn completes", () =>
-    Effect.gen(function* () {
-      const provider = yield* ProviderService.ProviderService;
-      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
-      const threadId = asThreadId("thread-claude-completed-cursor");
-      const turnId = asTurnId("turn-claude-completed-cursor");
-      const cursorBeforeTurn = {
-        threadId,
-        resume: "claude-session-completed-cursor",
-        resumeSessionAt: "assistant-u1",
-        turnCount: 1,
-      };
-      const cursorAfterTurn = {
-        ...cursorBeforeTurn,
-        resumeSessionAt: "assistant-u2",
-        turnCount: 2,
-      };
-
-      yield* provider.startSession(threadId, {
-        provider: CLAUDE_AGENT_DRIVER,
-        providerInstanceId: claudeAgentInstanceId,
-        threadId,
-        runtimeMode: "full-access",
-      });
-      routing.claude.updateSession(threadId, (session) => ({
-        ...session,
-        resumeCursor: cursorBeforeTurn,
-      }));
-      routing.claude.sendTurn.mockImplementationOnce((input) =>
-        Effect.succeed({
-          threadId: input.threadId,
-          turnId,
-          resumeCursor: cursorBeforeTurn,
-        }),
-      );
-      yield* provider.sendTurn({ threadId, input: "advance the cursor", attachments: [] });
-
-      const completion = yield* Stream.filter(
-        provider.streamEvents,
-        (event) => event.type === "turn.completed" && event.threadId === threadId,
-      ).pipe(Stream.runHead, Effect.forkChild);
-      yield* advanceTestClock(50);
-      routing.claude.updateSession(threadId, (session) => ({
-        ...session,
-        status: "ready",
-        resumeCursor: cursorAfterTurn,
-      }));
-      routing.claude.emit({
-        type: "turn.completed",
-        eventId: asEventId("evt-claude-completed-cursor"),
-        provider: CLAUDE_AGENT_DRIVER,
-        createdAt: "2026-01-01T00:00:01.000Z",
-        threadId,
-        turnId,
-        payload: { state: "completed" },
-      });
-      yield* Fiber.join(completion);
-
-      const persistedAfterCompletion = yield* directory.getBinding(threadId);
-      assert.equal(Option.isSome(persistedAfterCompletion), true);
-      if (Option.isSome(persistedAfterCompletion)) {
-        assert.deepEqual(persistedAfterCompletion.value.resumeCursor, cursorAfterTurn);
-      }
-
-      yield* provider.stopSession({ threadId });
-      const persistedAfterStop = yield* directory.getBinding(threadId);
-      assert.equal(Option.isSome(persistedAfterStop), true);
-      if (Option.isSome(persistedAfterStop)) {
-        assert.deepEqual(persistedAfterStop.value.resumeCursor, cursorAfterTurn);
-      }
-      routing.claude.startSession.mockClear();
-      routing.claude.sendTurn.mockClear();
-      routing.claude.stopSession.mockClear();
-    }),
-  );
-
-  it.effect("recovers Claude with the live resume cursor captured while stopping", () =>
-    Effect.gen(function* () {
-      const provider = yield* ProviderService.ProviderService;
-      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
-      const threadId = asThreadId("thread-claude-stopped-cursor");
-      const turnId = asTurnId("turn-claude-stopped-cursor");
-      const cursorBeforeTurn = {
-        threadId,
-        resume: "claude-session-stopped-cursor",
-        resumeSessionAt: "assistant-u1",
-        turnCount: 1,
-      };
-      const cursorAfterTurn = {
-        ...cursorBeforeTurn,
-        resumeSessionAt: "assistant-u2",
-        turnCount: 2,
-      };
-
-      yield* provider.startSession(threadId, {
-        provider: CLAUDE_AGENT_DRIVER,
-        providerInstanceId: claudeAgentInstanceId,
-        threadId,
-        runtimeMode: "full-access",
-      });
-      routing.claude.updateSession(threadId, (session) => ({
-        ...session,
-        resumeCursor: cursorBeforeTurn,
-      }));
-      routing.claude.sendTurn.mockImplementationOnce((input) =>
-        Effect.succeed({
-          threadId: input.threadId,
-          turnId,
-          resumeCursor: cursorBeforeTurn,
-        }),
-      );
-      yield* provider.sendTurn({ threadId, input: "advance the cursor", attachments: [] });
-      routing.claude.updateSession(threadId, (session) => ({
-        ...session,
-        status: "ready",
-        resumeCursor: cursorAfterTurn,
-      }));
-
-      yield* provider.stopSession({ threadId });
-      const persistedAfterStop = yield* directory.getBinding(threadId);
-      assert.equal(Option.isSome(persistedAfterStop), true);
-      if (Option.isSome(persistedAfterStop)) {
-        assert.deepEqual(persistedAfterStop.value.resumeCursor, cursorAfterTurn);
-      }
-
-      routing.claude.startSession.mockClear();
-      routing.claude.sendTurn.mockClear();
-      yield* provider.sendTurn({ threadId, input: "resume after reap", attachments: [] });
-
-      assert.equal(routing.claude.startSession.mock.calls.length, 1);
-      const resumedStartInput = routing.claude.startSession.mock.calls[0]?.[0];
-      assert.equal(resumedStartInput?.threadId, threadId);
-      assert.deepEqual(resumedStartInput?.resumeCursor, cursorAfterTurn);
-
-      yield* provider.stopSession({ threadId });
-      routing.claude.startSession.mockClear();
-      routing.claude.sendTurn.mockClear();
-      routing.claude.stopSession.mockClear();
     }),
   );
 

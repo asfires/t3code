@@ -6,7 +6,6 @@ import type {
   ThreadLinkedPullRequest,
   ThreadPullRequestKey,
   ThreadPullRequestLink,
-  TurnId,
 } from "@t3tools/contracts";
 import {
   OrchestrationCheckpointSummary,
@@ -23,8 +22,6 @@ import {
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Predicate from "effect/Predicate";
-
-import { checkpointRefForThreadTurn } from "../checkpointing/Utils.ts";
 
 import { toProjectorDecodeError, type OrchestrationProjectorDecodeError } from "./Errors.ts";
 import { collectRevertedTurnIds } from "./RevertRetention.ts";
@@ -55,7 +52,6 @@ import {
   ThreadUnsnoozedPayload,
   ThreadRevertedPayload,
   ThreadSessionSetPayload,
-  ThreadTurnInterruptRequestedPayload,
   ThreadTurnDiffCompletedPayload,
 } from "./Schemas.ts";
 
@@ -95,14 +91,6 @@ function checkpointStatusToLatestTurnState(status: "ready" | "missing" | "error"
   if (status === "error") return "error" as const;
   // Match SQL and client projections: a missing git ref is not an interruption.
   return "completed" as const;
-}
-
-function isCompletedRetractedTurn(thread: OrchestrationThread, turnId: TurnId | null): boolean {
-  return (
-    turnId !== null &&
-    thread.turnRetraction?.status === "completed" &&
-    thread.turnRetraction.targetTurnId === turnId
-  );
 }
 
 /**
@@ -232,14 +220,10 @@ function decodeForEvent<A>(
 function retainThreadMessagesAfterRevert(
   messages: ReadonlyArray<OrchestrationMessage>,
   revertedTurnIds: ReadonlySet<string>,
-  excludedMessageIds: ReadonlySet<string>,
 ): ReadonlyArray<OrchestrationMessage> {
   return messages.filter(
     (message) =>
-      !excludedMessageIds.has(message.id) &&
-      (message.role === "system" ||
-        message.turnId === null ||
-        !revertedTurnIds.has(message.turnId)),
+      message.role === "system" || message.turnId === null || !revertedTurnIds.has(message.turnId),
   );
 }
 
@@ -741,9 +725,6 @@ export function projectEvent(
         if (!thread) {
           return nextBase;
         }
-        if (isCompletedRetractedTurn(thread, payload.turnId)) {
-          return nextBase;
-        }
 
         const message: OrchestrationMessage = yield* decodeForEvent(
           OrchestrationMessage,
@@ -858,43 +839,6 @@ export function projectEvent(
         };
       });
 
-    case "thread.turn-interrupt-requested":
-      return decodeForEvent(
-        ThreadTurnInterruptRequestedPayload,
-        event.payload,
-        event.type,
-        "payload",
-      ).pipe(
-        Effect.map((payload) => {
-          if (payload.retraction === undefined) return nextBase;
-          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
-          if (!thread) return nextBase;
-          return {
-            ...nextBase,
-            threads: updateThread(nextBase.threads, payload.threadId, {
-              turnRetraction: {
-                requestId: payload.retraction.requestId,
-                messageId: payload.retraction.messageId,
-                baselineTurnCount: payload.retraction.baselineTurnCount,
-                baselineCheckpointRef: checkpointRefForThreadTurn(
-                  payload.threadId,
-                  payload.retraction.baselineTurnCount,
-                ),
-                targetTurnId: payload.retraction.targetTurnId,
-                providerSendClaimed: false,
-                providerSendState: "unclaimed",
-                firstUserMessage: payload.retraction.firstUserMessage,
-                requestedAt: payload.createdAt,
-                status: "requested",
-                completedAt: null,
-                failedAt: null,
-              },
-              updatedAt: event.occurredAt,
-            }),
-          };
-        }),
-      );
-
     case "thread.proposed-plan-upserted":
       return Effect.gen(function* () {
         const payload = yield* decodeForEvent(
@@ -905,9 +849,6 @@ export function projectEvent(
         );
         const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
         if (!thread) {
-          return nextBase;
-        }
-        if (isCompletedRetractedTurn(thread, payload.proposedPlan.turnId)) {
           return nextBase;
         }
 
@@ -940,9 +881,6 @@ export function projectEvent(
         );
         const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
         if (!thread) {
-          return nextBase;
-        }
-        if (isCompletedRetractedTurn(thread, payload.turnId)) {
           return nextBase;
         }
 
@@ -1027,19 +965,12 @@ export function projectEvent(
           const revertedTurnIds = collectRevertedTurnIds({
             turns: thread.checkpoints,
             baselineTurnCount: payload.turnCount,
-            retractionTurnId: payload.retraction?.turnId ?? null,
             latestTurnId: thread.latestTurn?.turnId ?? null,
             activeTurnId: thread.session?.activeTurnId ?? null,
           });
-          const excludedMessageIds =
-            payload.retraction === undefined
-              ? new Set<string>()
-              : new Set([payload.retraction.messageId]);
-          const messages = retainThreadMessagesAfterRevert(
-            thread.messages,
-            revertedTurnIds,
-            excludedMessageIds,
-          ).slice(-MAX_THREAD_MESSAGES);
+          const messages = retainThreadMessagesAfterRevert(thread.messages, revertedTurnIds).slice(
+            -MAX_THREAD_MESSAGES,
+          );
           const proposedPlans = retainThreadProposedPlansAfterRevert(
             thread.proposedPlans,
             revertedTurnIds,
@@ -1067,30 +998,6 @@ export function projectEvent(
               proposedPlans,
               activities,
               latestTurn,
-              ...(payload.retraction !== undefined
-                ? {
-                    turnRetraction: {
-                      requestId: payload.retraction.requestId,
-                      messageId: payload.retraction.messageId,
-                      baselineTurnCount: payload.turnCount,
-                      baselineCheckpointRef: checkpointRefForThreadTurn(
-                        payload.threadId,
-                        payload.turnCount,
-                      ),
-                      targetTurnId: payload.retraction.turnId,
-                      providerSendClaimed: thread.turnRetraction?.providerSendClaimed ?? false,
-                      providerSendState: thread.turnRetraction?.providerSendState ?? "unclaimed",
-                      firstUserMessage: payload.retraction.firstUserMessage,
-                      requestedAt:
-                        thread.turnRetraction?.requestId === payload.retraction.requestId
-                          ? thread.turnRetraction.requestedAt
-                          : payload.retraction.completedAt,
-                      status: "completed" as const,
-                      completedAt: payload.retraction.completedAt,
-                      failedAt: null,
-                    },
-                  }
-                : {}),
               updatedAt: event.occurredAt,
             }),
           };
@@ -1117,30 +1024,10 @@ export function projectEvent(
             ].toSorted(compareThreadActivities),
           );
 
-          const failedRetractionRequestId =
-            payload.activity.kind === "turn.retract.failed" &&
-            typeof payload.activity.payload === "object" &&
-            payload.activity.payload !== null &&
-            "requestId" in payload.activity.payload &&
-            typeof payload.activity.payload.requestId === "string"
-              ? payload.activity.payload.requestId
-              : null;
-
           return {
             ...nextBase,
             threads: updateThread(nextBase.threads, payload.threadId, {
               activities,
-              ...(failedRetractionRequestId !== null &&
-              thread.turnRetraction?.requestId === failedRetractionRequestId
-                ? {
-                    turnRetraction: {
-                      ...thread.turnRetraction,
-                      status: "failed" as const,
-                      completedAt: null,
-                      failedAt: payload.activity.createdAt,
-                    },
-                  }
-                : {}),
               updatedAt: event.occurredAt,
             }),
           };

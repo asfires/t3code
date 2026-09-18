@@ -196,7 +196,7 @@ describe("ProviderSessionReaper", () => {
       interruptTurn: () => unsupported(),
       respondToRequest: () => unsupported(),
       respondToUserInput: () => unsupported(),
-      discardTransientThread: () => unsupported(),
+
       stopSession,
       listSessions: () => Effect.succeed([]),
       getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
@@ -215,7 +215,7 @@ describe("ProviderSessionReaper", () => {
         });
       },
       rollbackConversation: () => unsupported(),
-      rollbackConversationTo: () => unsupported(),
+
       uploadFeedback: () => unsupported(),
       streamEvents: Stream.empty,
     };

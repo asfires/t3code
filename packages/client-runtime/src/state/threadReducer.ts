@@ -13,8 +13,6 @@ import type {
   ThreadPullRequestLink,
   TurnId,
 } from "@t3tools/contracts";
-import { CheckpointRef } from "@t3tools/contracts";
-import * as Encoding from "effect/Encoding";
 import { threadPullRequestKeysEqual } from "@t3tools/shared/threadPullRequests";
 import { isImportedAgentSessionMessageId } from "@t3tools/contracts";
 import { compareDateTimeStrings } from "@t3tools/shared/dateTime";
@@ -64,8 +62,6 @@ const activityOrder = O.combineAll<OrchestrationThreadActivity>([
   O.mapInput(O.String, (a) => a.id),
 ]);
 
-const checkpointRefForThreadTurn = (threadId: string, turnCount: number) =>
-  CheckpointRef.make(`refs/t3/checkpoints/${Encoding.encodeBase64Url(threadId)}/turn/${turnCount}`);
 // Per-array id index so the streaming append path can reject a re-delivered
 // id without rescanning the history. Only arrays this reducer produced are
 // indexed: presence also proves the array is activityOrder-sorted, which
@@ -366,45 +362,23 @@ export function applyThreadDetailEvent(
       };
 
     case "thread.turn-interrupt-requested": {
+      if (event.payload.turnId === undefined) {
+        return { kind: "unchanged" };
+      }
       const latestTurn = thread.latestTurn;
-      const interruptsLatestTurn =
-        event.payload.turnId !== undefined && latestTurn?.turnId === event.payload.turnId;
-      if (!interruptsLatestTurn && event.payload.retraction === undefined) {
+      if (latestTurn === null || latestTurn.turnId !== event.payload.turnId) {
         return { kind: "unchanged" };
       }
       return {
         kind: "updated",
         thread: {
           ...thread,
-          latestTurn: interruptsLatestTurn
-            ? {
-                ...latestTurn,
-                state: "interrupted",
-                startedAt: latestTurn.startedAt ?? event.payload.createdAt,
-                completedAt: latestTurn.completedAt ?? event.payload.createdAt,
-              }
-            : latestTurn,
-          ...(event.payload.retraction !== undefined
-            ? {
-                turnRetraction: {
-                  requestId: event.payload.retraction.requestId,
-                  messageId: event.payload.retraction.messageId,
-                  baselineTurnCount: event.payload.retraction.baselineTurnCount,
-                  baselineCheckpointRef: checkpointRefForThreadTurn(
-                    event.payload.threadId,
-                    event.payload.retraction.baselineTurnCount,
-                  ),
-                  targetTurnId: event.payload.retraction.targetTurnId,
-                  providerSendClaimed: false,
-                  providerSendState: "unclaimed" as const,
-                  firstUserMessage: event.payload.retraction.firstUserMessage,
-                  requestedAt: event.payload.createdAt,
-                  status: "requested" as const,
-                  completedAt: null,
-                  failedAt: null,
-                },
-              }
-            : {}),
+          latestTurn: {
+            ...latestTurn,
+            state: "interrupted",
+            startedAt: latestTurn.startedAt ?? event.payload.createdAt,
+            completedAt: latestTurn.completedAt ?? event.payload.createdAt,
+          },
           updatedAt: event.occurredAt,
         },
       };
@@ -660,15 +634,10 @@ export function applyThreadDetailEvent(
       );
 
       const retainedTurnIds = new Set(Arr.map(checkpoints, (entry) => entry.turnId));
-      const excludedMessageIds =
-        event.payload.retraction === undefined
-          ? new Set<string>()
-          : new Set([event.payload.retraction.messageId]);
       const messages = retainMessagesAfterRevert(
         thread.messages,
         retainedTurnIds,
         event.payload.turnCount,
-        excludedMessageIds,
       );
       const proposedPlans = pipe(
         thread.proposedPlans,
@@ -701,30 +670,6 @@ export function applyThreadDetailEvent(
                   completedAt: latestCheckpoint.completedAt,
                   assistantMessageId: latestCheckpoint.assistantMessageId ?? null,
                 },
-          ...(event.payload.retraction !== undefined
-            ? {
-                turnRetraction: {
-                  requestId: event.payload.retraction.requestId,
-                  messageId: event.payload.retraction.messageId,
-                  baselineTurnCount: event.payload.turnCount,
-                  baselineCheckpointRef: checkpointRefForThreadTurn(
-                    event.payload.threadId,
-                    event.payload.turnCount,
-                  ),
-                  targetTurnId: event.payload.retraction.turnId,
-                  providerSendClaimed: thread.turnRetraction?.providerSendClaimed ?? false,
-                  providerSendState: thread.turnRetraction?.providerSendState ?? "unclaimed",
-                  firstUserMessage: event.payload.retraction.firstUserMessage,
-                  requestedAt:
-                    thread.turnRetraction?.requestId === event.payload.retraction.requestId
-                      ? thread.turnRetraction.requestedAt
-                      : event.payload.retraction.completedAt,
-                  status: "completed" as const,
-                  completedAt: event.payload.retraction.completedAt,
-                  failedAt: null,
-                },
-              }
-            : {}),
           updatedAt: event.occurredAt,
         },
       };
@@ -733,14 +678,6 @@ export function applyThreadDetailEvent(
     // ── Activities ──────────────────────────────────────────────────
     case "thread.activity-appended": {
       const activity = event.payload.activity;
-      const failedRetractionRequestId =
-        activity.kind === "turn.retract.failed" &&
-        typeof activity.payload === "object" &&
-        activity.payload !== null &&
-        "requestId" in activity.payload &&
-        typeof activity.payload.requestId === "string"
-          ? activity.payload.requestId
-          : null;
       // A resolvable context-window update supersedes earlier resolvable ones
       // for the same turn: consumers only read the latest value (walking the
       // array backwards), and providers stream these updates continuously, so
@@ -793,22 +730,7 @@ export function applyThreadDetailEvent(
 
       return {
         kind: "updated",
-        thread: {
-          ...thread,
-          activities,
-          ...(failedRetractionRequestId !== null &&
-          thread.turnRetraction?.requestId === failedRetractionRequestId
-            ? {
-                turnRetraction: {
-                  ...thread.turnRetraction,
-                  status: "failed" as const,
-                  completedAt: null,
-                  failedAt: activity.createdAt,
-                },
-              }
-            : {}),
-          updatedAt: event.occurredAt,
-        },
+        thread: { ...thread, activities, updatedAt: event.occurredAt },
       };
     }
 
@@ -910,13 +832,9 @@ function retainMessagesAfterRevert(
   messages: ReadonlyArray<OrchestrationMessage>,
   retainedTurnIds: ReadonlySet<string>,
   turnCount: number,
-  excludedMessageIds: ReadonlySet<string>,
 ): OrchestrationMessage[] {
   const retainedMessageIds = new Set<string>();
   for (const message of messages) {
-    if (excludedMessageIds.has(message.id)) {
-      continue;
-    }
     if (message.role === "system" || isImportedAgentSessionMessageId(message.id)) {
       retainedMessageIds.add(message.id);
     } else if (message.turnId !== null && retainedTurnIds.has(message.turnId)) {
@@ -936,7 +854,6 @@ function retainMessagesAfterRevert(
       .filter(
         (message) =>
           message.role === role &&
-          !excludedMessageIds.has(message.id) &&
           !retainedMessageIds.has(message.id) &&
           (message.turnId === null || retainedTurnIds.has(message.turnId)),
       )

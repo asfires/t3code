@@ -26,7 +26,6 @@ import type {
   OrchestrationThreadShell,
   ProjectId,
   ThreadId,
-  TurnId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Option from "effect/Option";
@@ -236,11 +235,11 @@ export interface ProjectionSnapshotQueryShape {
   >;
 
   /** Read the active thread and session facts used to ingest provider events. */
-  readonly getThreadRuntimeContext: (threadId: ThreadId) => Effect.Effect<
+  readonly getThreadRuntimeContext: (
+    threadId: ThreadId,
+  ) => Effect.Effect<
     Option.Option<
-      Pick<OrchestrationThreadShell, "id" | "projectId" | "title" | "titleState" | "session"> & {
-        readonly completedRetractionTurnId?: TurnId | null;
-      }
+      Pick<OrchestrationThreadShell, "id" | "projectId" | "title" | "titleState" | "session">
     >,
     ProjectionRepositoryError
   >;

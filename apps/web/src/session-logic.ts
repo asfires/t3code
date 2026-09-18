@@ -469,13 +469,6 @@ export function deriveWorkLogEntries(
   const entries: DerivedWorkLogEntry[] = [];
   for (const activity of foldUserInputActivities(ordered)) {
     if (
-      activity.kind === "turn.retract.failed" &&
-      typeof activity.payload === "object" &&
-      (activity.payload as { silent?: unknown } | null)?.silent === true
-    ) {
-      continue;
-    }
-    if (
       isWorktreeSetupActivity(activity.kind) &&
       (activity.tone !== "error" || activity.kind === "worktree-setup")
     ) {

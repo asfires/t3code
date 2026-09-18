@@ -335,12 +335,6 @@ const ProviderRollbackConversationInput = Schema.Struct({
   numTurns: NonNegativeInt,
 });
 
-const ProviderRollbackConversationToInput = Schema.Struct({
-  threadId: ThreadId,
-  retainedTurnCount: NonNegativeInt,
-  targetTurnId: Schema.optional(TurnId),
-});
-
 function toValidationError(
   operation: string,
   issue: string,
@@ -2156,34 +2150,6 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     },
   );
 
-  const discardTransientThread: ProviderServiceMethod<"discardTransientThread"> = Effect.fn(
-    "discardTransientThread",
-  )(function* (rawInput) {
-    const input = yield* decodeInputOrValidationError({
-      operation: "ProviderService.discardTransientThread",
-      schema: ProviderStopSessionInput,
-      payload: rawInput,
-    });
-    const routed = yield* resolveRoutableSession({
-      threadId: input.threadId,
-      operation: "ProviderService.discardTransientThread",
-      allowRecovery: false,
-    });
-    yield* Effect.annotateCurrentSpan({
-      "provider.operation": "discard-transient-thread",
-      "provider.kind": routed.adapter.provider,
-      "provider.thread_id": input.threadId,
-    });
-    if (!routed.isActive || routed.adapter.discardTransientThread === undefined) {
-      return;
-    }
-    yield* routed.adapter.discardTransientThread(routed.threadId);
-    yield* analytics.record("provider.thread.discarded", {
-      provider: routed.adapter.provider,
-      reason: "transient",
-    });
-  });
-
   const listSessions: ProviderServiceMethod<"listSessions"> = Effect.fn("listSessions")(
     function* () {
       const currentAdapters = yield* getAdapterEntries;
@@ -2319,26 +2285,15 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         "provider.rollback_turns": input.numTurns,
       });
       yield* routed.adapter.rollbackThread(routed.threadId, input.numTurns);
-
-      // Rollback can change the provider's native resume cursor. Persist it
-      // before reporting success so recovery never resumes the removed turn.
-      const rolledBackSession = (yield* routed.adapter.listSessions()).find(
+      const session = (yield* routed.adapter.listSessions()).find(
         (session) => session.threadId === routed.threadId,
       );
-      if (rolledBackSession !== undefined) {
+      if (session) {
         yield* upsertSessionBinding(
-          {
-            ...rolledBackSession,
-            providerInstanceId: routed.instanceId,
-          },
+          { ...session, providerInstanceId: routed.instanceId },
           input.threadId,
-          {
-            lastRuntimeEvent: "provider.rollbackConversation",
-            lastRuntimeEventAt: yield* nowIso,
-          },
         );
       }
-
       yield* analytics.record("provider.conversation.rolled_back", {
         provider: routed.adapter.provider,
         turns: input.numTurns,
@@ -2354,114 +2309,6 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     );
   });
 
-  const rollbackConversationTo: ProviderServiceMethod<"rollbackConversationTo"> = Effect.fn(
-    "rollbackConversationTo",
-  )(function* (rawInput) {
-    const input = yield* decodeInputOrValidationError({
-      operation: "ProviderService.rollbackConversationTo",
-      schema: ProviderRollbackConversationToInput,
-      payload: rawInput,
-    });
-    let metricProvider = "unknown";
-    return yield* Effect.gen(function* () {
-      const routed = yield* resolveRoutableSession({
-        threadId: input.threadId,
-        operation: "ProviderService.rollbackConversationTo",
-        allowRecovery: true,
-      });
-      metricProvider = routed.adapter.provider;
-      yield* Effect.annotateCurrentSpan({
-        "provider.operation": "rollback-conversation-to",
-        "provider.kind": routed.adapter.provider,
-        "provider.thread_id": input.threadId,
-        "provider.retained_turn_count": input.retainedTurnCount,
-      });
-
-      if (routed.adapter.rollbackThreadTo !== undefined) {
-        yield* routed.adapter.rollbackThreadTo(
-          routed.threadId,
-          input.retainedTurnCount,
-          input.targetTurnId,
-        );
-      } else {
-        // Compatibility conversion for providers that only expose relative
-        // rollback: read the absolute length, apply only the remaining delta,
-        // then verify the retained boundary.
-        const current = yield* routed.adapter.readThread(routed.threadId);
-        if (current.turns.length < input.retainedTurnCount) {
-          return yield* toValidationError(
-            "ProviderService.rollbackConversationTo",
-            `Provider history has ${current.turns.length} turns, below retained boundary ${input.retainedTurnCount}.`,
-          );
-        }
-        const remainingDelta = current.turns.length - input.retainedTurnCount;
-        if (remainingDelta > 0) {
-          yield* routed.adapter.rollbackThread(routed.threadId, remainingDelta);
-        }
-        const verified = yield* routed.adapter.readThread(routed.threadId);
-        if (verified.turns.length !== input.retainedTurnCount) {
-          return yield* toValidationError(
-            "ProviderService.rollbackConversationTo",
-            `Provider history verification expected ${input.retainedTurnCount} turns, found ${verified.turns.length}.`,
-          );
-        }
-      }
-
-      // Rollback can change the provider's native resume cursor. Persist it
-      // before reporting success so recovery never resumes the removed turn.
-      const rolledBackSession = (yield* routed.adapter.listSessions()).find(
-        (session) => session.threadId === routed.threadId,
-      );
-      if (rolledBackSession !== undefined) {
-        yield* upsertSessionBinding(
-          {
-            ...rolledBackSession,
-            providerInstanceId: routed.instanceId,
-          },
-          input.threadId,
-          {
-            lastRuntimeEvent: "provider.rollbackConversationTo",
-            lastRuntimeEventAt: yield* nowIso,
-          },
-        );
-      }
-
-      yield* analytics.record("provider.conversation.rolled_back", {
-        provider: routed.adapter.provider,
-        retainedTurns: input.retainedTurnCount,
-      });
-    }).pipe(
-      withMetrics({
-        counter: providerTurnsTotal,
-        outcomeAttributes: () =>
-          providerMetricAttributes(metricProvider, {
-            operation: "rollback-to",
-          }),
-      }),
-    );
-  });
-
-  const validateRollbackConversationTo: NonNullable<
-    ProviderServiceMethod<"validateRollbackConversationTo">
-  > = Effect.fn("validateRollbackConversationTo")(function* (rawInput) {
-    const input = yield* decodeInputOrValidationError({
-      operation: "ProviderService.validateRollbackConversationTo",
-      schema: ProviderRollbackConversationToInput,
-      payload: rawInput,
-    });
-    const routed = yield* resolveRoutableSession({
-      threadId: input.threadId,
-      operation: "ProviderService.validateRollbackConversationTo",
-      allowRecovery: true,
-    });
-    if (routed.adapter.validateRollbackThreadTo !== undefined) {
-      yield* routed.adapter.validateRollbackThreadTo(
-        routed.threadId,
-        input.retainedTurnCount,
-        input.targetTurnId,
-      );
-    }
-  });
   const uploadFeedback: ProviderServiceMethod<"uploadFeedback"> = Effect.fn("uploadFeedback")(
     function* (rawInput) {
       const input = yield* decodeInputOrValidationError({
@@ -2614,15 +2461,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     interruptTurn,
     respondToRequest,
     respondToUserInput,
-    discardTransientThread,
     stopSession,
     listSessions,
     getCapabilities,
     getInstanceInfo,
     assertConversationRollbackSupported,
     rollbackConversation,
-    validateRollbackConversationTo,
-    rollbackConversationTo,
     uploadFeedback,
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (ProviderRuntimeIngestion, CheckpointReactor, etc.) each

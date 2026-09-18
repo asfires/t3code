@@ -21,35 +21,6 @@ function asTrimmedString(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-const UNAVAILABLE_RETAINED_BOUNDARY_DETAIL =
-  /^Provider adapter validation failed \([^)]+\) in rollbackThreadTo: Provider history has \d+ turns, below retained boundary \d+\.$/;
-
-function normalizeLegacyRetractionFailure(
-  activity: OrchestrationThreadActivity,
-): OrchestrationThreadActivity {
-  const payload = asRecord(activity.payload);
-  if (
-    activity.kind !== "turn.retract.failed" ||
-    !payload ||
-    typeof payload.detail !== "string" ||
-    !UNAVAILABLE_RETAINED_BOUNDARY_DETAIL.test(payload.detail)
-  ) {
-    return activity;
-  }
-
-  // Boundary failures emitted before stale Esc retractions became silent are
-  // immutable event history. Normalize them at the wire boundary so every
-  // projection rebuild keeps the compatibility behavior without rewriting
-  // the event store or the persisted activity payload.
-  return {
-    ...activity,
-    payload: {
-      ...payload,
-      silent: true,
-    },
-  };
-}
-
 export const MAX_PROJECTED_TOOL_RESULT_CHARS = 50_000;
 
 const PROJECTED_TOOL_RESULT_TRUNCATION_MARKER = "…[truncated]";
@@ -511,11 +482,10 @@ function joinAcpContentText(value: unknown): string | null {
 export function projectActivityPayload(
   activity: OrchestrationThreadActivity,
 ): OrchestrationThreadActivity {
-  const normalizedActivity = normalizeLegacyRetractionFailure(activity);
-  const payload = asRecord(normalizedActivity.payload);
+  const payload = asRecord(activity.payload);
   const data = asRecord(payload?.data);
   if (!payload || !data) {
-    return normalizedActivity;
+    return activity;
   }
 
   const itemStatus = asRecord(data.item)?.status;
@@ -531,7 +501,7 @@ export function projectActivityPayload(
 
   if (payload.itemType === "mcp_tool_call") {
     return {
-      ...normalizedActivity,
+      ...activity,
       payload: {
         ...projectedPayload,
         data: { ...projectMcpToolCallData(data), ...questionInput },
@@ -587,7 +557,7 @@ export function projectActivityPayload(
   }
 
   return {
-    ...normalizedActivity,
+    ...activity,
     payload: {
       ...projectedPayload,
       data: projectedData,
