@@ -22,6 +22,18 @@ export function isTextEditingTargetOutsideComposer(target: EventTarget | null): 
   return target.closest('[contenteditable]:not([contenteditable="false"])') !== null;
 }
 
+/**
+ * ProseMirror prevents the default action of every Escape it receives, whether
+ * or not anything consumed the key, so inside the composer editor
+ * `defaultPrevented` carries no meaning. Composer menus that do want Escape
+ * close the composer escape gate or stop propagation instead.
+ */
+export function isComposerEditorTarget(target: EventTarget | null): boolean {
+  if (typeof Element === "undefined") return false;
+  if (!(target instanceof Element)) return false;
+  return target.closest('[data-testid="composer-editor"]') !== null;
+}
+
 export function shouldHandleChatEscape(input: {
   event: KeyboardEvent;
   terminalFocused: boolean;
@@ -29,10 +41,13 @@ export function shouldHandleChatEscape(input: {
   composerEscapeGateOpen: boolean;
   floatingLayerOpen: boolean;
   textEditingTargetOutsideComposer?: boolean;
+  composerEditorTarget?: boolean;
 }): boolean {
   const { event } = input;
   if (event.key !== "Escape" || event.isComposing) return false;
-  if (event.defaultPrevented || event.cancelBubble || handledChatEscapeEvents.has(event)) {
+  const preventedByAnotherHandler =
+    event.defaultPrevented && !(input.composerEditorTarget ?? isComposerEditorTarget(event.target));
+  if (preventedByAnotherHandler || event.cancelBubble || handledChatEscapeEvents.has(event)) {
     return false;
   }
   if (

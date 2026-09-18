@@ -803,6 +803,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
         attributes: {
           class: cn(
             "composer-tiptap block max-h-50 min-h-17.5 w-full overflow-y-auto whitespace-pre-wrap wrap-break-word bg-transparent leading-relaxed text-foreground focus:outline-none",
+            expanded && "h-full min-h-0 max-h-none",
             className,
           ),
           "data-testid": "composer-editor",
@@ -1003,20 +1004,6 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
   useEffect(() => {
     editor?.setEditable(!disabled);
   }, [disabled, editor]);
-
-  // The editor's attributes are creation-time, so expanding swaps the sizing
-  // classes on the live element. The resting limits are removed rather than
-  // overridden because two max-height utilities resolve by stylesheet order.
-  useLayoutEffect(() => {
-    const element = editor?.view.dom;
-    if (!element) return;
-    for (const expandedClass of ["h-full", "min-h-0", "max-h-none"]) {
-      element.classList.toggle(expandedClass, expanded);
-    }
-    for (const restingClass of ["max-h-50", "min-h-17.5"]) {
-      element.classList.toggle(restingClass, !expanded);
-    }
-  }, [editor, expanded]);
 
   useEffect(() => {
     editorHolder.current = editor;

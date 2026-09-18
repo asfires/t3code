@@ -45,6 +45,20 @@ describe("chat Escape trigger", () => {
     expect(shouldHandle(marked)).toBe(false);
   });
 
+  it("ignores the default prevention ProseMirror applies inside the composer editor", () => {
+    const fromEditor = keyboardEvent({ defaultPrevented: true });
+    expect(shouldHandle(fromEditor, { composerEditorTarget: true })).toBe(true);
+    expect(shouldHandle(fromEditor, { composerEditorTarget: false })).toBe(false);
+    expect(
+      shouldHandle(keyboardEvent({ defaultPrevented: true, cancelBubble: true }), {
+        composerEditorTarget: true,
+      }),
+    ).toBe(false);
+    expect(
+      shouldHandle(fromEditor, { composerEditorTarget: true, composerEscapeGateOpen: true }),
+    ).toBe(false);
+  });
+
   it("defers to terminal focus, palettes, composer menus, and floating layers", () => {
     const event = keyboardEvent();
 
