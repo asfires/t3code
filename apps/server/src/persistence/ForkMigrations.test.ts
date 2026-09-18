@@ -1,12 +1,10 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Migrator from "effect/unstable/sql/Migrator";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { migrationManifest, runMigrations } from "./Migrations.ts";
 import {
-  forkMigrationEntries,
   forkMigrationManifest,
   forkMigrationsTable,
   runAllMigrations,
@@ -15,9 +13,6 @@ import {
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 const freshLayer = () => it.layer(Layer.fresh(Layer.mergeAll(NodeSqliteClient.layerMemory())));
-
-const legacyUpstreamLatestId = 40;
-const legacyForkRow = (id: number) => 40 + id;
 
 const readLedger = (table: string) =>
   Effect.gen(function* () {
@@ -31,21 +26,6 @@ const readLedger = (table: string) =>
 
 const readIds = (table: string) =>
   Effect.map(readLedger(table), (rows) => rows.map((row) => row.id));
-
-// Reproduces a database from before the split: fork migrations applied
-// through upstream's ledger as 041..046.
-const applyLegacyForkMigrations = Effect.gen(function* () {
-  yield* runMigrations({ toMigrationInclusive: legacyUpstreamLatestId });
-  const legacyLoader = Migrator.fromRecord(
-    Object.fromEntries(
-      forkMigrationEntries.map(([id, name, migration]) => [
-        `${legacyForkRow(id)}_${name}`,
-        migration,
-      ]),
-    ),
-  );
-  yield* Migrator.make({})({ loader: legacyLoader });
-});
 
 freshLayer()("ForkMigrations on a fresh database", (it) => {
   it.effect("runs upstream migrations in their ledger and fork migrations in the fork ledger", () =>
@@ -72,119 +52,30 @@ freshLayer()("ForkMigrations on a fresh database", (it) => {
   );
 });
 
-freshLayer()("ForkMigrations on a database migrated before the split", (it) => {
-  it.effect("moves fork rows out of the upstream ledger without re-running them", () =>
+freshLayer()("ForkMigrations with ids 1 through 6 already recorded", (it) => {
+  it.effect("advances to 7 while preserving managed worktrees and existing ledger rows", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* applyLegacyForkMigrations;
-      yield* sql`
-        UPDATE effect_sql_migrations
-        SET created_at = '2026-08-12 03:04:05'
-        WHERE migration_id > ${legacyUpstreamLatestId}
-      `;
-      // A projection row that a re-run of the rebuild migrations would wipe.
-      yield* sql`
-        INSERT INTO projection_state (projector, last_applied_sequence, updated_at)
-        VALUES ('projection.threads', 27427, '2026-08-12T03:04:05.000Z')
-      `;
-
-      const result = yield* runAllMigrations();
-
-      assert.deepEqual(result, {
-        upstream: migrationManifest.filter(([id]) => id > legacyUpstreamLatestId),
-        fork: [],
-      });
-      assert.deepEqual(
-        yield* readIds("effect_sql_migrations"),
-        migrationManifest.map(([id]) => id),
-      );
-      assert.deepEqual(
-        yield* readLedger(forkMigrationsTable),
-        forkMigrationManifest.map(([id, name]) => ({
-          id,
-          name,
-          createdAt: "2026-08-12 03:04:05",
-        })),
-      );
-      const stateRows = yield* sql<{ readonly lastAppliedSequence: number }>`
-        SELECT last_applied_sequence AS "lastAppliedSequence" FROM projection_state
-      `;
-      assert.deepEqual(stateRows, [{ lastAppliedSequence: 27427 }]);
-    }),
-  );
-});
-
-freshLayer()(
-  "ForkMigrations next to an upstream migration that reuses a legacy fork number",
-  (it) => {
-    it.effect("adopts only rows whose name matches a fork migration", () =>
-      Effect.gen(function* () {
-        const sql = yield* SqlClient.SqlClient;
-        const takenId = legacyForkRow(forkMigrationEntries.length);
-        // The non-fork ledger entry represents real upstream schema, including
-        // the columns later upstream migrations rely on.
-        yield* runMigrations({ toMigrationInclusive: takenId });
-        for (const [id, name, migration] of forkMigrationEntries) {
-          yield* migration;
-          if (legacyForkRow(id) < takenId) {
-            yield* sql`
-              UPDATE effect_sql_migrations SET name = ${name}
-              WHERE migration_id = ${legacyForkRow(id)}
-            `;
-          }
-        }
-
-        const result = yield* runAllMigrations();
-
-        // The upstream row stays put and, since it is above the adopted fork
-        // range, the fork migration it displaced re-runs under its own ledger.
-        assert.deepEqual(
-          result.fork.map(([id]) => id),
-          [forkMigrationEntries.length],
-        );
-        assert.deepEqual(yield* readIds("effect_sql_migrations"), [
-          ...migrationManifest.filter(([id]) => id <= legacyUpstreamLatestId).map(([id]) => id),
-          takenId,
-          ...migrationManifest.filter(([id]) => id > takenId).map(([id]) => id),
-        ]);
-        assert.deepEqual(
-          yield* readIds(forkMigrationsTable),
-          forkMigrationManifest.map(([id]) => id),
-        );
-      }),
-    );
-  },
-);
-
-freshLayer()("ForkMigrations when the fork ledger already holds a different migration", (it) => {
-  it.effect("refuses to adopt rather than dropping the legacy row", () =>
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      yield* applyLegacyForkMigrations;
-      yield* sql`
-        CREATE TABLE ${sql(forkMigrationsTable)} (
-          migration_id integer PRIMARY KEY NOT NULL,
-          created_at datetime NOT NULL DEFAULT current_timestamp,
-          name VARCHAR(255) NOT NULL
-        )
-      `;
-      yield* sql`
-        INSERT INTO ${sql(forkMigrationsTable)} (migration_id, name)
-        VALUES (${forkMigrationEntries.length}, 'DifferentMigration')
-      `;
-
-      const error = yield* runAllMigrations().pipe(Effect.flip);
-
-      assert.equal(error._tag, "MigrationError");
-      if (error._tag === "MigrationError") {
-        assert.equal(error.kind, "BadState");
+      yield* runMigrations();
+      yield* runForkMigrations({ toMigrationInclusive: 3 });
+      for (const id of [1, 2, 4, 5, 6]) {
+        yield* sql`INSERT INTO effect_sql_migrations_fork (migration_id, name) VALUES (${id}, ${`RetiredMigration${id}`})`;
       }
-      // The transaction rolled back: every legacy row is still in place.
-      assert.deepEqual(yield* readIds("effect_sql_migrations"), [
-        ...migrationManifest.filter(([id]) => id <= legacyUpstreamLatestId).map(([id]) => id),
-        ...forkMigrationManifest.map(([id]) => legacyForkRow(id)),
+      yield* sql`INSERT INTO projection_threads (thread_id, project_id, title, created_at, updated_at, managed_worktree_json)
+        VALUES ('thread', 'project', 'Kept', '2026-09-18', '2026-09-18', '{"path":"/tmp/kept"}')`;
+      const before = yield* readLedger(forkMigrationsTable);
+      const result = yield* runAllMigrations();
+      assert.deepEqual(result.upstream, []);
+      assert.deepEqual(
+        result.fork.map(([id]) => id),
+        [7],
+      );
+      assert.deepEqual(yield* readIds(forkMigrationsTable), [1, 2, 3, 4, 5, 6, 7]);
+      assert.deepEqual((yield* readLedger(forkMigrationsTable)).slice(0, 6), before);
+      assert.deepEqual(yield* sql`SELECT managed_worktree_json FROM projection_threads`, [
+        { managed_worktree_json: '{"path":"/tmp/kept"}' },
       ]);
-      assert.deepEqual(yield* readIds(forkMigrationsTable), [forkMigrationEntries.length]);
+      assert.deepEqual(yield* runAllMigrations(), { upstream: [], fork: [] });
     }),
   );
 });

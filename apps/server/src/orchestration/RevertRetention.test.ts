@@ -3,7 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { collectRevertedTurnIds } from "./RevertRetention.ts";
 
 describe("collectRevertedTurnIds", () => {
-  it("uses post-baseline checkpoints, the retraction target, and uncheckpointed head evidence", () => {
+  it("uses post-baseline checkpoints and uncheckpointed head evidence", () => {
     const revertedTurnIds = collectRevertedTurnIds({
       turns: [
         { turnId: "turn-retained", checkpointTurnCount: 2 },
@@ -11,7 +11,6 @@ describe("collectRevertedTurnIds", () => {
         { turnId: "turn-checkpointless-older", checkpointTurnCount: null },
       ],
       baselineTurnCount: 2,
-      retractionTurnId: "turn-retraction-target",
       latestTurnId: "turn-latest-uncheckpointed",
       activeTurnId: "turn-active-uncheckpointed",
     });
@@ -20,7 +19,6 @@ describe("collectRevertedTurnIds", () => {
       "turn-active-uncheckpointed",
       "turn-after-baseline",
       "turn-latest-uncheckpointed",
-      "turn-retraction-target",
     ]);
   });
 
@@ -28,7 +26,6 @@ describe("collectRevertedTurnIds", () => {
     const revertedTurnIds = collectRevertedTurnIds({
       turns: [{ turnId: "turn-retained", checkpointTurnCount: 2 }],
       baselineTurnCount: 2,
-      retractionTurnId: null,
       latestTurnId: "turn-retained",
       activeTurnId: "turn-retained",
     });

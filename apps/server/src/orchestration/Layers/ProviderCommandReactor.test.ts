@@ -72,7 +72,6 @@ import {
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
-import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Clock from "effect/Clock";
 import { ServerSettingsService } from "../../serverSettings.ts";
@@ -285,8 +284,6 @@ describe("ProviderCommandReactor", () => {
     readonly startSessionEffect?: (
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderServiceError>;
-    readonly beforeThreadDetailRead?: (callIndex: number) => Effect.Effect<void>;
-    readonly ensurePreTurnBaselineEffect?: () => Effect.Effect<CheckpointRef | null>;
     readonly missingManagedWorktree?: {
       readonly branch: string;
       readonly path: string;
@@ -378,9 +375,6 @@ describe("ProviderCommandReactor", () => {
         threadId: ThreadId.make("thread-1"),
         turnId: asTurnId("turn-1"),
       }),
-    );
-    const ensurePreTurnBaseline = vi.fn(
-      () => input?.ensurePreTurnBaselineEffect?.() ?? Effect.succeed(null),
     );
     const compactThread = vi.fn((_: ThreadId) => input?.compactThreadEffect?.() ?? Effect.void);
     const interruptTurn = vi.fn((_: unknown) => input?.interruptTurnEffect?.() ?? Effect.void);
@@ -491,7 +485,7 @@ describe("ProviderCommandReactor", () => {
       interruptTurn: interruptTurn as ProviderServiceShape["interruptTurn"],
       respondToRequest: respondToRequest as ProviderServiceShape["respondToRequest"],
       respondToUserInput: respondToUserInput as ProviderServiceShape["respondToUserInput"],
-      discardTransientThread: () => unsupported(),
+
       stopSession: stopSession as ProviderServiceShape["stopSession"],
       listSessions: () => Effect.succeed(runtimeSessions),
       getCapabilities: (_provider) =>
@@ -525,7 +519,7 @@ describe("ProviderCommandReactor", () => {
         });
       },
       rollbackConversation: () => unsupported(),
-      rollbackConversationTo: () => unsupported(),
+
       uploadFeedback: () => unsupported(),
       get streamEvents() {
         return Stream.fromPubSub(runtimeEventPubSub);
@@ -548,32 +542,6 @@ describe("ProviderCommandReactor", () => {
       Layer.provide(RepositoryIdentityResolver.layer),
       Layer.provide(SqlitePersistenceMemory),
     );
-    let threadDetailReadCount = 0;
-    const reactorProjectionSnapshotLayer = Layer.effect(
-      ProjectionSnapshotQuery,
-      Effect.gen(function* () {
-        const query = yield* ProjectionSnapshotQuery;
-        return {
-          ...query,
-          getThreadDetailById: (threadId, options) => {
-            threadDetailReadCount += 1;
-            const beforeRead = input?.beforeThreadDetailRead?.(threadDetailReadCount);
-            return beforeRead === undefined
-              ? query.getThreadDetailById(threadId, options)
-              : beforeRead.pipe(Effect.andThen(query.getThreadDetailById(threadId, options)));
-          },
-          // Turn starts read the message before the retraction gate; the hook
-          // covers that read too so tests can hold a start mid-flight.
-          getTurnStartMessage: (request) => {
-            threadDetailReadCount += 1;
-            const beforeRead = input?.beforeThreadDetailRead?.(threadDetailReadCount);
-            return beforeRead === undefined
-              ? query.getTurnStartMessage(request)
-              : beforeRead.pipe(Effect.andThen(query.getTurnStartMessage(request)));
-          },
-        } satisfies ProjectionSnapshotQuery["Service"];
-      }),
-    ).pipe(Layer.provide(projectionSnapshotLayer));
     let titleRegenerationCompletionDispatchAttempts = 0;
     const reactorOrchestrationLayer = Layer.effect(
       OrchestrationEngineService,
@@ -619,15 +587,8 @@ describe("ProviderCommandReactor", () => {
     ).pipe(Layer.provide(orchestrationLayer));
     const layer = ProviderCommandReactorLive.pipe(
       Layer.provideMerge(reactorOrchestrationLayer),
-      Layer.provideMerge(reactorProjectionSnapshotLayer),
+      Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(Layer.succeed(ProviderService, service)),
-      Layer.provideMerge(
-        Layer.succeed(CheckpointReactor, {
-          ensurePreTurnBaseline,
-          start: () => Effect.void,
-          drain: Effect.void,
-        }),
-      ),
       Layer.provide(Layer.mock(ProviderAuthService, { tryHandlePromptCommand })),
       Layer.provideMerge(makeProviderRegistryLayer(providerSnapshots as never)),
       Layer.provideMerge(
@@ -825,7 +786,6 @@ describe("ProviderCommandReactor", () => {
       generateBranchName,
       generateThreadTitle,
       runtimeSessions,
-      ensurePreTurnBaseline,
       stateDir,
       drain,
       startReactor,
@@ -1155,176 +1115,6 @@ describe("ProviderCommandReactor", () => {
       worktreePath,
     });
   });
-
-  effectIt.effect("cancels an unclaimed retraction before provider session creation", () =>
-    Effect.gen(function* () {
-      const readEntered = yield* Deferred.make<void>();
-      const releaseRead = yield* Deferred.make<void>();
-      const harness = yield* Effect.promise(() =>
-        createHarness({
-          beforeThreadDetailRead: (callIndex) =>
-            callIndex === 1
-              ? Deferred.succeed(readEntered, undefined).pipe(
-                  Effect.andThen(Deferred.await(releaseRead)),
-                )
-              : Effect.void,
-        }),
-      );
-      const messageId = asMessageId("user-message-cancel-before-spawn");
-
-      yield* harness.engine.dispatch({
-        type: "thread.turn.start",
-        commandId: CommandId.make("cmd-turn-start-cancel-before-spawn"),
-        threadId: ThreadId.make("thread-1"),
-        message: {
-          messageId,
-          role: "user",
-          text: "cancel before spawn",
-          attachments: [],
-        },
-        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
-        createdAt: "2026-01-01T00:00:00.000Z",
-      });
-      yield* Deferred.await(readEntered);
-      yield* harness.engine.dispatch({
-        type: "thread.turn.retract",
-        commandId: CommandId.make("cmd-retract-cancel-before-spawn"),
-        threadId: ThreadId.make("thread-1"),
-        messageId,
-        createdAt: "2026-01-01T00:00:00.100Z",
-      });
-      yield* Deferred.succeed(releaseRead, undefined);
-      yield* Effect.promise(() => harness.drain());
-
-      expect(harness.startSession).not.toHaveBeenCalled();
-      expect(harness.sendTurn).not.toHaveBeenCalled();
-      expect(harness.interruptTurn).not.toHaveBeenCalled();
-      const readModel = yield* Effect.promise(() => harness.readModel());
-      expect(readModel.threads[0]?.turnRetraction).toMatchObject({
-        status: "requested",
-        providerSendClaimed: false,
-        providerSendState: "cancelled",
-      });
-    }),
-  );
-
-  effectIt.effect("cancels retract while the provider session is starting", () =>
-    Effect.gen(function* () {
-      const releaseStart = yield* Deferred.make<void>();
-      const harness = yield* Effect.promise(() =>
-        createHarness({
-          startSessionEffect: (session) => Deferred.await(releaseStart).pipe(Effect.as(session)),
-        }),
-      );
-      const messageId = asMessageId("user-message-retract-while-starting");
-
-      yield* harness.engine.dispatch({
-        type: "thread.turn.start",
-        commandId: CommandId.make("cmd-turn-start-retract-while-starting"),
-        threadId: ThreadId.make("thread-1"),
-        message: {
-          messageId,
-          role: "user",
-          text: "retract while starting",
-          attachments: [],
-        },
-        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
-        createdAt: "2026-01-01T00:00:00.000Z",
-      });
-      yield* Effect.promise(() => waitFor(() => harness.startSession.mock.calls.length === 1));
-      yield* harness.engine.dispatch({
-        type: "thread.turn.retract",
-        commandId: CommandId.make("cmd-retract-while-starting"),
-        threadId: ThreadId.make("thread-1"),
-        messageId,
-        createdAt: "2026-01-01T00:00:00.100Z",
-      });
-      yield* Deferred.succeed(releaseStart, undefined);
-      yield* Effect.promise(() => harness.drain());
-
-      expect(harness.sendTurn).not.toHaveBeenCalled();
-      expect(harness.interruptTurn).not.toHaveBeenCalled();
-      const readModel = yield* Effect.promise(() => harness.readModel());
-      expect(readModel.threads[0]?.turnRetraction?.providerSendState).toBe("cancelled");
-    }),
-  );
-
-  effectIt.effect("waits for baseline capture before claiming and sending", () =>
-    Effect.gen(function* () {
-      const releaseBaseline = yield* Deferred.make<void>();
-      const harness = yield* Effect.promise(() =>
-        createHarness({
-          ensurePreTurnBaselineEffect: () =>
-            Deferred.await(releaseBaseline).pipe(
-              Effect.as(CheckpointRef.make("refs/t3/threads/thread-1/turn/0")),
-            ),
-        }),
-      );
-
-      yield* harness.engine.dispatch({
-        type: "thread.turn.start",
-        commandId: CommandId.make("cmd-turn-start-baseline-gated"),
-        threadId: ThreadId.make("thread-1"),
-        message: {
-          messageId: asMessageId("user-message-baseline-gated"),
-          role: "user",
-          text: "wait for baseline",
-          attachments: [],
-        },
-        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
-        createdAt: "2026-01-01T00:00:00.000Z",
-      });
-      yield* Effect.promise(() =>
-        waitFor(() => harness.ensurePreTurnBaseline.mock.calls.length === 1),
-      );
-      expect(harness.sendTurn).not.toHaveBeenCalled();
-
-      yield* Deferred.succeed(releaseBaseline, undefined);
-      yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 1));
-    }),
-  );
-
-  effectIt.effect("classifies a claimed send before any provider runtime event", () =>
-    Effect.gen(function* () {
-      const harness = yield* Effect.promise(() => createHarness());
-      const messageId = asMessageId("user-message-claimed-no-runtime");
-
-      yield* harness.engine.dispatch({
-        type: "thread.turn.start",
-        commandId: CommandId.make("cmd-turn-start-claimed-no-runtime"),
-        threadId: ThreadId.make("thread-1"),
-        message: {
-          messageId,
-          role: "user",
-          text: "claim before runtime",
-          attachments: [],
-        },
-        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
-        createdAt: "2026-01-01T00:00:00.000Z",
-      });
-      yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 1));
-      yield* harness.engine.dispatch({
-        type: "thread.turn.retract",
-        commandId: CommandId.make("cmd-retract-claimed-no-runtime"),
-        threadId: ThreadId.make("thread-1"),
-        messageId,
-        createdAt: "2026-01-01T00:00:00.100Z",
-      });
-      yield* Effect.promise(() => harness.drain());
-
-      const readModel = yield* Effect.promise(() => harness.readModel());
-      expect(readModel.threads[0]?.turnRetraction).toMatchObject({
-        status: "requested",
-        providerSendClaimed: true,
-        providerSendState: "claimed",
-      });
-      expect(harness.interruptTurn).toHaveBeenCalledTimes(1);
-    }),
-  );
 
   effectIt.effect("projects starting before a slow provider session finishes", () =>
     Effect.gen(function* () {

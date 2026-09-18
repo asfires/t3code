@@ -936,7 +936,6 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
           Layer.provide(ServerSettingsService.layerTest()),
           Layer.provide(
             Layer.succeed(CheckpointReactor, {
-              ensurePreTurnBaseline: () => Effect.succeed(null),
               start: () => Effect.void,
               drain: Effect.void,
             }),

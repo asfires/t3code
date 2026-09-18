@@ -223,7 +223,6 @@ export default defineConfig({
         "apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts": 66,
         "apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts": 29,
         "apps/server/src/orchestration/Layers/ThreadDeletionReactor.test.ts": 2,
-        "apps/server/src/orchestration/Layers/TurnRetractionReactor.test.ts": 8,
         "apps/server/src/orchestration/commandInvariants.test.ts": 5,
         "apps/server/src/orchestration/projector.test.ts": 32,
         "apps/server/src/provider/Layers/CodexAdapter.test.ts": 1,

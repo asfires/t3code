@@ -15,11 +15,13 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
+import { createEmptyReadModel, projectEvent } from "../../orchestration/projector.ts";
 import { PersistenceDecodeError } from "../Errors.ts";
 import { OrchestrationEventStore } from "../Services/OrchestrationEventStore.ts";
 import { OrchestrationEventStoreLive } from "./OrchestrationEventStore.ts";
 import { SqlitePersistenceMemory } from "./Sqlite.ts";
 const isPersistenceDecodeError = Schema.is(PersistenceDecodeError);
+const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 function messageEvent(threadId: ThreadId, id: string): Omit<OrchestrationEvent, "sequence"> {
   const now = "2026-01-01T00:00:00.000Z";
@@ -105,6 +107,35 @@ layer("OrchestrationEventStore", (it) => {
       assert.equal(replayed[0]?.metadata.adapterKey, "codex");
       assert.deepEqual(replayed[0]?.metadata.origin, { surface: "cli" });
     }),
+  );
+
+  it.effect(
+    "decodes a stored reverted payload with a leftover retraction key as a plain event",
+    () =>
+      Effect.gen(function* () {
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.make("thread-leftover-key");
+        const now = "2026-01-01T00:00:00.000Z";
+        const appended = yield* eventStore.append({
+          ...messageEvent(threadId, "evt-leftover-key"),
+          type: "thread.reverted",
+          payload: { threadId, turnCount: 0 },
+        });
+        if (appended.type !== "thread.reverted") return assert.fail("Expected reverted event");
+        const storedPayload = { threadId, turnCount: 0, retraction: { requestId: "old-request" } };
+        const payloadJson = yield* encodeJson(storedPayload);
+        yield* sql`UPDATE orchestration_events SET payload_json = ${payloadJson} WHERE event_id = ${appended.eventId}`;
+        const events = yield* Stream.runCollect(
+          eventStore.readFromSequence(appended.sequence - 1, 1),
+        );
+        assert.deepEqual(events[0]?.payload, { threadId, turnCount: 0 });
+        // The projector uses the same default excess-property behavior on payloads.
+        const model = createEmptyReadModel(now);
+        const plain = yield* projectEvent(model, appended);
+        const withLeftoverKey = yield* projectEvent(model, { ...appended, payload: storedPayload });
+        assert.deepEqual(withLeftoverKey, plain);
+      }),
   );
 
   it.effect("fails with PersistenceDecodeError when stored json is invalid", () =>

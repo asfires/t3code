@@ -44,7 +44,6 @@ import {
   type ProviderRuntimeTurnStatus,
   type ProviderSendTurnInput,
   type ProviderSession,
-  type ProviderSessionStartInput,
   type ThreadTokenUsageSnapshot,
   type TurnTokenUsage,
   type ProviderUserInputAnswers,
@@ -258,7 +257,6 @@ interface ClaudeResumeState {
   readonly threadId?: ThreadId;
   readonly resume?: string;
   readonly resumeSessionAt?: string;
-  readonly pinResumeSessionAt?: boolean;
   readonly turnCount?: number;
   readonly turnStartMessageIds?: ReadonlyArray<string | null>;
 }
@@ -277,10 +275,6 @@ interface ClaudeTurnState {
   readonly assistantTextBlocks: Map<number, AssistantTextBlockState>;
   readonly assistantTextBlockOrder: Array<AssistantTextBlockState>;
   readonly capturedProposedPlanKeys: Set<string>;
-  /** The SDK has emitted activity attributable to this queued turn. */
-  sdkProcessingObserved?: boolean;
-  /** Replay one early interrupt after the SDK begins processing the turn. */
-  interruptReplayPending?: boolean;
   latestAssistantUsage: unknown | undefined;
   compactedSinceLatestAssistantUsage: boolean;
   hasSubagents: boolean;
@@ -426,8 +420,6 @@ function rememberPendingTaskModel(
 
 interface ClaudeSessionContext {
   session: ProviderSession;
-  /** Lifetime turns already represented by the cursor used to start this SDK session. */
-  sessionBaseTurnCount: number;
   startInput: Parameters<ClaudeAdapterShape["startSession"]>[0];
   readonly turnStartMessageIds: Array<string | null>;
   readonly promptQueue: Queue.Queue<PromptQueueItem>;
@@ -445,7 +437,6 @@ interface ClaudeSessionContext {
   readonly turns: Array<{
     id: TurnId;
     items: Array<unknown>;
-    lastAssistantUuid: string | undefined;
   }>;
   readonly inFlightTools: Map<number, ToolInFlight>;
   readonly claudeTasks: Map<string, ClaudeTaskState>;
@@ -472,17 +463,13 @@ interface ClaudeSessionContext {
   lastKnownTokenUsage: ThreadTokenUsageSnapshot | undefined;
   lastKnownTotalProcessedTokens: number | undefined;
   lastAssistantUuid: string | undefined;
-  pinResumeSessionAt: boolean;
   lastThreadStartedId: string | undefined;
-  restartInput: ProviderSessionStartInput;
-  recycleBeforeNextTurn: boolean;
   /** Limits already announced for the running turn, keyed `window:resetsAt`. */
   announcedUsageLimits: { turnId: string; keys: Set<string> } | undefined;
   stopped: boolean;
 }
 
 interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
-  readonly interrupt: () => Promise<void>;
   /** SDK Query.stopTask — present on real queries; optional for test doubles. */
   readonly stopTask?: (taskId: string) => Promise<void>;
   readonly setModel: (model?: string) => Promise<void>;
@@ -1003,7 +990,6 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
     resume?: unknown;
     sessionId?: unknown;
     resumeSessionAt?: unknown;
-    pinResumeSessionAt?: unknown;
     turnCount?: unknown;
     turnStartMessageIds?: unknown;
   };
@@ -1022,7 +1008,6 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
   const resume = resumeCandidate && isUuid(resumeCandidate) ? resumeCandidate : undefined;
   const resumeSessionAt =
     typeof cursor.resumeSessionAt === "string" ? cursor.resumeSessionAt : undefined;
-  const pinResumeSessionAt = cursor.pinResumeSessionAt === true;
   const turnCountValue = typeof cursor.turnCount === "number" ? cursor.turnCount : undefined;
   const turnStartMessageIds =
     Array.isArray(cursor.turnStartMessageIds) &&
@@ -1034,7 +1019,6 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
     ...(threadId ? { threadId } : {}),
     ...(resume ? { resume } : {}),
     ...(resumeSessionAt ? { resumeSessionAt } : {}),
-    ...(pinResumeSessionAt ? { pinResumeSessionAt: true } : {}),
     ...(turnStartMessageIds ? { turnStartMessageIds } : {}),
     ...(turnCountValue !== undefined && Number.isInteger(turnCountValue) && turnCountValue >= 0
       ? { turnCount: turnCountValue }
@@ -2232,15 +2216,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }) as ClaudeQueryRuntime);
 
   const sessions = new Map<ThreadId, ClaudeSessionContext>();
-  /**
-   * One send at a time per thread. `sendTurn` can replace the SDK session
-   * (post-rollback recycle), and that replacement takes hundreds of ms during
-   * which the thread looks idle to the orchestration side. A second send
-   * arriving in that window used to race the recycle: both sends called
-   * `startSession`, and whichever session lost the race kept the turn that had
-   * already been opened and offered on it — a turn no live query could ever
-   * settle, so the session stayed "running" forever.
-   */
+  // Serialize sends so concurrent requests cannot overwrite the active turn.
   const sendTurnLocks = yield* Cache.make<ThreadId, Semaphore.Semaphore>({
     capacity: 10_000,
     timeToLive: Duration.minutes(30),
@@ -2333,12 +2309,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       threadId,
       ...(context.resumeSessionId ? { resume: context.resumeSessionId } : {}),
       ...(context.lastAssistantUuid ? { resumeSessionAt: context.lastAssistantUuid } : {}),
-      ...(context.pinResumeSessionAt && context.lastAssistantUuid
-        ? { pinResumeSessionAt: true }
-        : {}),
-      // Completed turns only: an in-flight turn already has its start boundary
-      // recorded but must not count toward the resumable history yet.
-      turnCount: context.sessionBaseTurnCount + context.turns.length,
+      turnCount: context.turnStartMessageIds.length,
       turnStartMessageIds: [...context.turnStartMessageIds],
     };
 
@@ -2956,7 +2927,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     context.turns.push({
       id: turnState.turnId,
       items: [...turnState.items],
-      lastAssistantUuid: context.lastAssistantUuid,
     });
 
     yield* emitThreadTokenUsage(context, usageSnapshot, {
@@ -3642,7 +3612,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     context.lastAssistantUuid = message.uuid;
-    context.pinResumeSessionAt = false;
     yield* updateResumeCursor(context);
   });
 
@@ -3661,11 +3630,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ? "Claude usage limit reached. Send the message again once the limit resets."
         : undefined);
     const { status, errorMessage } = resultOutcome(message, failureHint);
-
-    if (context.turnState) {
-      context.pinResumeSessionAt = false;
-      yield* updateResumeCursor(context);
-    }
 
     if (status === "failed") {
       yield* emitRuntimeError(context, errorMessage ?? "Claude turn failed.");
@@ -4332,58 +4296,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     message: SDKMessage,
   ) {
     yield* logNativeSdkMessage(context, message);
-
-    if (context.recycleBeforeNextTurn) {
-      switch (message.type) {
-        case "assistant":
-        case "result":
-        case "user":
-        case "stream_event":
-        case "tool_progress":
-        case "tool_use_summary":
-        case "auth_status":
-        case "rate_limit_event":
-          return;
-      }
-    }
-
     yield* ensureThreadId(context, message);
 
     // Wire-only command bookkeeping has no user-facing T3 lifecycle.
     if (sdkMessageType(message) === "command_lifecycle") {
       return;
-    }
-
-    const turnState = context.turnState;
-    const sdkTurnActivityObserved =
-      (message.type === "system" &&
-        message.subtype === "status" &&
-        message.status === "requesting") ||
-      message.type === "stream_event" ||
-      message.type === "assistant" ||
-      message.type === "user" ||
-      message.type === "tool_progress";
-    if (turnState && sdkTurnActivityObserved) {
-      turnState.sdkProcessingObserved = true;
-      if (turnState.interruptReplayPending) {
-        turnState.interruptReplayPending = false;
-        yield* Effect.logInfo("claude.turn.interrupt-replay-fired", {
-          threadId: context.session.threadId,
-          turnId: turnState.turnId,
-        });
-        yield* Effect.tryPromise({
-          try: () => context.query.interrupt(),
-          catch: (cause) => toRequestError(context.session.threadId, "turn/interruptReplay", cause),
-        }).pipe(
-          Effect.catch((cause) =>
-            Effect.logWarning("Failed to replay an early Claude turn interrupt.", {
-              threadId: context.session.threadId,
-              turnId: turnState.turnId,
-              cause,
-            }),
-          ),
-        );
-      }
     }
 
     switch (message.type) {
@@ -4484,15 +4401,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   ) {
     if (context.stopped) {
       return;
-    }
-
-    if (context.recycleBeforeNextTurn) {
-      if (Exit.isSuccess(exit)) {
-        return;
-      }
-      if (isClaudeInterruptedCause(exit.cause)) {
-        return;
-      }
     }
 
     if (Exit.isFailure(exit)) {
@@ -5204,11 +5112,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           : {}),
         ...(Object.keys(settings).length > 0 ? { settings } : {}),
         ...(existingResumeSessionId ? { resume: existingResumeSessionId } : {}),
-        ...(existingResumeSessionId &&
-        resumeState?.pinResumeSessionAt === true &&
-        resumeState.resumeSessionAt
-          ? { resumeSessionAt: resumeState.resumeSessionAt }
-          : {}),
         ...(newSessionId ? { sessionId: newSessionId } : {}),
         includePartialMessages: true,
         promptSuggestions: claudeSettings.promptSuggestions,
@@ -5242,7 +5145,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "claude.resume.thread_id": resumeState?.threadId ?? "",
         "claude.resume.session_id": existingResumeSessionId ?? "",
         "claude.resume.session_at": resumeState?.resumeSessionAt ?? "",
-        "claude.resume.pinned": resumeState?.pinResumeSessionAt === true,
         "claude.resume.turn_count": resumeState?.turnCount ?? -1,
         "claude.query.cwd": input.cwd ?? "",
         "claude.query.model": apiModelId ?? "",
@@ -5287,7 +5189,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ...(threadId ? { threadId } : {}),
           ...(sessionId ? { resume: sessionId } : {}),
           ...(resumeState?.resumeSessionAt ? { resumeSessionAt: resumeState.resumeSessionAt } : {}),
-          ...(resumeState?.pinResumeSessionAt === true ? { pinResumeSessionAt: true } : {}),
           turnCount: resumeState?.turnCount ?? 0,
           ...(resumeState?.turnStartMessageIds
             ? { turnStartMessageIds: resumeState.turnStartMessageIds }
@@ -5299,7 +5200,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
       const context: ClaudeSessionContext = {
         session,
-        sessionBaseTurnCount: resumeState?.turnCount ?? 0,
         startInput: input,
         turnStartMessageIds: resumeState?.turnStartMessageIds
           ? [...resumeState.turnStartMessageIds]
@@ -5327,10 +5227,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         lastKnownTokenUsage: undefined,
         lastKnownTotalProcessedTokens: undefined,
         lastAssistantUuid: resumeState?.resumeSessionAt,
-        pinResumeSessionAt: resumeState?.pinResumeSessionAt === true,
         lastThreadStartedId: undefined,
-        restartInput: input,
-        recycleBeforeNextTurn: false,
         announcedUsageLimits: undefined,
         stopped: false,
       };
@@ -5414,15 +5311,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const sendTurnExclusive = Effect.fn("sendTurnExclusive")(function* (
     input: Parameters<ClaudeAdapterShape["sendTurn"]>[0],
   ) {
-    let context = yield* requireSession(input.threadId);
-    if (context.recycleBeforeNextTurn) {
-      yield* startSession({
-        ...context.restartInput,
-        ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
-        resumeCursor: context.session.resumeCursor,
-      });
-      context = yield* requireSession(input.threadId);
-    }
+    const context = yield* requireSession(input.threadId);
     const modelCatalog = yield* modelCatalogEffect;
     const selectedModel =
       input.modelSelection !== undefined && input.modelSelection.instanceId === boundInstanceId
@@ -5577,38 +5466,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   });
 
   const interruptTurn: ClaudeAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(
-    function* (threadId, turnId) {
+    function* (threadId, _turnId) {
       const context = yield* requireSession(threadId);
-      const activeTurnState = context.turnState;
-      if (
-        activeTurnState &&
-        (turnId === undefined || activeTurnState.turnId === turnId) &&
-        activeTurnState.sdkProcessingObserved !== true
-      ) {
-        // `turn.started` intentionally precedes offering the prompt to the
-        // SDK queue. An interrupt in that gap is acknowledged by the SDK but
-        // can be forgotten before query processing begins. Keep one replay
-        // latched until the first per-turn processing signal arrives. The latch
-        // lives on the turn's own state, which is never reused by a later turn,
-        // so it dies with the turn it was armed for.
-        activeTurnState.interruptReplayPending = true;
-        yield* Effect.logInfo("claude.turn.interrupt-replay-armed", {
-          threadId,
-          turnId: activeTurnState.turnId,
-          requestedTurnId: turnId ?? null,
-        });
-      }
       // Stop-everything semantics: users reach for Stop precisely when a
       // fleet ran away. interrupt() alone only ends the parent turn —
       // background subagents/shells keep running and keep burning tokens.
       // Stop every live task first (best-effort per task: one refusal must
-      // not strand the rest or block the turn interrupt), then interrupt.
-      const hadLiveTasks = context.liveTaskIds.size > 0;
+      // not strand the rest or prevent the session from closing).
       if (context.query.stopTask && context.liveTaskIds.size > 0) {
         const liveIds = Array.from(context.liveTaskIds);
         // Bounded: a wedged child's stopTask promise may never settle
         // (Effect.ignore handles rejection, not non-resolution), and the
-        // parent interrupt below MUST still run — Stop matters most during
+        // session close below must still run — Stop matters most during
         // runaway fleets (review finding). Per-task timeout keeps one hung
         // child from consuming the whole budget.
         yield* Effect.forEach(
@@ -5628,7 +5497,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               }
 
               // stopTask only acknowledges the control request. Its separate
-              // task_notification can lose the race with interrupt(), so make
+              // task_notification can lose the race with session shutdown, so make
               // the acknowledged stop authoritative for the durable UI state.
               const stamp = yield* makeEventStamp();
               yield* offerRuntimeEvent({
@@ -5651,17 +5520,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           { concurrency: 8, discard: true },
         ).pipe(Effect.timeoutOption("10 seconds"), Effect.ignore);
       }
-      yield* Effect.tryPromise({
-        try: () => context.query.interrupt(),
-        catch: (cause) => toRequestError(threadId, "turn/interrupt", cause),
-      });
-      // A fleet that spawned background work, or a stop with no turn to
-      // interrupt, is a hard session boundary: interrupt() alone can leave the
-      // CLI alive, so close the query and let the SDK escalate. A plain
-      // in-turn interrupt keeps the session so the turn can be steered.
-      if (hadLiveTasks || !context.turnState) {
-        yield* stopSessionInternal(context);
-      }
+      // Stop is a hard session boundary, including any resumed background work.
+      yield* stopSessionInternal(context);
     },
   );
 
@@ -5671,32 +5531,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return yield* snapshotThread(context);
     },
   );
-
-  const applyRollback = Effect.fn("applyClaudeRollback")(function* (
-    context: ClaudeSessionContext,
-    nextLength: number,
-    sessionBaseTurnCount = context.sessionBaseTurnCount,
-  ) {
-    context.turns.splice(nextLength);
-    context.sessionBaseTurnCount = sessionBaseTurnCount;
-    // The native boundary list backs the cursor's turn count, so trim or pad it
-    // to the retained lifetime count; padded entries are unknown boundaries.
-    const lifetimeTurnCount = context.sessionBaseTurnCount + context.turns.length;
-    if (context.turnStartMessageIds.length > lifetimeTurnCount) {
-      context.turnStartMessageIds.splice(lifetimeTurnCount);
-    }
-    while (context.turnStartMessageIds.length < lifetimeTurnCount) {
-      context.turnStartMessageIds.push(null);
-    }
-    const retainedTurn = context.turns.at(-1);
-    const sessionBase = readClaudeResumeState(context.restartInput.resumeCursor);
-    context.lastAssistantUuid = retainedTurn?.lastAssistantUuid ?? sessionBase?.resumeSessionAt;
-    context.pinResumeSessionAt = context.lastAssistantUuid !== undefined;
-    context.resumeSessionId = retainedTurn ? context.resumeSessionId : sessionBase?.resume;
-    context.recycleBeforeNextTurn = true;
-    yield* updateResumeCursor(context);
-    return yield* snapshotThread(context);
-  });
 
   const rollbackThread: ClaudeAdapterShape["rollbackThread"] = Effect.fn("rollbackThread")(
     function* (threadId, numTurns) {
@@ -5880,163 +5714,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     },
   );
 
-  const validateRollbackBoundary = Effect.fn("validateClaudeRollbackBoundary")(function* (
-    threadId: ThreadId,
-    retainedTurnCount: number,
-    targetTurnId?: TurnId,
-  ) {
-    const context = yield* requireSession(threadId);
-    if (!Number.isInteger(retainedTurnCount) || retainedTurnCount < 0) {
-      return yield* new ProviderAdapterValidationError({
-        provider: PROVIDER,
-        operation: "rollbackThreadTo",
-        issue: "retainedTurnCount must be an integer >= 0.",
-      });
-    }
-    if (targetTurnId !== undefined) {
-      if (context.turnState !== undefined && context.turnState.turnId !== targetTurnId) {
-        return yield* new ProviderAdapterValidationError({
-          provider: PROVIDER,
-          operation: "rollbackThreadTo",
-          issue: `Active provider turn '${context.turnState.turnId}' does not match rollback target '${targetTurnId}'.`,
-        });
-      }
-      const targetIndex = context.turns.findIndex((turn) => turn.id === targetTurnId);
-      const targetIsActive = context.turnState?.turnId === targetTurnId;
-      if (targetIndex < 0 && !targetIsActive) {
-        const lifetimeTurnCount = context.sessionBaseTurnCount + context.turns.length;
-        if (lifetimeTurnCount < retainedTurnCount) {
-          return yield* new ProviderAdapterValidationError({
-            provider: PROVIDER,
-            operation: "rollbackThreadTo",
-            issue: `Provider history has ${lifetimeTurnCount} turns, below retained boundary ${retainedTurnCount}.`,
-          });
-        }
-        // Above the boundary with the target out of view: the session was reopened after
-        // the target settled into the cursor, so the rollback runs by count instead.
-        return;
-      }
-      const retainedSessionTurnCount = targetIndex >= 0 ? targetIndex : context.turns.length;
-      if (retainedSessionTurnCount > retainedTurnCount) {
-        return yield* new ProviderAdapterValidationError({
-          provider: PROVIDER,
-          operation: "rollbackThreadTo",
-          issue: `Provider rollback would retain ${retainedSessionTurnCount} session turns, above retained boundary ${retainedTurnCount}.`,
-        });
-      }
-      return;
-    }
-    const lifetimeTurnCount = context.sessionBaseTurnCount + context.turns.length;
-    if (lifetimeTurnCount < retainedTurnCount) {
-      return yield* new ProviderAdapterValidationError({
-        provider: PROVIDER,
-        operation: "rollbackThreadTo",
-        issue: `Provider history has ${lifetimeTurnCount} turns, below retained boundary ${retainedTurnCount}.`,
-      });
-    }
-  });
-
-  const validateRollbackThreadTo: NonNullable<ClaudeAdapterShape["validateRollbackThreadTo"]> =
-    validateRollbackBoundary;
-
-  const rollbackThreadTo: NonNullable<ClaudeAdapterShape["rollbackThreadTo"]> = Effect.fn(
-    "rollbackThreadTo",
-  )(function* (threadId, retainedTurnCount, targetTurnId) {
-    yield* validateRollbackBoundary(threadId, retainedTurnCount, targetTurnId);
-    const context = yield* requireSession(threadId);
-    if (targetTurnId !== undefined) {
-      const targetIndex = context.turns.findIndex((turn) => turn.id === targetTurnId);
-      const targetIsActive = context.turnState?.turnId === targetTurnId;
-      const lifetimeBeforeRollback = context.sessionBaseTurnCount + context.turns.length;
-      if (targetIndex < 0 && !targetIsActive && lifetimeBeforeRollback > retainedTurnCount) {
-        // An interrupt can close the SDK session, and the reopened one only knows the
-        // cursor: the retracted turn is in the count, not in `turns`. Rewind by count,
-        // forking native history when every boundary is known so the provider forgets
-        // the turn too; otherwise rebase the watermark like a target-less rollback.
-        const numTurns = lifetimeBeforeRollback - retainedTurnCount;
-        const boundariesKnown =
-          context.turnStartMessageIds.length === lifetimeBeforeRollback &&
-          context.turnStartMessageIds.every((id) => id !== null);
-        const snapshot = boundariesKnown
-          ? yield* rollbackThread(threadId, numTurns)
-          : yield* applyRollback(
-              context,
-              Math.max(0, context.turns.length - numTurns),
-              numTurns > context.turns.length ? retainedTurnCount : context.sessionBaseTurnCount,
-            );
-        const after = yield* requireSession(threadId);
-        const resultingLifetimeTurnCount = after.sessionBaseTurnCount + snapshot.turns.length;
-        if (resultingLifetimeTurnCount !== retainedTurnCount) {
-          return yield* new ProviderAdapterRequestError({
-            provider: PROVIDER,
-            method: "thread/rollback-to",
-            detail: `Expected ${retainedTurnCount} retained turns, found ${resultingLifetimeTurnCount}.`,
-          });
-        }
-        return snapshot;
-      }
-      const nextLength = targetIndex >= 0 ? targetIndex : context.turns.length;
-      const retainedTurns = context.turns.slice(0, nextLength);
-      const nextSessionBaseTurnCount = retainedTurnCount - nextLength;
-
-      // A concrete orchestration turn id is stronger rollback evidence than
-      // Claude's logical lifetime count, which can lag after older resume
-      // cursors or projection repairs. Remove the target and every later local
-      // turn, then rebase the cursor watermark to T3's retained boundary.
-      // If the target is already absent, preserve all visible local turns: a
-      // prior attempt may have completed before its receipt was persisted.
-      const snapshot = yield* applyRollback(context, nextLength, nextSessionBaseTurnCount);
-      if (snapshot.turns.some((turn) => turn.id === targetTurnId)) {
-        return yield* new ProviderAdapterRequestError({
-          provider: PROVIDER,
-          method: "thread/rollback-to",
-          detail: `Provider history still contains retracted turn '${targetTurnId}'.`,
-        });
-      }
-      if (
-        snapshot.turns.length !== retainedTurns.length ||
-        snapshot.turns.some((turn, index) => turn.id !== retainedTurns[index]?.id)
-      ) {
-        return yield* new ProviderAdapterRequestError({
-          provider: PROVIDER,
-          method: "thread/rollback-to",
-          detail: `Provider rollback for '${targetTurnId}' did not preserve the preceding turn history.`,
-        });
-      }
-      const resultingLifetimeTurnCount = context.sessionBaseTurnCount + snapshot.turns.length;
-      if (resultingLifetimeTurnCount !== retainedTurnCount) {
-        return yield* new ProviderAdapterRequestError({
-          provider: PROVIDER,
-          method: "thread/rollback-to",
-          detail: `Expected ${retainedTurnCount} retained turns, found ${resultingLifetimeTurnCount}.`,
-        });
-      }
-      return snapshot;
-    }
-    const lifetimeTurnCount = context.sessionBaseTurnCount + context.turns.length;
-    const delta = lifetimeTurnCount - retainedTurnCount;
-    const sessionLocalTurnCount = context.turns.length;
-    const nextLength = sessionLocalTurnCount - Math.min(delta, sessionLocalTurnCount);
-    // When the requested boundary predates this SDK session, Claude only gives
-    // us the cursor that opened the session, not intermediate historical
-    // watermarks. Retain that oldest available resume position while moving
-    // the logical lifetime boundary to the requested count.
-    const nextSessionBaseTurnCount =
-      delta > sessionLocalTurnCount ? retainedTurnCount : context.sessionBaseTurnCount;
-    // Always apply the rewind, including a zero completed-turn delta: the SDK
-    // query may still hold a just-interrupted prompt in process memory.
-    const snapshot = yield* applyRollback(context, nextLength, nextSessionBaseTurnCount);
-    const resultingLifetimeTurnCount = context.sessionBaseTurnCount + snapshot.turns.length;
-    if (resultingLifetimeTurnCount !== retainedTurnCount) {
-      return yield* new ProviderAdapterRequestError({
-        provider: PROVIDER,
-        method: "thread/rollback-to",
-        detail: `Expected ${retainedTurnCount} retained turns, found ${resultingLifetimeTurnCount}.`,
-      });
-    }
-    return snapshot;
-  });
-
   const respondToRequest: ClaudeAdapterShape["respondToRequest"] = Effect.fn("respondToRequest")(
     function* (threadId, requestId, decision) {
       const context = yield* requireSession(threadId);
@@ -6128,8 +5805,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     interruptTurn,
     readThread,
     rollbackThread,
-    validateRollbackThreadTo,
-    rollbackThreadTo,
     respondToRequest,
     respondToUserInput,
     stopSession,

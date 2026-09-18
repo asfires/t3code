@@ -1252,7 +1252,6 @@ export interface ChatComposerHandle {
   toggleModelPicker: () => void;
   openControl: (command: KeybindingCommand) => void;
   isModelPickerOpen: () => boolean;
-  isEscapeGateOpen: () => boolean;
   compactContext: () => void;
   readSnapshot: () => {
     value: string;
@@ -6053,8 +6052,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       },
       compactContext: compactThreadContext,
       isModelPickerOpen: () => isComposerModelPickerOpen,
-      isEscapeGateOpen: () =>
-        composerMenuOpenRef.current || isStashMenuOpen || isComposerModelPickerOpen,
       readSnapshot: () => {
         return readComposerSnapshot();
       },

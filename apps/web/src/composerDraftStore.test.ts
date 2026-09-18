@@ -1846,7 +1846,6 @@ describe("composerDraftStore project draft thread mapping", () => {
             worktreePath: null,
             envMode: "local",
             startFromOrigin: false,
-            hidden: false,
             seededFromDefaults: true,
             promotedTo: null,
           },

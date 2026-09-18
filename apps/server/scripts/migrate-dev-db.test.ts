@@ -145,7 +145,7 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
         Effect.gen(function* () {
           const sql = yield* SqlClient.SqlClient;
           yield* sql`UPDATE effect_sql_migrations_fork
-            SET name = 'SomebodyElsesForkMigration' WHERE migration_id = 1`;
+            SET name = 'SomebodyElsesForkMigration' WHERE migration_id = 3`;
         }),
       );
 
@@ -156,7 +156,7 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
       assert.equal(error._tag, "MigrateDevDbSlotCollisionError");
       if (error._tag === "MigrateDevDbSlotCollisionError") {
         assert.equal(error.ledger, "effect_sql_migrations_fork");
-        assert.equal(error.slot, 1);
+        assert.equal(error.slot, 3);
         assert.equal(error.appliedName, "SomebodyElsesForkMigration");
       }
     }),

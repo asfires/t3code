@@ -26,7 +26,6 @@ import type {
   MessageId,
   ThreadId,
   ProviderTurnStartResult,
-  TurnId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
@@ -90,15 +89,6 @@ export interface ProviderServiceShape {
   ) => Effect.Effect<void, ProviderServiceError>;
 
   /**
-   * Permanently discard the provider-owned thread for a conversation that T3
-   * has already durably identified as transient. Unsupported providers and
-   * inactive sessions are left untouched.
-   */
-  readonly discardTransientThread: (
-    input: ProviderStopSessionInput,
-  ) => Effect.Effect<void, ProviderServiceError>;
-
-  /**
    * List active provider sessions.
    *
    * Aggregates runtime session lists from all registered adapters.
@@ -129,23 +119,6 @@ export interface ProviderServiceShape {
   readonly rollbackConversation: (input: {
     readonly threadId: ThreadId;
     readonly numTurns: number;
-  }) => Effect.Effect<void, ProviderServiceError>;
-
-  /**
-   * Roll back provider conversation state to an absolute retained-turn
-   * boundary. Repeating the same target is harmless.
-   */
-  readonly rollbackConversationTo: (input: {
-    readonly threadId: ThreadId;
-    readonly retainedTurnCount: number;
-    readonly targetTurnId?: TurnId;
-  }) => Effect.Effect<void, ProviderServiceError>;
-
-  /** Validate an absolute rollback boundary without mutating provider state. */
-  readonly validateRollbackConversationTo?: (input: {
-    readonly threadId: ThreadId;
-    readonly retainedTurnCount: number;
-    readonly targetTurnId?: TurnId;
   }) => Effect.Effect<void, ProviderServiceError>;
 
   /**

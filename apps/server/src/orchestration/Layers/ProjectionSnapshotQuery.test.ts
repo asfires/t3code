@@ -3,7 +3,6 @@ import {
   ChatAttachment,
   ComposerContextId,
   CheckpointRef,
-  CommandId,
   EventId,
   MessageId,
   ProjectId,
@@ -368,36 +367,6 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         )
       `;
 
-      yield* sql`
-        INSERT INTO projection_turn_retractions (
-          request_id,
-          thread_id,
-          message_id,
-          baseline_turn_count,
-          baseline_checkpoint_ref,
-          target_turn_id,
-          provider_send_claimed,
-          first_user_message,
-          requested_at,
-          status,
-          completed_at,
-          failed_at
-        ) VALUES (
-          'cmd-retract-1',
-          'thread-1',
-          'message-user-1',
-          1,
-          'checkpoint-1',
-          'turn-1',
-          1,
-          0,
-          '2026-02-24T00:00:08.500Z',
-          'requested',
-          NULL,
-          NULL
-        )
-      `;
-
       let sequence = 5;
       for (const projector of Object.values(ORCHESTRATION_PROJECTOR_NAMES)) {
         yield* sql`
@@ -518,20 +487,6 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           pinOrderKey: "gm",
           activeOrderKey: "hq",
           titleRegeneration: null,
-          turnRetraction: {
-            requestId: CommandId.make("cmd-retract-1"),
-            messageId: MessageId.make("message-user-1"),
-            baselineTurnCount: 1,
-            baselineCheckpointRef: CheckpointRef.make("checkpoint-1"),
-            targetTurnId: TurnId.make("turn-1"),
-            providerSendClaimed: true,
-            providerSendState: "claimed",
-            firstUserMessage: false,
-            requestedAt: "2026-02-24T00:00:08.500Z",
-            status: "requested",
-            completedAt: null,
-            failedAt: null,
-          },
           titleState: null,
           deletedAt: null,
           messages: [
@@ -589,11 +544,6 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           },
         },
       ]);
-
-      const retractionReadModel = yield* snapshotQuery.getCommandReadModel();
-      assert.equal(retractionReadModel.threads[0]?.turnRetraction?.requestId, "cmd-retract-1");
-      assert.equal(retractionReadModel.threads[0]?.messages[0]?.text, "hello from projection");
-      assert.equal(retractionReadModel.threads[0]?.activities[0]?.kind, "runtime.note");
 
       const shellSnapshot = yield* snapshotQuery.getShellSnapshot();
       assert.equal(shellSnapshot.snapshotSequence, 5);
@@ -796,7 +746,6 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           title: "Thread 1",
           titleState: null,
           session: snapshot.threads[0]?.session ?? null,
-          completedRetractionTurnId: null,
         });
       }
 

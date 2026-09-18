@@ -12,7 +12,6 @@ import { usePrimaryEnvironmentId } from "../state/environments";
 import { selectProjectGroupingSettings } from "../logicalProject";
 import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
 import { dispatchPreviewAction } from "../components/preview/previewActionBus";
-import { RetractionRecoveryHandoff } from "../components/chat/RetractionRecoveryHandoff";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { isPreviewFocused } from "../lib/previewFocus";
@@ -178,7 +177,6 @@ function ChatRouteGlobalShortcuts() {
 }
 
 function ChatRouteLayout() {
-  const navigate = Route.useNavigate();
   // Both thread routes render here, not in their own leaf components, so the
   // draft-to-thread promotion keeps one ChatView mounted across the swap.
   const threadTarget = useParams({
@@ -189,7 +187,6 @@ function ChatRouteLayout() {
     <>
       <ChatRouteGlobalShortcuts />
       {threadTarget ? <ThreadRouteView target={threadTarget} /> : <Outlet />}
-      <RetractionRecoveryHandoff navigate={navigate} />
     </>
   );
 }

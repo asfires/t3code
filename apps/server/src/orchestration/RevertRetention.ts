@@ -4,13 +4,12 @@ interface RevertTurnEvidence {
 }
 
 /**
- * Checkpoints prove which turns cross the baseline. The retraction target is
- * authoritative; latest/session ids cover current work that has no checkpoint.
+ * Checkpoints prove which turns cross the baseline; latest/session ids cover
+ * current work that has no checkpoint.
  */
 export function collectRevertedTurnIds(input: {
   readonly turns: ReadonlyArray<RevertTurnEvidence>;
   readonly baselineTurnCount: number;
-  readonly retractionTurnId: string | null;
   readonly latestTurnId: string | null;
   readonly activeTurnId: string | null;
 }): ReadonlySet<string> {
@@ -26,10 +25,6 @@ export function collectRevertedTurnIds(input: {
     } else {
       retainedCheckpointTurnIds.add(turn.turnId);
     }
-  }
-
-  if (input.retractionTurnId !== null) {
-    revertedTurnIds.add(input.retractionTurnId);
   }
 
   for (const fallbackTurnId of [input.latestTurnId, input.activeTurnId]) {

@@ -11,16 +11,13 @@ import {
   type VcsStatusLocalResult,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
-import * as Cache from "effect/Cache";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
-import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Option from "effect/Option";
-import * as Semaphore from "effect/Semaphore";
 import type * as PlatformError from "effect/PlatformError";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
@@ -95,11 +92,6 @@ const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
-  const baselineCaptureLocks = yield* Cache.make<string, Semaphore.Semaphore>({
-    capacity: 10_000,
-    timeToLive: Duration.minutes(30),
-    lookup: () => Semaphore.make(1),
-  });
   const pullRequests = yield* PullRequestService.PullRequestService;
   const queuedEntryRefreshes = new Set<string>();
   const entryRefreshWorker = yield* makeDrainableWorker((cwd: string) =>
@@ -245,57 +237,6 @@ const make = Effect.gen(function* () {
       return undefined;
     }
     return cwd;
-  });
-
-  const ensurePreTurnBaseline: CheckpointReactorShape["ensurePreTurnBaseline"] = Effect.fn(
-    "ensurePreTurnBaseline",
-  )(function* (input) {
-    const lock = yield* Cache.get(baselineCaptureLocks, input.threadId);
-    return yield* lock.withPermit(
-      Effect.gen(function* () {
-        const thread = yield* resolveThreadDetail(input.threadId);
-        if (!thread) {
-          return null;
-        }
-
-        const projects = yield* resolveThreadProjects(thread.projectId);
-        const checkpointCwd = yield* resolveCheckpointCwd({
-          threadId: input.threadId,
-          thread,
-          projects,
-          preferSessionRuntime: false,
-        });
-        // Non-Git workspaces have no hidden checkpoint ref. Provider work can
-        // proceed, but a later retract can only restore files best-effort.
-        if (!checkpointCwd) {
-          return null;
-        }
-
-        const currentTurnCount = thread.checkpoints.reduce(
-          (maxTurnCount, checkpoint) => Math.max(maxTurnCount, checkpoint.checkpointTurnCount),
-          0,
-        );
-        const baselineCheckpointRef = checkpointRefForThreadTurn(input.threadId, currentTurnCount);
-        const baselineExists = yield* checkpointStore.hasCheckpointRef({
-          cwd: checkpointCwd,
-          checkpointRef: baselineCheckpointRef,
-        });
-        if (!baselineExists) {
-          yield* checkpointStore.captureCheckpoint({
-            cwd: checkpointCwd,
-            checkpointRef: baselineCheckpointRef,
-          });
-          yield* receiptBus.publish({
-            type: "checkpoint.baseline.captured",
-            threadId: input.threadId,
-            checkpointTurnCount: currentTurnCount,
-            checkpointRef: baselineCheckpointRef,
-            createdAt: input.createdAt,
-          });
-        }
-        return baselineCheckpointRef;
-      }),
-    );
   });
 
   // Capture the completed turn's files, then publish its summary and receipts.
@@ -524,8 +465,44 @@ const make = Effect.gen(function* () {
         return;
       }
 
-      yield* ensurePreTurnBaseline({
-        threadId: event.threadId,
+      const thread = yield* resolveThreadDetail(event.threadId);
+      if (!thread) {
+        return;
+      }
+
+      const projects = yield* resolveThreadProjects(thread.projectId);
+      const checkpointCwd = yield* resolveCheckpointCwd({
+        threadId: thread.id,
+        thread,
+        projects,
+        preferSessionRuntime: false,
+      });
+      if (!checkpointCwd) {
+        return;
+      }
+
+      const currentTurnCount = thread.checkpoints.reduce(
+        (maxTurnCount, checkpoint) => Math.max(maxTurnCount, checkpoint.checkpointTurnCount),
+        0,
+      );
+      const baselineCheckpointRef = checkpointRefForThreadTurn(thread.id, currentTurnCount);
+      const baselineExists = yield* checkpointStore.hasCheckpointRef({
+        cwd: checkpointCwd,
+        checkpointRef: baselineCheckpointRef,
+      });
+      if (baselineExists) {
+        return;
+      }
+
+      yield* checkpointStore.captureCheckpoint({
+        cwd: checkpointCwd,
+        checkpointRef: baselineCheckpointRef,
+      });
+      yield* receiptBus.publish({
+        type: "checkpoint.baseline.captured",
+        threadId: thread.id,
+        checkpointTurnCount: currentTurnCount,
+        checkpointRef: baselineCheckpointRef,
         createdAt: event.createdAt,
       });
     },
@@ -699,8 +676,45 @@ const make = Effect.gen(function* () {
       }
     }
 
-    yield* ensurePreTurnBaseline({
-      threadId: event.payload.threadId,
+    const threadId = event.payload.threadId;
+    const thread = yield* resolveThreadDetail(threadId);
+    if (!thread) {
+      return;
+    }
+
+    const projects = yield* resolveThreadProjects(thread.projectId);
+    const checkpointCwd = yield* resolveCheckpointCwd({
+      threadId,
+      thread,
+      projects,
+      preferSessionRuntime: false,
+    });
+    if (!checkpointCwd) {
+      return;
+    }
+
+    const currentTurnCount = thread.checkpoints.reduce(
+      (maxTurnCount, checkpoint) => Math.max(maxTurnCount, checkpoint.checkpointTurnCount),
+      0,
+    );
+    const baselineCheckpointRef = checkpointRefForThreadTurn(threadId, currentTurnCount);
+    const baselineExists = yield* checkpointStore.hasCheckpointRef({
+      cwd: checkpointCwd,
+      checkpointRef: baselineCheckpointRef,
+    });
+    if (baselineExists) {
+      return;
+    }
+
+    yield* checkpointStore.captureCheckpoint({
+      cwd: checkpointCwd,
+      checkpointRef: baselineCheckpointRef,
+    });
+    yield* receiptBus.publish({
+      type: "checkpoint.baseline.captured",
+      threadId,
+      checkpointTurnCount: currentTurnCount,
+      checkpointRef: baselineCheckpointRef,
       createdAt: event.occurredAt,
     });
   });
@@ -857,15 +871,7 @@ const make = Effect.gen(function* () {
       yield* refreshWorkspaceEntries(checkpointCwd);
     }
 
-    // A just-interrupted turn is already present in Claude/Codex provider
-    // history, but its completion checkpoint can still be in flight.
-    const hasSettledUncheckpointedLatestTurn =
-      thread.latestTurn !== null &&
-      thread.latestTurn.state !== "running" &&
-      !thread.checkpoints.some((checkpoint) => checkpoint.turnId === thread.latestTurn?.turnId);
-    const currentConversationTurnCount =
-      currentTurnCount + (hasSettledUncheckpointedLatestTurn ? 1 : 0);
-    const rolledBackTurns = Math.max(0, currentConversationTurnCount - event.payload.turnCount);
+    const rolledBackTurns = Math.max(0, currentTurnCount - event.payload.turnCount);
     if (rolledBackTurns > 0) {
       yield* providerService.rollbackConversation({
         threadId: event.payload.threadId,
@@ -1052,7 +1058,6 @@ const make = Effect.gen(function* () {
   });
 
   return {
-    ensurePreTurnBaseline,
     start,
     drain: worker.drain.pipe(
       Effect.andThen(statusRefreshWorker.drain),

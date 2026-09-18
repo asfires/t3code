@@ -117,13 +117,6 @@ export interface ProviderAdapterShape<TError> {
   readonly stopSession: (threadId: ThreadId) => Effect.Effect<void, TError>;
 
   /**
-   * Permanently discard a provider-owned thread that T3 has already decided
-   * is transient. This is intentionally optional: callers must have their own
-   * durable proof that the conversation should not be retained.
-   */
-  readonly discardTransientThread?: (threadId: ThreadId) => Effect.Effect<void, TError>;
-
-  /**
    * List currently active provider sessions for this adapter.
    */
   readonly listSessions: () => Effect.Effect<ReadonlyArray<ProviderSession>>;
@@ -145,29 +138,6 @@ export interface ProviderAdapterShape<TError> {
     threadId: ThreadId,
     numTurns: number,
   ) => Effect.Effect<ProviderThreadSnapshot, TError>;
-
-  /**
-   * Roll back to an absolute retained-turn boundary. Implementations must
-   * inspect and verify provider history so retries are idempotent. Adapters
-   * without a native implementation use ProviderService's read/relative/read
-   * compatibility shim.
-   */
-  readonly rollbackThreadTo?: (
-    threadId: ThreadId,
-    retainedTurnCount: number,
-    targetTurnId?: TurnId,
-  ) => Effect.Effect<ProviderThreadSnapshot, TError>;
-
-  /**
-   * Validate an absolute rollback boundary without changing provider state.
-   * Adapters that track history relative to an opaque resume cursor use this
-   * to reject an unavailable boundary before a live turn is interrupted.
-   */
-  readonly validateRollbackThreadTo?: (
-    threadId: ThreadId,
-    retainedTurnCount: number,
-    targetTurnId?: TurnId,
-  ) => Effect.Effect<void, TError>;
 
   /**
    * Upload a thread to the provider when the adapter supports feedback.

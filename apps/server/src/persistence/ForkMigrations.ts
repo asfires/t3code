@@ -16,38 +16,20 @@
 
 import * as Migrator from "effect/unstable/sql/Migrator";
 import * as Effect from "effect/Effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { runMigrations } from "./Migrations.ts";
-import ForkMigration001 from "./ForkMigrations/001_ProjectionTurnRetractions.ts";
-import ForkMigration002 from "./ForkMigrations/002_ProjectionTurnDispatchOwnership.ts";
+import ForkMigration007 from "./ForkMigrations/007_DropTurnRetractionTables.ts";
 import ForkMigration003 from "./ForkMigrations/003_ProjectionManagedWorktrees.ts";
-import ForkMigration004 from "./ForkMigrations/004_CleanupCompletedRetractionMessages.ts";
-import ForkMigration005 from "./ForkMigrations/005_RebuildProjectionsFromEvents.ts";
-import ForkMigration006 from "./ForkMigrations/006_RebuildProjectionsWithRetainedTurns.ts";
 
 export const forkMigrationsTable = "effect_sql_migrations_fork";
-const upstreamMigrationsTable = "effect_sql_migrations";
 
+// Retraction migration IDs 1, 2, 4, 5, and 6 are retired; never reuse them.
 export const forkMigrationEntries = [
-  [1, "ProjectionTurnRetractions", ForkMigration001],
-  [2, "ProjectionTurnDispatchOwnership", ForkMigration002],
   [3, "ProjectionManagedWorktrees", ForkMigration003],
-  [4, "CleanupCompletedRetractionMessages", ForkMigration004],
-  [5, "RebuildProjectionsFromEvents", ForkMigration005],
-  [6, "RebuildProjectionsWithRetainedTurns", ForkMigration006],
+  [7, "DropTurnRetractionTables", ForkMigration007],
 ] as const;
 
 export const forkMigrationManifest = forkMigrationEntries.map(([id, name]) => [id, name] as const);
-
-/**
- * Before the split, fork migrations 1..6 shipped as 041..046 in the upstream
- * ledger. Databases that applied them there carry those rows, so the first
- * boot on this code moves them into the fork ledger under their fork IDs.
- * Rows are matched by ID and name, so an upstream migration that later takes
- * one of those numbers is left alone.
- */
-const legacyUpstreamIdOffset = 40;
 
 const makeForkMigrationLoader = (throughId?: number) =>
   Migrator.fromRecord(
@@ -59,63 +41,6 @@ const makeForkMigrationLoader = (throughId?: number) =>
   );
 
 const run = Migrator.make({});
-
-const adoptLegacyForkLedgerRows = Effect.fn("adoptLegacyForkLedgerRows")(function* () {
-  const sql = yield* SqlClient.SqlClient;
-  const upstreamLedger = yield* sql<{ readonly name: string }>`
-    SELECT name FROM sqlite_master WHERE type = 'table' AND name = ${upstreamMigrationsTable}
-  `;
-  if (upstreamLedger.length === 0) {
-    return;
-  }
-  // Same shape the Migrator creates for sqlite, so it adopts the table as-is.
-  yield* sql`
-    CREATE TABLE IF NOT EXISTS ${sql(forkMigrationsTable)} (
-      migration_id integer PRIMARY KEY NOT NULL,
-      created_at datetime NOT NULL DEFAULT current_timestamp,
-      name VARCHAR(255) NOT NULL
-    )
-  `;
-  yield* sql.withTransaction(
-    Effect.forEach(
-      forkMigrationEntries,
-      ([id, name]) => {
-        const legacyId = legacyUpstreamIdOffset + id;
-        return Effect.gen(function* () {
-          const legacy = yield* sql<{ readonly createdAt: string }>`
-            SELECT created_at AS "createdAt"
-            FROM ${sql(upstreamMigrationsTable)}
-            WHERE migration_id = ${legacyId} AND name = ${name}
-          `;
-          if (legacy.length === 0) {
-            return;
-          }
-          const existing = yield* sql<{ readonly name: string }>`
-            SELECT name FROM ${sql(forkMigrationsTable)} WHERE migration_id = ${id}
-          `;
-          if (existing.length === 0) {
-            yield* sql`
-              INSERT INTO ${sql(forkMigrationsTable)} (migration_id, created_at, name)
-              VALUES (${id}, ${legacy[0]!.createdAt}, ${name})
-            `;
-          } else if (existing[0]!.name !== name) {
-            // Deleting the legacy row here would lose the only record that the
-            // fork migration ran; refuse instead of silently skipping it.
-            return yield* new Migrator.MigrationError({
-              kind: "BadState",
-              message: `Fork migration ledger slot ${id} holds "${existing[0]!.name}" but upstream ledger row ${legacyId} records "${name}"`,
-            });
-          }
-          yield* sql`
-            DELETE FROM ${sql(upstreamMigrationsTable)}
-            WHERE migration_id = ${legacyId} AND name = ${name}
-          `;
-        });
-      },
-      { discard: true },
-    ),
-  );
-});
 
 export interface RunForkMigrationsOptions {
   readonly toMigrationInclusive?: number | undefined;
@@ -139,13 +64,8 @@ export const runForkMigrations = Effect.fn("runForkMigrations")(function* ({
   return executedMigrations;
 });
 
-/**
- * Boot entry point: adopt legacy fork ledger rows, run upstream migrations,
- * then run fork migrations. Adoption must come first so upstream's high-water
- * mark drops back to upstream's own latest migration before it is consulted.
- */
+/** Run upstream migrations, then the independent fork migrations. */
 export const runAllMigrations = Effect.fn("runAllMigrations")(function* () {
-  yield* adoptLegacyForkLedgerRows();
   const upstream = yield* runMigrations();
   const fork = yield* runForkMigrations();
   return { upstream, fork };

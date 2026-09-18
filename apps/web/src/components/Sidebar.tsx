@@ -124,6 +124,7 @@ import {
   readThreadShell,
   useAllEnvironmentProjectSnapshotsReady,
   useProjects,
+  useThreadShells,
 } from "../state/entities";
 import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../state/server";
 import { vcsEnvironment } from "../state/vcs";
@@ -179,8 +180,6 @@ import {
   type SidebarListMarker,
   type SidebarSection,
 } from "./Sidebar.logic";
-import { useRetractedTurnPresentationSuppressed } from "./chat/retractedTurnPresentation";
-import { useDiscoverableThreadShells } from "./chat/useDiscoverableThreadShells";
 import { resolveLocalCheckoutBranchMismatch } from "./BranchToolbar.logic";
 import {
   createSidebarCollisionDetection,
@@ -923,7 +922,7 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
     // new-thread surfaces mint fresh drafts and leave invested ones behind
     // unmapped, so the mapping only knows about the latest per project.
     for (const [draftKey, session] of Object.entries(draftThreadsByThreadKey)) {
-      if (session.hidden || session.promotedTo != null) {
+      if (session.promotedTo != null) {
         continue;
       }
       if (
@@ -1174,16 +1173,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // Same semantics as the legacy sidebar (never-visited counts as read):
   // switching sidebars must not light up every historical thread as unread.
   const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
-  // A turn the user just popped back into the composer is still settling on
-  // the server. The row keeps its pre-turn presentation until it lands, so the
-  // retraction never flashes a Working badge here.
-  const retractedTurnSuppressed = useRetractedTurnPresentationSuppressed({
-    threadRef,
-    activeTurnId: thread.session?.activeTurnId ?? null,
-  });
-  const status = resolveSidebarThreadStatus(thread, {
-    suppressRunningTurn: retractedTurnSuppressed,
-  });
+  const status = resolveSidebarThreadStatus(thread);
   // A woken thread reappears at its original position (the sort is
   // deliberately static), so the pill has to carry the weight. Snoozing is
   // an explicit act, so the pill clears only when the user re-engages:
@@ -2224,7 +2214,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
 export default function Sidebar() {
   const projects = useProjects();
   const projectOrder = useUiStateStore((store) => store.projectOrder);
-  const threads = useDiscoverableThreadShells();
+  const threads = useThreadShells();
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);

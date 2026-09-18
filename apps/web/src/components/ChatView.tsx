@@ -19,7 +19,6 @@ import { useAttachmentUploadStore } from "../lib/attachmentUploadQueue";
 import {
   type AssistantCitation,
   type ApprovalRequestId,
-  type CommandId,
   type ChatFileAttachment,
   DEFAULT_MODEL,
   type EnvironmentId,
@@ -312,7 +311,7 @@ import {
   type TerminalContextDraft,
   type TerminalContextSelection,
 } from "../lib/terminalContext";
-import { type PastedTextDraft, pastedTextSummary } from "../lib/pastedTextContext";
+import { pastedTextSummary } from "../lib/pastedTextContext";
 import {
   ensureInlineContextReferences,
   removeInlineContextReference,
@@ -368,30 +367,8 @@ import {
 } from "../state/entities";
 import { environmentShell } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
-import {
-  findLastUserMessagePopCandidate,
-  isLastUserMessagePopWindowOpen,
-} from "./chat/lastUserMessagePop";
-import { createPreDispatchCancellationLatch } from "./chat/preDispatchCancellationLatch";
-import { createPendingRetractionSendGate } from "./chat/pendingRetractionSendGate";
-import {
-  hideOptimisticallyRetractedMessage,
-  unhideOptimisticallyRetractedMessage,
-} from "./chat/optimisticRetraction";
-import {
-  CHAT_FLOATING_LAYER_SELECTOR,
-  runChatEscapeAction,
-  shouldHandleChatEscape,
-} from "./chat/chatEscapeTrigger";
 import { createPageScrollController, type PageScrollKey } from "./chat/pageScrollController";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
-import { shouldRenderEmptyThreadHero } from "./chat/emptyThreadHero";
-import { findCorrelatedRetractionFailureInfo } from "./chat/lastUserMessageRecovery";
-import {
-  deriveEffectiveSessionPresentation,
-  usePendingRetractionForThread,
-} from "./chat/retractedTurnPresentation";
-import { useLastUserMessageRetraction } from "./chat/useLastUserMessageRetraction";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
@@ -565,18 +542,6 @@ const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_USAGE_LIMIT_SOURCES: UsageLimitSourceSnapshots = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
 const EMPTY_PENDING_USER_INPUT_ANSWERS: Record<string, PendingUserInputDraftAnswer> = {};
-const sentMessageRecoveryContextByMessageId = new Map<
-  MessageId,
-  {
-    envMode: DraftThreadEnvMode;
-    baseBranch: string | null;
-    startFromOrigin: boolean;
-    prompt: string;
-    images: ComposerImageAttachment[];
-    files: ComposerFileAttachment[];
-    pastedTexts: PastedTextDraft[];
-  }
->();
 function useDraftHeroLayoutTransition(isDraftHeroState: boolean) {
   const transitionGroupRef = useRef<HTMLDivElement | null>(null);
   const composerAnchorRef = useRef<HTMLDivElement | null>(null);
@@ -1724,9 +1689,6 @@ export default function ChatView(props: ChatViewProps) {
     return () => revokeBlobPreviewUrl(src);
   }, [expandedImage]);
   const [optimisticUserMessages, setOptimisticUserMessages] = useState<ChatMessage[]>([]);
-  const [optimisticRetractionsByMessageId, setOptimisticRetractionsByMessageId] = useState<
-    Record<string, CommandId>
-  >({});
   // Last live snapshot from the setup stream. The server drops a finished
   // snapshot after a grace period and emits null; holding it here bridges the
   // gap until the settled activity arrives on the thread projection.
@@ -1853,7 +1815,6 @@ export default function ChatView(props: ChatViewProps) {
   const multipleModelSelectionsRef = useRef(multipleModelSelections);
   multipleModelSelectionsRef.current = multipleModelSelections;
   const uncertainMultipleSubmissionsRef = fanoutState.uncertainSubmissions;
-  const preDispatchCancellationLatchRef = useRef(createPreDispatchCancellationLatch());
   const environmentUnavailableSendToastSlotRef = useRef(0);
   const feedbackUploadsInFlightRef = useRef(new Set<string>());
   const terminalUiOpenByThreadRef = useRef<Record<string, boolean>>({});
@@ -1959,19 +1920,8 @@ export default function ChatView(props: ChatViewProps) {
   // depend on which route is mounted.
   const isServerThread = activeServerThread !== null;
   const activeThread = activeServerThread ?? localDraftThread;
-  const retractionFailure =
-    activeServerThread?.turnRetraction?.status === "failed"
-      ? findCorrelatedRetractionFailureInfo(
-          activeServerThread.activities,
-          activeServerThread.turnRetraction.requestId,
-        )
-      : null;
-  const retractionFailureDetail = retractionFailure?.silent ? null : retractionFailure?.detail;
   const threadError = isServerThread
-    ? (localServerError ??
-      retractionFailureDetail ??
-      activeServerThread?.session?.lastError ??
-      null)
+    ? (localServerError ?? activeServerThread?.session?.lastError ?? null)
     : localDraftError;
   // Dismissals can only mask the shown error, never clear it: a server thread
   // keeps its error in session.lastError, so clearing the local shadow would
@@ -2655,26 +2605,6 @@ export default function ChatView(props: ChatViewProps) {
   });
   const pullRequestsCapabilityKnown = serverConfig !== null;
   const supportsPullRequests = serverConfig?.environment.capabilities.pullRequests === true;
-  const supportsThreadTurnRetraction =
-    serverConfig?.environment.capabilities.threadTurnRetraction === true;
-  const pendingRetractionRecovery = usePendingRetractionForThread(
-    routeKind === "server" ? routeThreadRef : null,
-  );
-  const retractionPending =
-    pendingRetractionRecovery !== null || activeThread?.turnRetraction?.status === "requested";
-  const retractionPendingRef = useRef(retractionPending);
-  retractionPendingRef.current = retractionPending;
-  const pendingRetractionSendGateRef = useRef(createPendingRetractionSendGate());
-  const [heldSendPending, setHeldSendPending] = useState(false);
-  useEffect(() => {
-    if (!retractionPending) pendingRetractionSendGateRef.current.release();
-  }, [retractionPending]);
-  useEffect(
-    () => () => {
-      pendingRetractionSendGateRef.current.dispose();
-    },
-    [],
-  );
   const attachmentEnvironmentConfig = environmentById.get(environmentId)?.serverConfig ?? null;
   const attachmentUploadsCapabilityKnown = attachmentEnvironmentConfig !== null;
   const supportsQuestionAttachments =
@@ -3285,27 +3215,6 @@ export default function ChatView(props: ChatViewProps) {
     activePendingUserInput: activePendingUserInput?.requestId ?? null,
     threadError,
   });
-  // The just-popped turn is still settling server-side for a beat. Every
-  // surface reads this one derivation so the thread presents as if the turn
-  // never started. `phase` stays raw for the decisions that must respect the
-  // real session (the pop window, the revert-checkpoint guard, local dispatch
-  // bookkeeping); `presentedPhase` is what the composer and timeline read.
-  const {
-    phase: presentedPhase,
-    isWorking: presentedIsWorking,
-    activeTurnInProgress,
-  } = deriveEffectiveSessionPresentation({
-    phase,
-    pendingRetraction: pendingRetractionRecovery,
-    projectedRetraction: activeThread?.turnRetraction ?? null,
-    activeTurnId: activeThread?.session?.activeTurnId ?? null,
-    retractionPending,
-    latestTurnSettled,
-    isSendBusy,
-    heldSendPending,
-    isConnecting,
-    isRevertingCheckpoint,
-  });
   const optimisticCompactionMessage = optimisticUserMessages.at(-1);
   const pendingCompactionMessage =
     isSendBusy &&
@@ -3347,7 +3256,13 @@ export default function ChatView(props: ChatViewProps) {
     activeServerThread.id === routeThreadRef.threadId &&
     activeServerThread.latestTurn === null &&
     recordedWorktreeSetup?.phase === "running";
-  const isWorking = presentedIsWorking || isCompacting || awaitingBootstrapTurn;
+  const isWorking =
+    phase === "running" ||
+    isSendBusy ||
+    isConnecting ||
+    isRevertingCheckpoint ||
+    isCompacting ||
+    awaitingBootstrapTurn;
   const isPreparingWorktree = isLocallyPreparingWorktree || awaitingBootstrapTurn;
   const activeWorkStartedAt = deriveActiveWorkStartedAt(
     activeLatestTurn,
@@ -3593,20 +3508,18 @@ export default function ChatView(props: ChatViewProps) {
           });
 
     const localMessages = optimisticUserMessages;
+    if (localMessages.length === 0) {
+      return serverMessagesWithPreviewHandoff;
+    }
     const serverIds = new Set(serverMessagesWithPreviewHandoff.map((message) => message.id));
     const pendingMessages = localMessages.filter((message) => !serverIds.has(message.id));
-    const allMessages =
-      pendingMessages.length === 0
-        ? serverMessagesWithPreviewHandoff
-        : [...serverMessagesWithPreviewHandoff, ...pendingMessages];
-    if (Object.keys(optimisticRetractionsByMessageId).length === 0) return allMessages;
-    return allMessages.filter(
-      (message) => optimisticRetractionsByMessageId[message.id] === undefined,
-    );
+    if (pendingMessages.length === 0) {
+      return serverMessagesWithPreviewHandoff;
+    }
+    return [...serverMessagesWithPreviewHandoff, ...pendingMessages];
   }, [
     attachmentPreviewHandoffByMessageId,
     displayServerMessages,
-    optimisticRetractionsByMessageId,
     optimisticUserMessages,
     projectHandoffMessagePreviews,
   ]);
@@ -3631,30 +3544,6 @@ export default function ChatView(props: ChatViewProps) {
     timelineMessages,
     workLogEntries,
   ]);
-
-  useEffect(() => {
-    if (Object.keys(optimisticRetractionsByMessageId).length === 0) return;
-    const visibleMessageIds = new Set<string>([
-      ...displayServerMessages.map((message) => message.id),
-      ...optimisticUserMessages.map((message) => message.id),
-    ]);
-    setOptimisticRetractionsByMessageId((existing) => {
-      const next = Object.fromEntries(
-        Object.entries(existing).filter(([messageId]) => visibleMessageIds.has(messageId)),
-      ) as Record<string, CommandId>;
-      return Object.keys(next).length === Object.keys(existing).length ? existing : next;
-    });
-  }, [displayServerMessages, optimisticRetractionsByMessageId, optimisticUserMessages]);
-  useEffect(() => {
-    const retraction = activeThread?.turnRetraction;
-    if (retraction?.status !== "failed") return;
-    setOptimisticRetractionsByMessageId((existing) =>
-      unhideOptimisticallyRetractedMessage(existing, {
-        requestId: retraction.requestId,
-        messageId: retraction.messageId,
-      }),
-    );
-  }, [activeThread?.turnRetraction]);
   const displayedTimeline = resolveThreadSwitchTimeline({
     loading: timelineEntries.length === 0 && threadSyncPhase !== null,
     activeThreadKey,
@@ -3735,37 +3624,21 @@ export default function ChatView(props: ChatViewProps) {
   const [dockedDraftHeroThreadKey, setDockedDraftHeroThreadKey] = useState<string | null>(null);
   const draftHeroDockRequested =
     activeThreadKey !== null && dockedDraftHeroThreadKey === activeThreadKey;
-  const isDraftHeroState =
-    backgroundSubmissionPending ||
+  const isDraftHeroState = resolveDraftHeroState({
+    isLocalDraftThread,
+    hasTimelineEntries: timelineEntries.length > 0,
+    isWorking,
+    draftHeroDockRequested,
+    backgroundSubmissionPending,
     // A cancelled or failed setup card stays on the draft's timeline; the
     // hero headline would paint over it.
-    (worktreeSetup === null &&
-      shouldRenderEmptyThreadHero({
-        routeKind,
-        timelineEntryCount: timelineEntries.length,
-        isWorking,
-        phase,
-        dockRequested: draftHeroDockRequested,
-        threadDetailLoading,
-      }));
+    hasWorktreeSetupCard: worktreeSetup !== null,
+  });
   const [
     attachDraftHeroTransitionGroupRef,
     attachDraftHeroComposerAnchorRef,
     captureDraftHeroComposerRect,
   ] = useDraftHeroLayoutTransition(isDraftHeroState);
-  const activeSessionTurnId = activeThread?.session?.activeTurnId ?? null;
-  const lastUserMessagePopWindowOpen =
-    supportsThreadTurnRetraction &&
-    isLastUserMessagePopWindowOpen({
-      phase,
-      activeTurnId: activeSessionTurnId,
-      timelineEntries,
-      localTurnStartPending: isSendBusy,
-      retractionPending,
-    });
-  const lastUserMessagePopCandidate = lastUserMessagePopWindowOpen
-    ? findLastUserMessagePopCandidate({ messages: timelineMessages })
-    : null;
 
   const gitCwd = activeProject
     ? projectScriptCwd({
@@ -7136,18 +7009,18 @@ export default function ChatView(props: ChatViewProps) {
           activeThread.id,
           "This provider does not support reverting conversation history. Start a new thread instead.",
         );
-        return false;
+        return;
       }
       if (activeEnvironmentUnavailable && activeEnvironmentUnavailableLabel) {
         setThreadError(
           activeThread.id,
           `Reconnect ${activeEnvironmentUnavailableLabel} before reverting checkpoints.`,
         );
-        return false;
+        return;
       }
       if (phase === "running" || isSendBusy || isConnecting) {
         setThreadError(activeThread.id, "Interrupt the current turn before reverting checkpoints.");
-        return false;
+        return;
       }
       if (restoreFiles === undefined) {
         setPendingRevert({ turnCount, messageId, routeThreadKey });
@@ -7450,25 +7323,6 @@ export default function ChatView(props: ChatViewProps) {
         }),
       );
     };
-    if (retractionPendingRef.current) {
-      if (sendInFlightRef.current) return;
-      sendInFlightRef.current = true;
-      setHeldSendPending(true);
-      const released = await pendingRetractionSendGateRef.current.wait();
-      setHeldSendPending(false);
-      sendInFlightRef.current = false;
-      if (!released || retractionPendingRef.current) {
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Message not sent",
-            description:
-              "The previous message was still retracting after 20 seconds. Your draft is unchanged; try sending it again.",
-          }),
-        );
-        return;
-      }
-    }
     if (
       !activeThread ||
       isSendBusy ||
@@ -7908,18 +7762,6 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
 
-    const messageIdForSend = newMessageId();
-    sentMessageRecoveryContextByMessageId.clear();
-    sentMessageRecoveryContextByMessageId.set(messageIdForSend, {
-      envMode: sendEnvMode,
-      baseBranch: activeThreadBranch,
-      startFromOrigin,
-      prompt: promptForSend,
-      images: composerImagesSnapshot,
-      files: composerFilesSnapshot,
-      pastedTexts: composerPastedTextsSnapshot,
-    });
-    preDispatchCancellationLatchRef.current.arm(messageIdForSend);
     const readLiveAttachmentCapabilities = () => {
       const config = appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId) ?? null;
       const liveSupportsAttachmentUploads =
@@ -8083,15 +7925,6 @@ export default function ChatView(props: ChatViewProps) {
       void dockTransition.catch(() => resolveDockStarted?.());
       await dockStarted;
     }
-    if (preDispatchCancellationLatchRef.current.isCancelled(messageIdForSend)) {
-      sentMessageRecoveryContextByMessageId.delete(messageIdForSend);
-      preDispatchCancellationLatchRef.current.clear(messageIdForSend);
-      sendInFlightRef.current = false;
-      setDockedDraftHeroThreadKey((currentThreadKey) =>
-        currentThreadKey === activeThreadKey ? null : currentThreadKey,
-      );
-      return;
-    }
 
     const attachmentCapabilitiesBeforeDispatch = readLiveAttachmentCapabilities();
     if (attachmentCapabilitiesBeforeDispatch.fileBlockReason !== null) {
@@ -8108,6 +7941,7 @@ export default function ChatView(props: ChatViewProps) {
       submissionIntent: resolvedSubmissionIntent,
     });
 
+    const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();
     const turnAttachmentsPromise = Promise.all(
       composerAttachmentsSnapshot.map(async (attachment) => {
@@ -8154,7 +7988,6 @@ export default function ChatView(props: ChatViewProps) {
             composerAttachmentsSnapshot[0]?.name ||
             "New thread",
         );
-        if (!preDispatchCancellationLatchRef.current.beginDispatch(messageIdForSend)) return;
         promptRef.current = "";
         clearComposerDraftContent(composerDraftTarget);
         composerRef.current?.resetCursorState();
@@ -8325,8 +8158,6 @@ export default function ChatView(props: ChatViewProps) {
           error instanceof Error ? error.message : "Failed to send messages.",
         );
       } finally {
-        preDispatchCancellationLatchRef.current.clear(messageIdForSend);
-        sentMessageRecoveryContextByMessageId.delete(messageIdForSend);
         const restoreFailedDraft = () => {
           setMultipleModelSelections(failedSelections);
           if (clearedDraft) {
@@ -8550,7 +8381,6 @@ export default function ChatView(props: ChatViewProps) {
     }
 
     let turnStartSucceeded = false;
-    let preDispatchCancelled = false;
     let backgroundDraftOpened = false;
     if (failure === null && turnAttachmentsResult._tag === "Success") {
       const bootstrap =
@@ -8586,130 +8416,124 @@ export default function ChatView(props: ChatViewProps) {
                 : {}),
             }
           : undefined;
-      if (!preDispatchCancellationLatchRef.current.beginDispatch(messageIdForSend)) {
-        preDispatchCancelled =
-          preDispatchCancellationLatchRef.current.isCancelled(messageIdForSend);
-      } else {
-        beginLocalDispatch({ preparingWorktree: false });
-        const backgroundThreadRef =
-          resolvedSubmissionIntent === "background"
-            ? scopeThreadRef(activeThread.environmentId, threadIdForSend)
-            : null;
-        if (backgroundThreadRef) {
-          beginBackgroundDraftSubmissionByRef(backgroundThreadRef);
-        }
-        const startPromise = startThreadTurn({
-          environmentId,
-          input: {
-            threadId: threadIdForSend,
-            message: {
-              messageId: messageIdForSend,
-              role: "user",
-              text: outgoingMessageText,
-              attachments: turnAttachmentsResult.value,
-              ...(() => {
-                const context = buildOutgoingMessageContext(
-                  turnAttachmentsResult.value.map((attachment, index) =>
-                    "id" in attachment && attachment.id !== undefined
-                      ? attachment.id
-                      : composerAttachmentsSnapshot[index]!.id,
-                  ),
-                );
-                if (context === undefined) return {};
-                // Read the capability at dispatch time: the upload and persistence
-                // awaits above can span a server reconnect that changes it. Servers
-                // from before inline context drop the records and forward the links
-                // as literal text, so their turns carry the payload the legacy way.
-                const supportsInlineMessageContext =
-                  appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment
-                    .capabilities.inlineMessageContext === true;
-                if (!supportsInlineMessageContext) {
-                  return {
-                    text: serializeLegacyContextMessage({
-                      text: outgoingMessageText,
-                      records: context.records,
-                    }),
-                  };
-                }
-                return { context };
-              })(),
-            },
-            modelSelection: ctxSelectedModelSelection,
-            titleSeed: title,
-            runtimeMode,
-            interactionMode: sendInteractionMode,
-            ...(bootstrap ? { bootstrap } : {}),
-            createdAt: messageCreatedAt,
+      const backgroundThreadRef =
+        resolvedSubmissionIntent === "background"
+          ? scopeThreadRef(activeThread.environmentId, threadIdForSend)
+          : null;
+      if (backgroundThreadRef) {
+        beginBackgroundDraftSubmissionByRef(backgroundThreadRef);
+      }
+      const startPromise = startThreadTurn({
+        environmentId,
+        input: {
+          threadId: threadIdForSend,
+          message: {
+            messageId: messageIdForSend,
+            role: "user",
+            text: outgoingMessageText,
+            attachments: turnAttachmentsResult.value,
+            ...(() => {
+              const context = buildOutgoingMessageContext(
+                turnAttachmentsResult.value.map((attachment, index) =>
+                  "id" in attachment && attachment.id !== undefined
+                    ? attachment.id
+                    : composerAttachmentsSnapshot[index]!.id,
+                ),
+              );
+              if (context === undefined) return {};
+              // Read the capability at dispatch time: the upload and persistence
+              // awaits above can span a server reconnect that changes it. Servers
+              // from before inline context drop the records and forward the links
+              // as literal text, so their turns carry the payload the legacy way.
+              const supportsInlineMessageContext =
+                appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment
+                  .capabilities.inlineMessageContext === true;
+              if (!supportsInlineMessageContext) {
+                return {
+                  text: serializeLegacyContextMessage({
+                    text: outgoingMessageText,
+                    records: context.records,
+                  }),
+                };
+              }
+              return { context };
+            })(),
           },
-        });
+          modelSelection: ctxSelectedModelSelection,
+          titleSeed: title,
+          runtimeMode,
+          interactionMode: sendInteractionMode,
+          ...(bootstrap ? { bootstrap } : {}),
+          createdAt: messageCreatedAt,
+        },
+      });
+      if (backgroundThreadRef) {
+        markPromotedDraftThreadByRef(backgroundThreadRef);
+        try {
+          backgroundDraftOpened = Boolean(
+            await handleNewThread(
+              scopeProjectRef(activeProject.environmentId, activeProject.id),
+              resolveBackgroundDraftWorkspaceOptions({
+                envMode: sendEnvMode,
+                branch: activeThreadBranch,
+                startFromOrigin,
+              }),
+            ),
+          );
+        } catch (error) {
+          clearBackgroundDraftSubmissionByRef(backgroundThreadRef);
+          toastManager.add(
+            stackedThreadToast({
+              type: "warning",
+              title: "Could not open a fresh composer",
+              description: error instanceof Error ? error.message : undefined,
+            }),
+          );
+        }
+      }
+      const startResult = await startPromise;
+      if (startResult._tag === "Failure") {
+        failure = startResult;
+      } else {
+        turnStartSucceeded = true;
+        // The turn is under way and will spend quota, so that thread's limits
+        // snapshot is stale. Uploads may have outlasted a navigation, so only
+        // the sending thread's panel clears.
+        clearUsageLimitsFor(routeThreadKey);
+        if (turnUsesAttachmentUploads) {
+          releaseDraftAttachments(composerAttachmentsSnapshot);
+        }
+        acknowledgeActiveThreadWoke();
         if (backgroundThreadRef) {
-          markPromotedDraftThreadByRef(backgroundThreadRef);
-          try {
-            backgroundDraftOpened = Boolean(
-              await handleNewThread(
-                scopeProjectRef(activeProject.environmentId, activeProject.id),
-                resolveBackgroundDraftWorkspaceOptions({
-                  envMode: sendEnvMode,
-                  branch: activeThreadBranch,
-                  startFromOrigin,
-                }),
-              ),
-            );
-          } catch (error) {
+          if (backgroundDraftOpened || currentRouteThreadKeyRef.current !== routeThreadKey) {
+            finalizePromotedDraftThreadByRef(backgroundThreadRef);
+          } else {
             clearBackgroundDraftSubmissionByRef(backgroundThreadRef);
+          }
+          if (backgroundDraftOpened) {
             toastManager.add(
               stackedThreadToast({
-                type: "warning",
-                title: "Could not open a fresh composer",
-                description: error instanceof Error ? error.message : undefined,
+                type: "success",
+                title: "Started in background",
+                timeout: 5_000,
+                actionProps: {
+                  children: "Open",
+                  onClick: () => {
+                    void navigate({
+                      to: "/$environmentId/$threadId",
+                      params: buildThreadRouteParams(backgroundThreadRef),
+                    });
+                  },
+                },
               }),
             );
-          }
-        }
-        const startResult = await startPromise;
-        if (startResult._tag === "Failure") {
-          failure = startResult;
-        } else {
-          turnStartSucceeded = true;
-          // The turn is under way and will spend quota, so that thread's limits
-          // snapshot is stale. Uploads may have outlasted a navigation, so only
-          // the sending thread's panel clears.
-          clearUsageLimitsFor(routeThreadKey);
-          if (turnUsesAttachmentUploads) {
-            releaseDraftAttachments(composerAttachmentsSnapshot);
-          }
-          acknowledgeActiveThreadWoke();
-          if (backgroundThreadRef) {
-            if (backgroundDraftOpened || currentRouteThreadKeyRef.current !== routeThreadKey) {
-              finalizePromotedDraftThreadByRef(backgroundThreadRef);
-            } else {
-              clearBackgroundDraftSubmissionByRef(backgroundThreadRef);
-            }
-            if (backgroundDraftOpened) {
-              toastManager.add(
-                stackedThreadToast({
-                  type: "success",
-                  title: "Started in background",
-                  timeout: 5_000,
-                  actionProps: {
-                    children: "Open",
-                    onClick: () => {
-                      void navigate({
-                        to: "/$environmentId/$threadId",
-                        params: buildThreadRouteParams(backgroundThreadRef),
-                      });
-                    },
-                  },
-                }),
-              );
-            }
           }
         }
       }
     }
 
-    if (failure !== null || preDispatchCancelled) {
-      if (failure !== null && resolvedSubmissionIntent === "background" && draftId && draftThread) {
+    if (failure !== null) {
+      if (resolvedSubmissionIntent === "background" && draftId && draftThread) {
         restoreFailedBackgroundDraftThread(
           draftId,
           draftThread,
@@ -8778,7 +8602,7 @@ export default function ChatView(props: ChatViewProps) {
           detectTrigger: true,
         });
       }
-      if (failure !== null && !isAtomCommandInterrupted(failure)) {
+      if (!isAtomCommandInterrupted(failure)) {
         const error = squashAtomCommandFailure(failure);
         if (
           resolvedSubmissionIntent !== "background" &&
@@ -8820,10 +8644,8 @@ export default function ChatView(props: ChatViewProps) {
         }
       }
     }
-    preDispatchCancellationLatchRef.current.clear(messageIdForSend);
     sendInFlightRef.current = false;
     if (!turnStartSucceeded) {
-      sentMessageRecoveryContextByMessageId.delete(messageIdForSend);
       setDockedDraftHeroThreadKey((currentThreadKey) =>
         currentThreadKey === activeThreadKey ? null : currentThreadKey,
       );
@@ -9159,7 +8981,6 @@ export default function ChatView(props: ChatViewProps) {
       if (
         !activeThread ||
         !isServerThread ||
-        retractionPending ||
         isSendBusy ||
         isConnecting ||
         sendInFlightRef.current
@@ -9301,7 +9122,6 @@ export default function ChatView(props: ChatViewProps) {
       isConnecting,
       isSendBusy,
       isServerThread,
-      retractionPending,
       localCheckoutBranchMismatch,
       persistThreadSettingsForNextTurn,
       resetLocalDispatch,
@@ -9323,7 +9143,6 @@ export default function ChatView(props: ChatViewProps) {
       !activeProject ||
       !activeProposedPlan ||
       !isServerThread ||
-      retractionPending ||
       isSendBusy ||
       isConnecting ||
       activeEnvironmentUnavailable ||
@@ -9470,7 +9289,6 @@ export default function ChatView(props: ChatViewProps) {
     isConnecting,
     isSendBusy,
     isServerThread,
-    retractionPending,
     navigate,
     resetLocalDispatch,
     defaultRuntimeMode,
@@ -9779,111 +9597,6 @@ export default function ChatView(props: ChatViewProps) {
     composerRef,
     consumePendingFileDrop,
     pendingSidebarFileDrops,
-  ]);
-  const lastUserMessageRecoveryContext = lastUserMessagePopCandidate
-    ? sentMessageRecoveryContextByMessageId.get(lastUserMessagePopCandidate.message.id)
-    : undefined;
-  const onOptimisticRetractionStarted = useCallback(
-    ({ requestId, messageId }: { requestId: CommandId; messageId: MessageId }) => {
-      retractionPendingRef.current = true;
-      setOptimisticRetractionsByMessageId((existing) =>
-        hideOptimisticallyRetractedMessage(existing, { requestId, messageId }),
-      );
-    },
-    [],
-  );
-  const onOptimisticRetractionFailed = useCallback(
-    ({ requestId, messageId }: { requestId: CommandId; messageId: MessageId }) => {
-      retractionPendingRef.current = false;
-      pendingRetractionSendGateRef.current.release();
-      setOptimisticRetractionsByMessageId((existing) =>
-        unhideOptimisticallyRetractedMessage(existing, { requestId, messageId }),
-      );
-    },
-    [],
-  );
-  const navigateToRecoveryDraft = useCallback(
-    (recoveryDraftId: DraftId) => {
-      void navigate({
-        to: "/draft/$draftId",
-        params: buildDraftThreadRouteParams(recoveryDraftId),
-        replace: true,
-      });
-    },
-    [navigate],
-  );
-  const onPopLastUserMessage = useLastUserMessageRetraction({
-    activeThread,
-    activeProjectRef,
-    activeThreadBranch: lastUserMessageRecoveryContext
-      ? lastUserMessageRecoveryContext.baseBranch
-      : activeThreadBranch,
-    activeEnvironmentUnavailable,
-    candidate: lastUserMessagePopCandidate,
-    isFirstUserMessage: timelineMessages.filter((message) => message.role === "user").length === 1,
-    ...(lastUserMessageRecoveryContext
-      ? {
-          optimisticBundle: {
-            prompt: lastUserMessageRecoveryContext.prompt,
-            images: lastUserMessageRecoveryContext.images,
-            files: lastUserMessageRecoveryContext.files,
-            pastedTexts: lastUserMessageRecoveryContext.pastedTexts,
-          },
-        }
-      : {}),
-    pendingRecovery: pendingRetractionRecovery,
-    retractionPending,
-    runtimeMode,
-    interactionMode,
-    envMode: lastUserMessageRecoveryContext?.envMode ?? envMode,
-    startFromOrigin: lastUserMessageRecoveryContext?.startFromOrigin ?? startFromOrigin,
-    composerRef,
-    promptRef,
-    composerImagesRef,
-    composerFilesRef,
-    createAttachmentAssetUrl,
-    onOptimisticRetractionStarted,
-    onOptimisticRetractionFailed,
-    navigateToRecoveryDraft,
-    setThreadError,
-  });
-
-  useEffect(() => {
-    const onWindowKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (
-        !shouldHandleChatEscape({
-          event,
-          terminalFocused: getTerminalFocusOwner() !== null,
-          commandPaletteOpen: isCommandPaletteOpen(),
-          composerEscapeGateOpen: composerRef.current?.isEscapeGateOpen() ?? false,
-          floatingLayerOpen: document.querySelector(CHAT_FLOATING_LAYER_SELECTOR) !== null,
-        })
-      ) {
-        return;
-      }
-
-      const handled = runChatEscapeAction({
-        cancelPreDispatch: () => preDispatchCancellationLatchRef.current.cancel(),
-        retractionPending,
-        threadTurnRetraction: supportsThreadTurnRetraction,
-        hasRetractionCandidate: lastUserMessagePopCandidate !== null,
-        focusComposer: scheduleComposerFocus,
-        retractLastUserMessage: () => void onPopLastUserMessage(),
-      });
-      if (!handled) return;
-
-      event.preventDefault();
-      event.stopPropagation();
-    };
-
-    window.addEventListener("keydown", onWindowKeyDown);
-    return () => window.removeEventListener("keydown", onWindowKeyDown);
-  }, [
-    lastUserMessagePopCandidate,
-    onPopLastUserMessage,
-    retractionPending,
-    scheduleComposerFocus,
-    supportsThreadTurnRetraction,
   ]);
 
   // Empty state: no active thread
@@ -10245,7 +9958,9 @@ export default function ChatView(props: ChatViewProps) {
                     ? null
                     : (activeThreadShell?.planProgress?.step ?? null)
                 }
-                activeTurnInProgress={!paintOnlyDisplayedTimeline && activeTurnInProgress}
+                activeTurnInProgress={
+                  !paintOnlyDisplayedTimeline && phase === "running" && !latestTurnSettled
+                }
                 isPreparingWorktree={!paintOnlyDisplayedTimeline && isPreparingWorktree}
                 isCompacting={!paintOnlyDisplayedTimeline && isCompacting}
                 activeTurnStartedAt={paintOnlyDisplayedTimeline ? null : activeWorkStartedAt}
@@ -10419,9 +10134,9 @@ export default function ChatView(props: ChatViewProps) {
                             isLocalDraftThread={isLocalDraftThread}
                             forceExpandedOnMobile={forceExpandedMobileComposer && isDraftHeroState}
                             projectSelectionRequired={isLocalDraftThread && activeProject === null}
-                            phase={presentedPhase}
+                            phase={phase}
                             isConnecting={isConnecting}
-                            isSendBusy={isSendBusy || heldSendPending}
+                            isSendBusy={isSendBusy}
                             isRevertingCheckpoint={isRevertingCheckpoint}
                             sendDisabledReason={
                               isRevertingCheckpoint

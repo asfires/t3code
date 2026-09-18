@@ -2,7 +2,6 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Struct from "effect/Struct";
 
@@ -10,7 +9,6 @@ import { toPersistenceSqlError } from "../Errors.ts";
 import {
   DeleteProjectionThreadInput,
   GetProjectionThreadInput,
-  HasOtherLiveWorktreeReferenceInput,
   ListProjectionThreadsByProjectInput,
   ProjectionThread,
   ProjectionThreadRepository,
@@ -236,20 +234,6 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
       `,
   });
 
-  const hasOtherLiveWorktreeReferenceRow = SqlSchema.findOneOption({
-    Request: HasOtherLiveWorktreeReferenceInput,
-    Result: Schema.Struct({ threadId: Schema.String }),
-    execute: ({ threadId, worktreePath }) =>
-      sql`
-        SELECT thread_id AS "threadId"
-        FROM projection_threads
-        WHERE thread_id <> ${threadId}
-          AND deleted_at IS NULL
-          AND worktree_path = ${worktreePath}
-        LIMIT 1
-      `,
-  });
-
   const upsert: ProjectionThreadRepositoryShape["upsert"] = (row) =>
     upsertProjectionThreadRow(row).pipe(
       Effect.mapError(toPersistenceSqlError("ProjectionThreadRepository.upsert:query")),
@@ -270,20 +254,10 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
       Effect.mapError(toPersistenceSqlError("ProjectionThreadRepository.deleteById:query")),
     );
 
-  const hasOtherLiveWorktreeReference: ProjectionThreadRepositoryShape["hasOtherLiveWorktreeReference"] =
-    (input) =>
-      hasOtherLiveWorktreeReferenceRow(input).pipe(
-        Effect.map((row) => Option.isSome(row)),
-        Effect.mapError(
-          toPersistenceSqlError("ProjectionThreadRepository.hasOtherLiveWorktreeReference:query"),
-        ),
-      );
-
   return {
     upsert,
     getById,
     listByProjectId,
-    hasOtherLiveWorktreeReference,
     deleteById,
   } satisfies ProjectionThreadRepositoryShape;
 });

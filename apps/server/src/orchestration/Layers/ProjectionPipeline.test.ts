@@ -26,13 +26,11 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { makeSqlStatementCounter } from "../../../integration/SqlStatementCounter.integration.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
-import { ProjectionTurnRetractionRepositoryLive } from "../../persistence/Layers/ProjectionTurnRetractions.ts";
 import {
   makeSqlitePersistenceLive,
   SqlitePersistenceMemory,
 } from "../../persistence/Layers/Sqlite.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
-import { ProjectionTurnRetractionRepository } from "../../persistence/Services/ProjectionTurnRetractions.ts";
 import { ProjectionStateRepository } from "../../persistence/Services/ProjectionState.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
@@ -621,166 +619,6 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
     }),
   );
 });
-
-it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-retraction-projection-test-")))(
-  "turn retraction projection",
-  (it) => {
-    it.effect(
-      "replays pending, failed, and completed tombstones and exposes pending startup scan",
-      () =>
-        Effect.gen(function* () {
-          const pipeline = yield* OrchestrationProjectionPipeline;
-          const eventStore = yield* OrchestrationEventStore;
-          const retractions = yield* ProjectionTurnRetractionRepository;
-          const threadId = ThreadId.make("thread-retraction");
-          const requestedAt = "2026-01-01T00:00:00.000Z";
-
-          yield* eventStore.append({
-            type: "thread.turn-interrupt-requested",
-            eventId: EventId.make("evt-retract-requested-1"),
-            aggregateKind: "thread",
-            aggregateId: threadId,
-            occurredAt: requestedAt,
-            commandId: CommandId.make("cmd-retract-1"),
-            causationEventId: null,
-            correlationId: CommandId.make("cmd-retract-1"),
-            metadata: {},
-            payload: {
-              threadId,
-              turnId: TurnId.make("turn-3"),
-              createdAt: requestedAt,
-              retraction: {
-                requestId: CommandId.make("cmd-retract-1"),
-                messageId: MessageId.make("message-3"),
-                targetTurnId: TurnId.make("turn-3"),
-                baselineTurnCount: 2,
-                firstUserMessage: false,
-              },
-            },
-          });
-          yield* pipeline.bootstrap;
-
-          const pending = yield* retractions.listPending();
-          assert.equal(pending.length, 1);
-          assert.equal(pending[0]?.requestId, CommandId.make("cmd-retract-1"));
-          assert.equal(pending[0]?.providerSendClaimed, false);
-          assert.equal(pending[0]?.providerSendState, "unclaimed");
-          assert.equal(pending[0]?.status, "requested");
-          assert.equal(pending[0]?.baselineTurnCount, 2);
-          assert.match(pending[0]?.baselineCheckpointRef ?? "", /\/turn\/2$/);
-
-          const sendClaim = yield* retractions.claimProviderSend({
-            threadId,
-            messageId: MessageId.make("message-4"),
-            claimedAt: "2026-01-01T00:00:01.500Z",
-          });
-          assert.equal(sendClaim, "claimed");
-
-          yield* eventStore.append({
-            type: "thread.activity-appended",
-            eventId: EventId.make("evt-retract-failed-1"),
-            aggregateKind: "thread",
-            aggregateId: threadId,
-            occurredAt: "2026-01-01T00:00:01.000Z",
-            commandId: CommandId.make("cmd-retract-failed-1"),
-            causationEventId: null,
-            correlationId: CommandId.make("cmd-retract-1"),
-            metadata: {},
-            payload: {
-              threadId,
-              activity: {
-                id: EventId.make("activity-retract-failed-1"),
-                tone: "error",
-                kind: "turn.retract.failed",
-                summary: "Could not retract turn",
-                payload: { requestId: CommandId.make("cmd-retract-1") },
-                turnId: TurnId.make("turn-3"),
-                createdAt: "2026-01-01T00:00:01.000Z",
-              },
-            },
-          });
-          yield* pipeline.bootstrap;
-
-          const failed = yield* retractions.getByRequestId({
-            requestId: CommandId.make("cmd-retract-1"),
-          });
-          assert.equal(failed._tag, "Some");
-          if (failed._tag === "Some") {
-            assert.equal(failed.value.status, "failed");
-            assert.equal(failed.value.failedAt, "2026-01-01T00:00:01.000Z");
-          }
-          assert.equal((yield* retractions.listPending()).length, 0);
-
-          yield* eventStore.append({
-            type: "thread.turn-interrupt-requested",
-            eventId: EventId.make("evt-retract-requested-2"),
-            aggregateKind: "thread",
-            aggregateId: threadId,
-            occurredAt: "2026-01-01T00:00:02.000Z",
-            commandId: CommandId.make("cmd-retract-2"),
-            causationEventId: null,
-            correlationId: CommandId.make("cmd-retract-2"),
-            metadata: {},
-            payload: {
-              threadId,
-              createdAt: "2026-01-01T00:00:02.000Z",
-              retraction: {
-                requestId: CommandId.make("cmd-retract-2"),
-                messageId: MessageId.make("message-4"),
-                targetTurnId: null,
-                baselineTurnCount: 0,
-                firstUserMessage: true,
-              },
-            },
-          });
-          yield* pipeline.bootstrap;
-
-          const claimedPending = yield* retractions.getByRequestId({
-            requestId: CommandId.make("cmd-retract-2"),
-          });
-          assert.equal(claimedPending._tag, "Some");
-          if (claimedPending._tag === "Some") {
-            assert.equal(claimedPending.value.providerSendClaimed, true);
-            assert.equal(claimedPending.value.providerSendState, "claimed");
-          }
-
-          yield* eventStore.append({
-            type: "thread.reverted",
-            eventId: EventId.make("evt-retract-completed-2"),
-            aggregateKind: "thread",
-            aggregateId: threadId,
-            occurredAt: "2026-01-01T00:00:03.000Z",
-            commandId: CommandId.make("cmd-retract-complete-2"),
-            causationEventId: null,
-            correlationId: CommandId.make("cmd-retract-2"),
-            metadata: {},
-            payload: {
-              threadId,
-              turnCount: 0,
-              retraction: {
-                requestId: CommandId.make("cmd-retract-2"),
-                messageId: MessageId.make("message-4"),
-                turnId: null,
-                firstUserMessage: true,
-                completedAt: "2026-01-01T00:00:03.000Z",
-              },
-            },
-          });
-          yield* pipeline.bootstrap;
-
-          const completed = yield* retractions.getByRequestId({
-            requestId: CommandId.make("cmd-retract-2"),
-          });
-          assert.equal(completed._tag, "Some");
-          if (completed._tag === "Some") {
-            assert.equal(completed.value.status, "completed");
-            assert.equal(completed.value.completedAt, "2026-01-01T00:00:03.000Z");
-          }
-          assert.equal((yield* retractions.listPending()).length, 0);
-        }),
-    );
-  },
-);
 
 it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-base-")))(
   "OrchestrationProjectionPipeline",
@@ -4130,7 +3968,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
     }),
   );
 
-  it.effect("retains checkpointless turns and their messages across a revert", () =>
+  it.effect("retains checkpointless history across sequential reverts", () =>
     Effect.gen(function* () {
       const projectionPipeline = yield* OrchestrationProjectionPipeline;
       const eventStore = yield* OrchestrationEventStore;
@@ -4321,61 +4159,27 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
         { messageId: "assistant-early" },
         { messageId: "assistant-mid" },
       ]);
-    }),
-  );
 
-  it.effect("excludes a completed retraction message from SQLite projection", () =>
-    Effect.gen(function* () {
-      const projectionPipeline = yield* OrchestrationProjectionPipeline;
-      const eventStore = yield* OrchestrationEventStore;
-      const sql = yield* SqlClient.SqlClient;
-      const threadId = ThreadId.make("thread-retraction-message-exclusion");
-
-      yield* sql`
-        INSERT INTO projection_thread_messages (
-          message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at
-        ) VALUES
-          (
-            'message-retracted', ${threadId}, NULL, 'user', 'retracted', 0,
-            '2026-03-01T10:00:00.000Z', '2026-03-01T10:00:00.000Z'
-          ),
-          (
-            'message-legitimate', ${threadId}, NULL, 'user', 'legitimate', 0,
-            '2026-03-01T10:00:01.000Z', '2026-03-01T10:00:01.000Z'
-          )
-      `;
-
-      const savedEvent = yield* eventStore.append({
+      yield* appendAndProject({
         type: "thread.reverted",
-        eventId: EventId.make("evt-retraction-message-exclusion"),
+        eventId: EventId.make("evt-rt-15"),
         aggregateKind: "thread",
         aggregateId: threadId,
-        occurredAt: "2026-03-01T10:00:02.000Z",
-        commandId: CommandId.make("cmd-retraction-message-exclusion"),
+        occurredAt: "2026-02-26T13:00:12.000Z",
+        commandId: CommandId.make("cmd-rt-15"),
         causationEventId: null,
-        correlationId: CorrelationId.make("cmd-retraction-message-exclusion"),
+        correlationId: CorrelationId.make("cmd-rt-15"),
         metadata: {},
-        payload: {
-          threadId,
-          turnCount: 1,
-          retraction: {
-            requestId: CommandId.make("request-retraction-message-exclusion"),
-            messageId: MessageId.make("message-retracted"),
-            turnId: null,
-            firstUserMessage: false,
-            completedAt: "2026-03-01T10:00:02.000Z",
-          },
-        },
+        payload: { threadId, turnCount: 0 },
       });
-      yield* projectionPipeline.projectEvent(savedEvent);
-
-      const messageRows = yield* sql<{ readonly messageId: string }>`
-        SELECT message_id AS "messageId"
-        FROM projection_thread_messages
-        WHERE thread_id = ${threadId}
-        ORDER BY message_id
-      `;
-      assert.deepEqual(messageRows, [{ messageId: "message-legitimate" }]);
+      assert.deepEqual(
+        yield* sql`SELECT turn_id FROM projection_turns WHERE thread_id = ${threadId}`,
+        [{ turn_id: "turn-early" }],
+      );
+      assert.deepEqual(
+        yield* sql`SELECT message_id FROM projection_thread_messages WHERE thread_id = ${threadId}`,
+        [{ message_id: "assistant-early" }],
+      );
     }),
   );
   it.effect("does not let a later missing placeholder clobber a ready checkpoint", () =>
@@ -4756,140 +4560,6 @@ it.effect("restores pending turn-start metadata across projection pipeline resta
       Layer.provideMerge(
         ServerConfig.layerTest(process.cwd(), {
           prefix: "t3-projection-pipeline-restart-",
-        }),
-        NodeServices.layer,
-      ),
-    ),
-  ),
-);
-
-it.effect("keeps a send cancelled after its retraction completes before provider startup", () =>
-  Effect.gen(function* () {
-    const { dbPath } = yield* ServerConfig;
-    const threadId = ThreadId.make("thread-retraction-settled-cancel");
-    const messageId = MessageId.make("message-retraction-settled-cancel");
-    const requestId = CommandId.make("request-retraction-settled-cancel");
-
-    yield* Effect.gen(function* () {
-      const retractions = yield* ProjectionTurnRetractionRepository;
-      yield* retractions.upsertPending({
-        requestId,
-        threadId,
-        messageId,
-        baselineTurnCount: 9,
-        baselineCheckpointRef: CheckpointRef.make(
-          "refs/t3/threads/thread-retraction-settled-cancel/turn/9",
-        ),
-        targetTurnId: null,
-        providerSendClaimed: false,
-        providerSendState: "unclaimed",
-        firstUserMessage: false,
-        requestedAt: "2026-01-01T00:00:01.000Z",
-        status: "requested",
-        completedAt: null,
-        failedAt: null,
-      });
-      // Retract wins before the provider is up, and the reactor completes the
-      // retraction while startup is still in flight.
-      assert.equal(yield* retractions.cancelPendingProviderSend({ threadId, messageId }), true);
-      yield* retractions.markCompleted({
-        requestId,
-        completedAt: "2026-01-01T00:00:01.100Z",
-        targetTurnId: null,
-      });
-      // The turn-start consumer reaches its claim only now; the message is gone.
-      assert.equal(
-        yield* retractions.claimProviderSend({
-          threadId,
-          messageId,
-          claimedAt: "2026-01-01T00:00:02.000Z",
-        }),
-        "cancelled",
-      );
-    }).pipe(
-      Effect.provide(
-        ProjectionTurnRetractionRepositoryLive.pipe(
-          Layer.provide(makeSqlitePersistenceLive(dbPath)),
-        ),
-      ),
-    );
-  }).pipe(
-    Effect.provide(
-      Layer.provideMerge(
-        ServerConfig.layerTest(process.cwd(), {
-          prefix: "t3-retraction-settled-cancel-",
-        }),
-        NodeServices.layer,
-      ),
-    ),
-  ),
-);
-
-it.effect("retains provider-send claim classification across repository restart", () =>
-  Effect.gen(function* () {
-    const { dbPath } = yield* ServerConfig;
-    const threadId = ThreadId.make("thread-retraction-claim-restart");
-    const messageId = MessageId.make("message-retraction-claim-restart");
-    const requestId = CommandId.make("request-retraction-claim-restart");
-
-    yield* Effect.gen(function* () {
-      const retractions = yield* ProjectionTurnRetractionRepository;
-      assert.equal(
-        yield* retractions.claimProviderSend({
-          threadId,
-          messageId,
-          claimedAt: "2026-01-01T00:00:00.000Z",
-        }),
-        "claimed",
-      );
-      yield* retractions.upsertPending({
-        requestId,
-        threadId,
-        messageId,
-        baselineTurnCount: 0,
-        baselineCheckpointRef: CheckpointRef.make(
-          "refs/t3/threads/thread-retraction-claim-restart/turn/0",
-        ),
-        targetTurnId: null,
-        providerSendClaimed: false,
-        providerSendState: "unclaimed",
-        firstUserMessage: true,
-        requestedAt: "2026-01-01T00:00:01.000Z",
-        status: "requested",
-        completedAt: null,
-        failedAt: null,
-      });
-    }).pipe(
-      Effect.provide(
-        ProjectionTurnRetractionRepositoryLive.pipe(
-          Layer.provide(makeSqlitePersistenceLive(dbPath)),
-        ),
-      ),
-    );
-
-    const restarted = yield* Effect.gen(function* () {
-      const retractions = yield* ProjectionTurnRetractionRepository;
-      assert.equal(yield* retractions.cancelPendingProviderSend({ threadId, messageId }), false);
-      return yield* retractions.getByRequestId({ requestId });
-    }).pipe(
-      Effect.provide(
-        ProjectionTurnRetractionRepositoryLive.pipe(
-          Layer.provide(makeSqlitePersistenceLive(dbPath)),
-        ),
-      ),
-    );
-
-    assert.equal(restarted._tag, "Some");
-    if (restarted._tag === "Some") {
-      assert.equal(restarted.value.providerSendClaimed, true);
-      assert.equal(restarted.value.providerSendState, "claimed");
-      assert.equal(restarted.value.status, "requested");
-    }
-  }).pipe(
-    Effect.provide(
-      Layer.provideMerge(
-        ServerConfig.layerTest(process.cwd(), {
-          prefix: "t3-retraction-claim-restart-",
         }),
         NodeServices.layer,
       ),
