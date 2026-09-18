@@ -102,6 +102,9 @@ export interface ComposerPromptEditorHandle {
   isCaretOnVisualEdge: (edge: "start" | "end") => boolean;
 }
 
+/** Present on the editor element while its content is taller than its minimum height. */
+export const COMPOSER_BEYOND_MINIMUM_HEIGHT_ATTRIBUTE = "data-beyond-minimum-height";
+
 export function isComposerPromptEditorBeyondMinimumHeight(
   element: Pick<HTMLElement, "clientHeight">,
   minimumHeight: number,
@@ -1037,13 +1040,19 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
     if (!rootElement) return;
 
     let animationFrame: number | null = null;
+    const readBeyondMinimumHeight = () => {
+      const minimumHeight = Number.parseFloat(window.getComputedStyle(rootElement).minHeight);
+      const beyondMinimumHeight =
+        Number.isFinite(minimumHeight) &&
+        isComposerPromptEditorBeyondMinimumHeight(rootElement, minimumHeight);
+      // Styles keyed on this attribute apply in the same frame as the height
+      // change, without waiting for the parent to render.
+      rootElement.toggleAttribute(COMPOSER_BEYOND_MINIMUM_HEIGHT_ATTRIBUTE, beyondMinimumHeight);
+      return beyondMinimumHeight;
+    };
     const measureHeight = () => {
       animationFrame = null;
-      const minimumHeight = Number.parseFloat(window.getComputedStyle(rootElement).minHeight);
-      onBeyondMinimumHeightChange(
-        Number.isFinite(minimumHeight) &&
-          isComposerPromptEditorBeyondMinimumHeight(rootElement, minimumHeight),
-      );
+      onBeyondMinimumHeightChange(readBeyondMinimumHeight());
     };
     const scheduleMeasurement = () => {
       if (animationFrame !== null) return;
@@ -1051,8 +1060,14 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
     };
 
     measureHeight();
+    // Resize observers run after layout and before paint.
     const resizeObserver =
-      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(scheduleMeasurement);
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(() => {
+            readBeyondMinimumHeight();
+            scheduleMeasurement();
+          });
     resizeObserver?.observe(rootElement);
     const mutationObserver = new MutationObserver(scheduleMeasurement);
     mutationObserver.observe(rootElement, {

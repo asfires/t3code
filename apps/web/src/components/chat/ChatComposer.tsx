@@ -2134,7 +2134,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     restoreAfterTimelineReachedEnd,
   } = useComposerFocusState();
   const [isComposerExpanded, setIsComposerExpanded] = useState(false);
-  const [isComposerExpandAvailable, setIsComposerExpandAvailable] = useState(false);
   const [composerSubmissionError, setComposerSubmissionError] = useState<string | null>(null);
   const [providerInputSubmissionError, setProviderInputSubmissionError] = useState<string | null>(
     null,
@@ -3199,7 +3198,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     setComposerCursor(collapseExpandedComposerCursor(promptRef.current, promptRef.current.length));
     setComposerTrigger(detectComposerTrigger(promptRef.current, promptRef.current.length));
     setIsComposerExpanded(false);
-    setIsComposerExpandAvailable(false);
     setIsDragOverComposer(false);
     setIsComposerScrollCollapsed(false);
   }, [draftId, activeThreadId, promptRef, setIsComposerScrollCollapsed]);
@@ -3387,7 +3385,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     ) => {
       if (shouldCollapseExpandedComposer(nextPrompt)) {
         setIsComposerExpanded(false);
-        setIsComposerExpandAvailable(false);
       }
       expandComposerForEditorChange();
       if (activePendingProgress?.activeQuestion && pendingUserInputs.length > 0) {
@@ -4056,7 +4053,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   );
 
   const handleComposerBeyondMinimumHeightChange = useCallback((beyondMinimumHeight: boolean) => {
-    setIsComposerExpandAvailable(beyondMinimumHeight);
     if (!beyondMinimumHeight) {
       setIsComposerExpanded(false);
     }
@@ -6533,7 +6529,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               ref={setComposerMenuAnchor}
               data-chat-composer-body="true"
               className={cn(
-                "relative px-3 pb-2 sm:px-4",
+                "group/composer-body relative px-3 pb-2 sm:px-4",
                 isComposerExpanded && "flex min-h-0 flex-1 flex-col",
                 "pt-3.5 sm:pt-4",
                 isComposerApprovalState && "pb-3 sm:pb-4",
@@ -6574,7 +6570,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 </ComposerCommandMenuLayer>
               )}
 
-              {!isMobileViewport && (isComposerExpandAvailable || isComposerExpanded) ? (
+              {!isMobileViewport && !isComposerResting ? (
                 <Tooltip>
                   <TooltipTrigger
                     render={
@@ -6582,7 +6578,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                         type="button"
                         variant="ghost"
                         size="icon-xs"
-                        className="absolute right-4 top-3.5 z-10 text-secondary-label hover:text-foreground sm:top-4"
+                        className={cn(
+                          "absolute right-4 top-3.5 z-10 text-secondary-label hover:text-foreground sm:top-4",
+                          // The editor flags its own height, so the control shows in the
+                          // same frame as the text that makes it useful.
+                          !isComposerExpanded &&
+                            "hidden group-has-[[data-beyond-minimum-height]]/composer-body:inline-flex",
+                        )}
                         aria-label={isComposerExpanded ? "Collapse" : "Expand"}
                         aria-expanded={isComposerExpanded}
                         onPointerDown={(event) => event.preventDefault()}
@@ -7012,8 +7014,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       expanded={isComposerExpanded}
                       onBeyondMinimumHeightChange={handleComposerBeyondMinimumHeightChange}
                       className={cn(
+                        // Always reserve the expand control's gutter so text does not
+                        // rewrap when the control appears.
                         !isMobileViewport &&
-                          (isComposerExpandAvailable || isComposerExpanded) &&
+                          !isComposerResting &&
                           "composer-editor-expand-control-visible pr-8",
                         showMobilePendingAnswerActions && "max-sm:pb-11",
                         isComposerApprovalState && "min-h-8",
