@@ -5,7 +5,6 @@ on:
   pull_request:
     paths:
       - .github/workflows/fork-release.yml
-      - scripts/resolve-nightly-release.ts
       - scripts/update-release-package-versions.ts
       - scripts/build-cli-archive.ts
       - scripts/smoke-cli-archive.ts
@@ -30,32 +29,13 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          sparse-checkout: |
-            /*
-            !/.repos/
-          sparse-checkout-cone-mode: false
-
-      - name: Setup Vite+
-        uses: voidzero-dev/setup-vp@v1
-        with:
-          node-version-file: package.json
-          cache: true
-          run-install: false
-
-      - name: Install release script dependencies
-        run: vp install --filter=@t3tools/scripts...
-
-      - name: Resolve nightly version
+      # Plain, always-increasing versions keep the fork on the stable channel:
+      # <year>.<month><day>.<run number>, for example 2026.918.4. install.sh only
+      # accepts plain tags there, `t3 update` refuses anything lower than what
+      # is installed, and the run number orders several releases in one day.
+      - name: Resolve release version
         id: version
-        run: |
-          node scripts/resolve-nightly-release.ts \
-            --date "$(date -u +%Y%m%d)" \
-            --run-number "$GITHUB_RUN_NUMBER" \
-            --sha "$GITHUB_SHA" \
-            --github-output
+        run: echo "version=$(date -u +%Y).$(date -u +%-m%d).${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build ${{ matrix.platform_key }}
@@ -172,11 +152,9 @@ jobs:
         run: |
           archives=("t3-${RELEASE_VERSION}-linux-x64.tar.gz" "t3-${RELEASE_VERSION}-darwin-arm64.tar.gz")
           sha256sum "${archives[@]}" > SHA256SUMS
-          # Both install.sh and newestCliReleaseVersion accept nightly prereleases.
           gh release create "v${RELEASE_VERSION}" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "T3 Code fork build ${RELEASE_VERSION}" \
             --notes "Built from ${GITHUB_SHA}. Install or update with the command in the README, or run \`t3 update\` on an installed fork build." \
-            --prerelease \
             "${archives[@]}" SHA256SUMS
