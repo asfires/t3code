@@ -1,0 +1,184 @@
+name: Fork CLI release
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/fork-release.yml
+      - scripts/resolve-nightly-release.ts
+      - scripts/update-release-package-versions.ts
+      - scripts/build-cli-archive.ts
+      - scripts/smoke-cli-archive.ts
+      - apps/server/scripts/**
+      - apps/server/vite.config.ts
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-release-${{ github.event_name }}-${{ github.event.pull_request.number || 'dispatch' }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Install release script dependencies
+        run: vp install --filter=@t3tools/scripts...
+
+      - name: Resolve nightly version
+        id: version
+        run: |
+          node scripts/resolve-nightly-release.ts \
+            --date "$(date -u +%Y%m%d)" \
+            --run-number "$GITHUB_RUN_NUMBER" \
+            --sha "$GITHUB_SHA" \
+            --github-output
+
+  build:
+    name: Build ${{ matrix.platform_key }}
+    needs: preflight
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform_key: linux-x64
+            runner: ubuntu-24.04
+            platform: linux
+            arch: x64
+            rust_target: x86_64-unknown-linux-gnu
+          - platform_key: darwin-arm64
+            runner: macos-15
+            platform: mac
+            arch: arm64
+            rust_target: aarch64-apple-darwin
+    env:
+      RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Install build dependencies
+        run: vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/scripts...
+
+      - name: Align package versions
+        run: node scripts/update-release-package-versions.ts "$RELEASE_VERSION"
+
+      # t3#build depends on @t3tools/web#build and stages it in dist/client.
+      - name: Build server bundle and web client
+        run: vp run --filter t3 build
+
+      - name: Build CLI single-executable
+        env:
+          # Keep in step with SEA_NODE_VERSION in apps/server/vite.config.ts.
+          VP_NODE_VERSION: "26.8.2"
+        run: node apps/server/scripts/cli.ts build-exe --verbose
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.rust_target }}
+
+      - name: Build and stage resource monitor
+        run: |
+          cargo build --locked --release \
+            --manifest-path native/resource-monitor/Cargo.toml \
+            --target "${{ matrix.rust_target }}"
+          target_dir="$RUNNER_TEMP/cli-resource-monitor/${{ matrix.platform_key }}"
+          mkdir -p "$target_dir"
+          cp "native/resource-monitor/target/${{ matrix.rust_target }}/release/t3-resource-monitor" \
+            "$target_dir/t3-resource-monitor"
+
+      # With no signing identity, build-cli-archive.ts ad hoc signs all macOS
+      # native libraries, helpers, and the executable before creating the tarball.
+      - name: Build CLI archive
+        run: |
+          node scripts/build-cli-archive.ts \
+            --platform "${{ matrix.platform }}" \
+            --arch "${{ matrix.arch }}" \
+            --version "$RELEASE_VERSION" \
+            --resource-monitor-dir "$RUNNER_TEMP/cli-resource-monitor" \
+            --output-dir release-cli
+
+      - name: Smoke-test CLI archive
+        run: node scripts/smoke-cli-archive.ts --archive release-cli/* --expect-version "$RELEASE_VERSION"
+
+      - name: Upload CLI archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: cli-${{ matrix.platform_key }}
+          path: release-cli/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish fork release
+    if: github.event_name == 'workflow_dispatch'
+    needs: [preflight, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+    steps:
+      - name: Download CLI archives
+        uses: actions/download-artifact@v8
+        with:
+          pattern: cli-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Write checksums and publish
+        working-directory: release-assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          archives=("t3-${RELEASE_VERSION}-linux-x64.tar.gz" "t3-${RELEASE_VERSION}-darwin-arm64.tar.gz")
+          sha256sum "${archives[@]}" > SHA256SUMS
+          # Both install.sh and newestCliReleaseVersion accept nightly prereleases.
+          gh release create "v${RELEASE_VERSION}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "T3 Code fork build ${RELEASE_VERSION}" \
+            --notes "Built from ${GITHUB_SHA}. Install or update with the command in the README, or run \`t3 update\` on an installed fork build." \
+            --prerelease \
+            "${archives[@]}" SHA256SUMS
