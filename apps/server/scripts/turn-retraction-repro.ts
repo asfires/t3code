@@ -204,10 +204,17 @@ const readAssistantReply = (messageId: MessageId) =>
 const wsUrl = `${httpOrigin.replace(/^http/, "ws")}/ws`;
 const socketConstructorLayer = Layer.succeed(
   Socket.WebSocketConstructor,
-  (url, protocols) =>
-    new NodeSocket.NodeWS.WebSocket(url, protocols, {
-      headers: { cookie: sessionCookie },
-    }) as unknown as globalThis.WebSocket,
+  (url, options) =>
+    new NodeSocket.NodeWS.WebSocket(
+      url,
+      typeof options === "string" || Array.isArray(options) ? options : undefined,
+      {
+        headers: {
+          ...(typeof options === "object" && !Array.isArray(options) ? options.headers : {}),
+          cookie: sessionCookie,
+        },
+      },
+    ) as unknown as globalThis.WebSocket,
 );
 const protocolLayer = RpcClient.layerProtocolSocket().pipe(
   Layer.provide(Socket.layerWebSocket(wsUrl).pipe(Layer.provide(socketConstructorLayer))),

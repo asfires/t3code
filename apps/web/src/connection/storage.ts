@@ -75,8 +75,9 @@ const StoredShellSnapshotJson = Schema.fromJsonString(StoredShellSnapshot);
 // v6 pairs with server fork migration 005's full projection rebuild.
 // v7 pairs with server fork migration 006, which rebuilds again now that the
 // turns projector retains checkpointless turns across replayed reverts.
+// v8 also reloads pre-thinking caches so settled reasoning roles are recovered.
 const StoredThreadSnapshot = Schema.Struct({
-  schemaVersion: Schema.Literal(7),
+  schemaVersion: Schema.Literal(8),
   environmentId: EnvironmentId,
   threadId: ThreadId,
   snapshot: OrchestrationThreadDetailSnapshot,
@@ -689,7 +690,7 @@ export const connectionStorageLayer = Layer.effectContext(
       saveThread: (environmentId, snapshot) =>
         Effect.gen(function* () {
           const encoded = yield* encodeStoredThreadSnapshot({
-            schemaVersion: 7,
+            schemaVersion: 8,
             environmentId,
             threadId: snapshot.thread.id,
             snapshot,
