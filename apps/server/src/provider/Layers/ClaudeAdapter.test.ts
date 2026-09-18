@@ -8418,6 +8418,56 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("ignores an interrupt aimed at a turn that already ended", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const endedTurn = yield* sendCompletedClaudeTurn(adapter, harness, session.threadId, "one");
+
+      yield* adapter.interruptTurn(session.threadId, endedTurn.turnId);
+
+      assert.equal(harness.query.interruptCalls.length, 0);
+      assert.equal(harness.query.closeCalls, 0);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("does not let a stale targeted interrupt reach the next turn", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const endedTurn = yield* sendCompletedClaudeTurn(adapter, harness, session.threadId, "one");
+      const nextTurn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "two",
+        attachments: [],
+      });
+
+      yield* adapter.interruptTurn(session.threadId, endedTurn.turnId);
+      assert.equal(harness.query.interruptCalls.length, 0);
+      assert.equal(harness.query.closeCalls, 0);
+
+      yield* adapter.interruptTurn(session.threadId, nextTurn.turnId);
+      assert.equal(harness.query.interruptCalls.length, 1);
+      assert.equal(harness.query.closeCalls, 0);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("promotes background codex exec tasks without promoting ordinary Bash tasks", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

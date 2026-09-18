@@ -5466,6 +5466,24 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     function* (threadId, turnId) {
       const context = yield* requireSession(threadId);
       const activeTurnState = context.turnState;
+      const targetNoLongerActive =
+        turnId !== undefined &&
+        activeTurnState?.turnId !== turnId &&
+        (activeTurnState !== undefined || context.turns.some((turn) => turn.id === turnId));
+      if (targetNoLongerActive) {
+        // A stop aimed at one turn has nothing left to do once that turn has
+        // ended or another turn is running. Turn retraction interrupts its
+        // target from two reactors, so the call that loses the race would
+        // otherwise interrupt whichever turn came next, or take the no-turn
+        // hard stop below and close a healthy session. A target this session
+        // has never seen keeps the old behavior.
+        yield* Effect.logInfo("claude.turn.interrupt-target-inactive", {
+          threadId,
+          requestedTurnId: turnId ?? null,
+          activeTurnId: activeTurnState?.turnId ?? null,
+        });
+        return;
+      }
       if (
         activeTurnState &&
         (turnId === undefined || activeTurnState.turnId === turnId) &&

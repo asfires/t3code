@@ -1689,6 +1689,7 @@ const make = Effect.gen(function* () {
     if (!thread) {
       return;
     }
+    let retractionTargetTurnId: TurnId | null = null;
     if (event.payload.retraction !== undefined) {
       const sendCancelled = yield* turnRetractions.cancelPendingProviderSend({
         threadId: event.payload.threadId,
@@ -1704,6 +1705,7 @@ const make = Effect.gen(function* () {
       if (Option.isSome(retraction) && retraction.value.providerSendState !== "claimed") {
         return;
       }
+      retractionTargetTurnId = Option.isSome(retraction) ? retraction.value.targetTurnId : null;
     }
     const session = thread.session;
     if (!session || session.status === "stopped") {
@@ -1787,9 +1789,16 @@ const make = Effect.gen(function* () {
       });
     };
 
-    // Orchestration turn ids are not provider turn ids, so interrupt by session.
+    // Orchestration turn ids are not provider turn ids, so a plain stop
+    // interrupts by session. A retraction records the provider turn it targets
+    // and its own reactor interrupts that turn as well. Naming the turn here
+    // lets an adapter ignore whichever of the two calls arrives after the turn
+    // ended, instead of reading it as a stop with nothing running.
     yield* providerService
-      .interruptTurn({ threadId: event.payload.threadId })
+      .interruptTurn({
+        threadId: event.payload.threadId,
+        ...(retractionTargetTurnId !== null ? { turnId: retractionTargetTurnId } : {}),
+      })
       .pipe(Effect.catchCause(recoverInterruptFailure));
   });
 

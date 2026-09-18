@@ -1326,6 +1326,58 @@ describe("ProviderCommandReactor", () => {
     }),
   );
 
+  effectIt.effect("names the retracted provider turn when interrupting for a retraction", () =>
+    Effect.gen(function* () {
+      const harness = yield* Effect.promise(() => createHarness());
+      const messageId = asMessageId("user-message-claimed-running");
+
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-claimed-running"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId,
+          role: "user",
+          text: "retract while running",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 1));
+      yield* harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-running-before-retract"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: asTurnId("provider-turn-1"),
+          lastError: null,
+          updatedAt: "2026-01-01T00:00:00.050Z",
+        },
+        createdAt: "2026-01-01T00:00:00.050Z",
+      });
+      yield* harness.engine.dispatch({
+        type: "thread.turn.retract",
+        commandId: CommandId.make("cmd-retract-claimed-running"),
+        threadId: ThreadId.make("thread-1"),
+        messageId,
+        createdAt: "2026-01-01T00:00:00.100Z",
+      });
+      yield* Effect.promise(() => harness.drain());
+
+      expect(harness.interruptTurn).toHaveBeenCalledTimes(1);
+      expect(harness.interruptTurn.mock.calls[0]?.[0]).toEqual({
+        threadId: "thread-1",
+        turnId: "provider-turn-1",
+      });
+    }),
+  );
+
   effectIt.effect("projects starting before a slow provider session finishes", () =>
     Effect.gen(function* () {
       const releaseStart = yield* Deferred.make<void>();
