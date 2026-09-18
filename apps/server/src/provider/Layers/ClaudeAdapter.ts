@@ -5563,7 +5563,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       // interrupt, is a hard session boundary: interrupt() alone can leave the
       // CLI alive, so close the query and let the SDK escalate. A plain
       // in-turn interrupt keeps the session so the turn can be steered.
-      if (hadLiveTasks || !context.turnState) {
+      // Read the turn as it stood when the stop arrived: a successful
+      // interrupt() ends the turn before it resolves, so checking afterwards
+      // would mistake every in-turn interrupt for a stop with nothing running.
+      if (hadLiveTasks || !activeTurnState) {
         yield* stopSessionInternal(context);
       }
     },

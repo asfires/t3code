@@ -163,8 +163,12 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
     };
   }
 
+  /** Runs inside `interrupt()`, for tests where the SDK ends the turn before the call resolves. */
+  public onInterrupt: (() => Promise<void>) | undefined;
+
   readonly interrupt = async (): Promise<void> => {
     this.interruptCalls.push(undefined);
+    await this.onInterrupt?.();
   };
 
   readonly stopTask = async (taskId: string): Promise<void> => {
@@ -8412,6 +8416,54 @@ describe("ClaudeAdapterLive", () => {
       yield* Fiber.join(secondStatusFiber);
 
       assert.equal(harness.query.interruptCalls.length, 2);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("keeps the session when the interrupt ends the turn before it resolves", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "count for a long time",
+        attachments: [],
+      });
+
+      let markTurnCompleted: () => void = () => undefined;
+      const turnCompleted = new Promise<void>((resolve) => {
+        markTurnCompleted = resolve;
+      });
+      yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "turn.completed"),
+        Stream.take(1),
+        Stream.runDrain,
+        Effect.tap(() => Effect.sync(markTurnCompleted)),
+        Effect.forkChild,
+      );
+      harness.query.onInterrupt = async () => {
+        harness.query.emit({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          errors: [],
+          session_id: CLAUDE_ORIGINAL_SESSION_ID,
+          uuid: `result-${turn.turnId}`,
+        } as unknown as SDKMessage);
+        await turnCompleted;
+      };
+
+      yield* adapter.interruptTurn(session.threadId, turn.turnId);
+
+      assert.equal(harness.query.interruptCalls.length, 1);
+      assert.equal(harness.query.closeCalls, 0);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
