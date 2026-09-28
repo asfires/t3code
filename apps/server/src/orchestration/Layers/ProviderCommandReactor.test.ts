@@ -9,6 +9,7 @@ import {
   ProviderSession,
   ProviderDriverKind,
   ProviderInstanceId,
+  type ProviderOptionSelection,
   type VcsRef,
   ProviderSetupError,
 } from "@t3tools/contracts";
@@ -3596,6 +3597,65 @@ describe("ProviderCommandReactor", () => {
         [{ id: "effort", value: "max" }],
       ),
     });
+  });
+
+  it("keeps claude sessions when only the spelling of the options changes", async () => {
+    const harness = await createHarness({
+      threadModelSelection: {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-opus-4-6",
+      },
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+    const startTurn = (index: number, options: ReadonlyArray<ProviderOptionSelection>) =>
+      Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make(`cmd-turn-start-claude-spelling-${index}`),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId(`user-message-claude-spelling-${index}`),
+            role: "user",
+            text: `claude turn ${index}`,
+            attachments: [],
+          },
+          modelSelection: createModelSelection(
+            ProviderInstanceId.make("claudeAgent"),
+            "claude-opus-4-6",
+            options,
+          ),
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        }),
+      );
+
+    // Mobile omits fast mode; web sends it as an explicit false.
+    await startTurn(1, [
+      { id: "effort", value: "high" },
+      { id: "contextWindow", value: "1m" },
+    ]);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await startTurn(2, [
+      { id: "contextWindow", value: "1m" },
+      { id: "fastMode", value: false },
+      { id: "effort", value: "high" },
+    ]);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    await startTurn(3, [
+      { id: "effort", value: "high" },
+      { id: "contextWindow", value: "1m" },
+    ]);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 3);
+    expect(harness.startSession.mock.calls.length).toBe(1);
+
+    await startTurn(4, [
+      { id: "effort", value: "high" },
+      { id: "contextWindow", value: "1m" },
+      { id: "fastMode", value: true },
+    ]);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 4);
+    expect(harness.startSession.mock.calls.length).toBe(2);
   });
 
   it("restarts the provider session when runtime mode is updated on the thread", async () => {

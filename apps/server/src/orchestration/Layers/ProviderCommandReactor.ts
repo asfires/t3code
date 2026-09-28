@@ -193,6 +193,29 @@ export function providerErrorLabelFromInstanceHint(input: {
   );
 }
 
+/**
+ * Whether two Claude selections launch the same session. Clients disagree on
+ * how they spell an unset option (web sends an explicit `fastMode: false`,
+ * mobile omits it) and on option order, so compare what the Claude adapter
+ * reads instead of the raw payloads. The adapter only enables fast mode for
+ * `true`, so `false` and absent are the same launch.
+ */
+function sameClaudeLaunchSelection(
+  previous: ModelSelection | undefined,
+  next: ModelSelection,
+): boolean {
+  if (previous === undefined) return false;
+  const launchOptions = (selection: ModelSelection) =>
+    (selection.options ?? [])
+      .filter((option) => !(option.id === "fastMode" && option.value === false))
+      .toSorted((a, b) => a.id.localeCompare(b.id));
+  return (
+    previous.instanceId === next.instanceId &&
+    previous.model === next.model &&
+    Equal.equals(launchOptions(previous), launchOptions(next))
+  );
+}
+
 function findProviderAdapterRequestError(
   cause: Cause.Cause<ProviderServiceError>,
 ): ProviderAdapterRequestError | undefined {
@@ -909,7 +932,7 @@ const make = Effect.gen(function* () {
       const shouldRestartForModelSelectionChange =
         preferredProvider === "claudeAgent" &&
         requestedModelSelection !== undefined &&
-        !Equal.equals(previousModelSelection, requestedModelSelection);
+        !sameClaudeLaunchSelection(previousModelSelection, requestedModelSelection);
 
       if (
         !runtimeModeChanged &&
