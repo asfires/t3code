@@ -14,6 +14,7 @@ import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -213,6 +214,7 @@ function makeUpdateState(input: {
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
+  const scope = yield* Effect.scope;
   const providerRegistry = yield* ProviderRegistry;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const httpClient = yield* HttpClient.HttpClient;
@@ -302,8 +304,8 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
       }),
     );
 
-  const updateProvider: ProviderMaintenanceRunnerShape["updateProvider"] = Effect.fn(
-    "ProviderMaintenanceRunner.updateProvider",
+  const runUpdate: ProviderMaintenanceRunnerShape["updateProvider"] = Effect.fn(
+    "ProviderMaintenanceRunner.runUpdate",
   )(function* (target) {
     const provider = typeof target === "string" ? target : target.provider;
     const instanceId =
@@ -323,12 +325,17 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
       });
     }
 
-    const setUpdateState = (state: ServerProviderUpdateState | null) =>
-      providerRegistry.setProviderMaintenanceActionState({
-        instanceId,
-        action: "update",
-        state,
-      });
+    const updateStateRef = yield* Ref.make<ServerProviderUpdateState | null>(null);
+    const setUpdateState = (state: ServerProviderUpdateState) =>
+      Ref.set(updateStateRef, state).pipe(
+        Effect.andThen(
+          providerRegistry.setProviderMaintenanceActionState({
+            instanceId,
+            action: "update",
+            state,
+          }),
+        ),
+      );
     const setQueuedState = setUpdateState(
       makeUpdateState({
         status: "queued",
@@ -455,6 +462,22 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
         run: runProviderUpdate(),
       })
       .pipe(
+        // Interruption skips catchCause. Record a terminal state even when
+        // shutdown interrupts an update waiting for the package-manager lock.
+        Effect.onInterrupt(() =>
+          Effect.gen(function* () {
+            const state = yield* Ref.get(updateStateRef);
+            if (state?.status !== "queued" && state?.status !== "running") return;
+            yield* setUpdateState(
+              makeUpdateState({
+                status: "failed",
+                startedAt: state.startedAt,
+                finishedAt: yield* nowIso,
+                message: "Provider update was interrupted. Try again.",
+              }),
+            );
+          }),
+        ),
         Effect.mapError((error) =>
           isServerProviderUpdateError(error)
             ? new ServerProviderUpdateError({
@@ -465,6 +488,11 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
         ),
       );
   });
+
+  // The server owns the installer; a disconnected client only stops waiting
+  // for its result. Closing the service scope still stops and settles updates.
+  const updateProvider: ProviderMaintenanceRunnerShape["updateProvider"] = (target) =>
+    runUpdate(target).pipe(Effect.forkIn(scope), Effect.flatMap(Fiber.join));
 
   return ProviderMaintenanceRunner.of({
     updateProvider,

@@ -38,6 +38,8 @@ import {
   ProviderSetupError,
   ResolvedKeybindingRule,
   type ServerLifecycleStreamEvent,
+  type ServerProvider,
+  type ServerProviderUpdateState,
   ThreadId,
   TurnId,
   UsageLimitSourceId,
@@ -62,6 +64,7 @@ import * as Deferred from "effect/Deferred";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -146,7 +149,10 @@ import {
 import type { ProviderInstance } from "./provider/ProviderDriver.ts";
 import * as ProviderSessionDirectory from "./provider/Services/ProviderSessionDirectory.ts";
 import { ProviderAdapterRequestError } from "./provider/Errors.ts";
-import { makeManualOnlyProviderMaintenanceCapabilities } from "./provider/providerMaintenance.ts";
+import {
+  makeManualOnlyProviderMaintenanceCapabilities,
+  makeProviderMaintenanceCapabilities,
+} from "./provider/providerMaintenance.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
@@ -6334,6 +6340,103 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         type: "keybindingsUpdated",
         payload: { keybindings: [], issues: [] },
       });
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("keeps provider updates and their locks across websocket reconnects", () =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      const releaseUpdate = yield* Deferred.make<void>();
+      const settled = yield* Deferred.make<ServerProviderUpdateState>();
+      const provider = ProviderDriverKind.make("codex");
+      const instanceId = ProviderInstanceId.make("codex");
+      const providers = yield* Ref.make<ReadonlyArray<ServerProvider>>([
+        {
+          instanceId,
+          driver: provider,
+          enabled: true,
+          installed: true,
+          version: "1.0.0",
+          status: "ready",
+          auth: { status: "authenticated" },
+          checkedAt: "2026-04-11T00:00:00.000Z",
+          models: [],
+          slashCommands: [],
+          skills: [],
+        },
+      ]);
+      yield* buildAppUnderTest({
+        layers: {
+          providerRegistry: {
+            getProviders: Ref.get(providers),
+            getProviderMaintenanceCapabilitiesForInstance: (_instanceId, driver, options) =>
+              options?.fresh
+                ? Effect.gen(function* () {
+                    // Hold the update at ownership verification, before any real install.
+                    yield* Deferred.succeed(started, undefined);
+                    yield* Deferred.await(releaseUpdate);
+                    return makeManualOnlyProviderMaintenanceCapabilities({
+                      provider: driver,
+                      packageName: null,
+                    });
+                  })
+                : Effect.succeed(
+                    makeProviderMaintenanceCapabilities({
+                      provider: driver,
+                      packageName: null,
+                      updateExecutable: "unused-test-installer",
+                      updateArgs: [],
+                      updateLockKey: "test-installer",
+                    }),
+                  ),
+            setProviderMaintenanceActionState: ({ state }) =>
+              Effect.gen(function* () {
+                const next = yield* Ref.updateAndGet(providers, (current) =>
+                  current.map(({ updateState: _previous, ...entry }) =>
+                    state ? { ...entry, updateState: state } : entry,
+                  ),
+                );
+                if (state?.finishedAt) yield* Deferred.succeed(settled, state);
+                return next;
+              }),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const connection = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.serverUpdateProvider]({ provider, instanceId }),
+        ),
+      ).pipe(Effect.forkScoped);
+      yield* Deferred.await(started);
+      yield* Fiber.interrupt(connection);
+
+      yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            const duplicate = yield* client[WS_METHODS.serverUpdateProvider]({
+              provider,
+              instanceId,
+            }).pipe(Effect.exit);
+            assert.isTrue(Exit.isFailure(duplicate));
+            assert.equal((yield* Ref.get(providers))[0]?.updateState?.status, "running");
+
+            yield* Deferred.succeed(releaseUpdate, undefined);
+            const terminal = yield* Deferred.await(settled);
+            assert.equal(terminal.status, "failed");
+            assert.equal(terminal.message, "Provider installation changed. Refresh and try again.");
+            const snapshot = yield* client[WS_METHODS.subscribeServerConfig]({}).pipe(
+              Stream.runHead,
+              Effect.map(Option.getOrThrow),
+            );
+            assert.equal(snapshot.type, "snapshot");
+            if (snapshot.type === "snapshot") {
+              assert.deepEqual(snapshot.config.providers[0]?.updateState, terminal);
+            }
+          }),
+        ),
+      );
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
