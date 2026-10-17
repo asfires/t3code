@@ -162,3 +162,73 @@ Architecture and its constraints: `docs/internals/overview.md`. Glossary: `docs/
 
 - Don't verify with browsers or computer use unless the user explicitly agrees or requests it.
 - Security is important, but should not be over-indexed on, especially for dev mode/maintainer-only features.
+
+## Fork-local workflow (asfires fork only — not upstream policy)
+
+This checkout is Adam's fork. `origin` is asfires/t3code; `upstream` is
+pingdotgg/t3code. When merging from upstream, resolve conflicts in this
+section by keeping the fork's version.
+
+- PRs target fork `main` only. Never open a PR against upstream (`gh` is
+  pinned to the fork as a backstop). The usual PR rules above still apply.
+- Small fork-local maintenance changes that do not touch product code, such as
+  updates limited to this fork-local `AGENTS.md` guidance, may skip a PR. Make
+  the change in a worktree, show Adam the final diff, commit only the relevant
+  maintenance files, fetch and rebase onto `origin/main`, then fast-forward
+  push the commit directly to `origin/main`. Keep the main checkout untouched.
+  If the change includes product code or would require a non-fast-forward push,
+  use the normal PR workflow instead.
+- The main checkout at `~/Code/t3code` stays parked on `main`. Never switch
+  its branch or commit there. Do all work in your own worktree — T3 threads
+  created in worktree mode already are; anything else creates one first.
+- This repo IS the daily driver: `t3start` (in `~/.local/bin`) boots Adam's
+  real T3 instance from frozen dist artifacts after fast-forwarding `main`
+  to `origin/main` and rebuilding if stale. Don't run it, don't rebuild the
+  dist artifacts, and don't touch `~/.t3/userdata` from task threads.
+- Merge flow: Adam often opens several PRs from separate T3 Code threads, then
+  asks a new thread to merge them. When explicitly asked to merge all open PRs,
+  inspect and merge every open PR targeting the fork's `main`, then verify that
+  none remain. Do not include an upstream sync unless Adam explicitly asks for
+  one. After all merges are complete, end the final handoff by telling Adam to
+  run `t3r`. That restart runs `t3start`, which fast-forwards the main checkout
+  and launches `t3wt prune` in the background. The prune stops leftover
+  processes (dev servers included) and removes clean worktrees and local
+  branches whose tips are merged into `origin/main`; it does not require Adam
+  to delete remote branches on GitHub. Never stash anything valuable in a
+  merged worktree or count on its dev server outliving the restart.
+- Verification handoff: when the thread's work is done and viewable in the
+  web app, never end with a bare "done" — Adam verifies changes himself in a
+  running app before merging. Start the dev server in the background from
+  the worktree root (`vp run dev`; worktree-local `.t3` state and
+  path-hashed ports make parallel threads safe), and wait for startup. On
+  the first handoff, paste the full pairing URL (`/pair#token=...`) for Adam
+  to click. On later handoffs for the same retained origin, paste the ordinary
+  web URL and do not mint another token unless Adam says the browser needs to
+  pair again. Never open a pairing URL yourself — the token is single-use.
+  Leave the server running — teardown is automatic: once the PR is merged and
+  Adam runs `t3r`, `t3wt prune` stops the worktree's leftover processes and
+  removes it. The link is the whole deliverable.
+  This bullet is standing permission to run the dev server at handoff; it
+  does not extend to browsers or computer use. For changes that aren't
+  visible in the web app, state concretely how to observe the result
+  instead (command to run, log to tail, or the mobile test flow).
+- Fork-only database migrations live in
+  `apps/server/src/persistence/ForkMigrations/` with their own IDs and their
+  own ledger table, run by `runAllMigrations` after upstream's. Never reuse a
+  retired ID (listed in `ForkMigrations.ts`). Never add a fork migration to
+  `Migrations.ts`: the Effect Migrator is a high-water mark, so a fork ID in
+  upstream's sequence either skips upstream's next migration or crashes on it
+  at the following sync.
+- Fork builds ship through `.github/workflows/fork-release.yml`, never upstream's
+  `release.yml`. `gh workflow run fork-release.yml` publishes a GitHub Release
+  with Linux x64 and macOS arm64 CLI archives, which is what `scripts/install.sh`,
+  `t3 update`, and the background service download. Versions are the fork's own
+  and date-based (`2026.918.4`), on the stable channel; never reuse upstream's
+  numbers. Only cut a release when Adam asks. Three values are fork-local and
+  keep the fork's side in an upstream sync: `README.md`,
+  `CLI_RELEASE_REPOSITORY` in `packages/shared/src/cliRelease.ts`, and in
+  `scripts/install.sh` the `repo` value and the block that adds the bin
+  directory to the shell profile.
+- Upstream syncs are explicit and discretionary, done as a
+  `sync-upstream-<date>` branch PR'd into fork `main` — never a bare pull of
+  upstream into `main`.

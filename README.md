@@ -1,141 +1,150 @@
-# T3 Code
+# T3 Code (asfires fork)
 
-T3 Code is an "agent harness control surface". It enables control of the agents on your machine with a best-in-class mobile app ([iOS](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824), [Android](https://play.google.com/store/apps/details?id=com.t3tools.t3code)), [web app](https://app.t3.codes) and [Electron-based desktop app](https://t3.codes).
+This is a personal fork of [T3 Code](https://github.com/pingdotgg/t3code), the
+open source "agent harness control surface" from the T3 team. It tracks
+upstream closely and layers on changes I wanted for my own daily use.
 
-Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, OpenCode, and Google Antigravity. If they're set up on your computer, T3 Code can control them.
+Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build,
+OpenCode, and Google Antigravity. If they're set up on your computer, T3 Code
+can control them.
 
-## "Wait, what are you selling me?"
+## What is different
 
-Nothing. We built T3 Code because we wanted the best possible development experience with agents. We were inspired by existing solutions like the Codex desktop app, Conductor, Claude Desktop and Cursor Glass, but none met our bar.
+In October 2026 the fork restarted on upstream's rewritten orchestrator. Its
+earlier changes are coming back one at a time, so for now it is everything
+upstream ships, plus:
 
-We wanted something performant, remote-ready, and truly open. If we ever go the wrong direction, we want you to have everything you need to fork and build the editor that you want.
+- **Its own release channel.** Installs, `t3 update`, and the background
+  service use this repository's builds. See [Running this fork](#running-this-fork).
+- **Pasted-text chips from older fork builds become plain text.** The new
+  orchestrator cannot read the chips, so the database upgrade puts each paste
+  back into its message.
 
-## Installation
+The full change list is
+[`git log upstream/main..main`](https://github.com/pingdotgg/t3code/compare/main...asfires:t3code:main).
+
+## Running this fork
 
 > [!WARNING]
-> T3 Code currently supports Codex, Claude, Cursor, Grok Build, OpenCode, and Antigravity. Install and authenticate at least one provider before use:
->
-> - Codex: install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`
-> - Claude: install [Claude Code](https://claude.com/product/claude-code) and run `claude auth login`
-> - Cursor: install [Cursor CLI](https://cursor.com/cli) and run `agent login`
-> - Grok Build: install [Grok Build CLI](https://x.ai/cli) and run `grok login`
-> - OpenCode: install [OpenCode](https://opencode.ai) and run `opencode auth login`
-> - Antigravity: enable it in Settings, then use **Install Antigravity** and **Sign in with Google**. No CLI is required.
+> Install and authenticate at least one provider first. See
+> [Requirements](./docs/user/install.md#requirements).
 
-### Command line
+On Linux (x64) or an Apple Silicon Mac:
 
 ```bash
-curl -fsSL https://t3.codes/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/asfires/t3code/main/scripts/install.sh | sh
 ```
 
-On Windows, in PowerShell:
+This downloads the fork's newest self-contained build from
+[this repository's releases](https://github.com/asfires/t3code/releases) and
+puts `t3` in `~/.local/bin`. It needs no Node, no package manager, and no
+compiler. If that directory is not on your `PATH` yet, the installer adds it to
+your zsh, bash, or fish profile, so open a new terminal before running `t3`.
+Set `T3CODE_NO_MODIFY_PATH=1` to leave your profile alone.
 
-```powershell
-irm https://t3.codes/install.ps1 | iex
-```
+| Task                                             | Command              |
+| ------------------------------------------------ | -------------------- |
+| Start the server and open the web app            | `t3`                 |
+| Start the server without a browser               | `t3 serve`           |
+| Keep it running in the background (macOS, Linux) | `t3 service install` |
+| Move to the newest fork build                    | `t3 update`          |
+| Remove it again                                  | `t3 uninstall`       |
 
-Then run `t3` to start the server and open the local web app. `t3 service install` keeps it running in the background, `t3 update` moves to a newer release, and `t3 --help` has the full reference.
+An installed fork build follows the fork: `t3 update`, the background service,
+and the in-app **Update server** action all fetch builds from this repository,
+never upstream's.
 
-To try it once without installing, run `npx t3@latest` instead.
+Do **not** use `https://t3.codes/install.sh`, `npx t3`, Homebrew, winget, or the
+AUR packages if you want this fork. Those install upstream. Windows and Intel
+Macs have no fork build; run [from source](#from-source) there.
 
-### Desktop app
+### Your data
 
-Install the latest version of the desktop app from [GitHub Releases](https://github.com/pingdotgg/t3code/releases), or from your favorite package registry:
+The fork uses the same data directory as upstream (`~/.t3/userdata`), so an
+existing T3 Code install carries straight over. The fork adds its own database
+migrations in a separate ledger. Moving from the fork back to upstream on the
+same data directory is not something I test, so copy `~/.t3/userdata` somewhere
+safe first, or run the fork against its own directory with `T3CODE_HOME`.
 
-#### Windows (`winget`)
+The first start after the orchestrator rewrite copies `state.sqlite` to
+`statev2.sqlite` and imports your threads from the copy, leaving the original
+file as it was. Imported threads keep their messages but not their tool
+activity or reasoning.
+
+### From source
+
+Install [Vite+](https://viteplus.dev/guide/) (`vp`), which supplies the pinned
+Node and pnpm versions, then:
 
 ```bash
-winget install T3Tools.T3Code
+git clone https://github.com/asfires/t3code.git
+cd t3code
+vp install --frozen-lockfile
+vp run --filter @t3tools/web build
+vp run --filter t3 build:bundle
+T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD=false node apps/server/dist/bin.mjs
 ```
 
-#### Windows (`scoop`)
+The environment variable stops the checkout directory itself from being added
+as a project. To update, `git pull` and repeat the install and build steps. A
+source checkout cannot use `t3 update` or `t3 service install`.
 
-```bash
-scoop install extras/t3code
-```
+## Clients
 
-#### macOS (Homebrew)
+**Web** is the surface I use and test. Open the web app your server serves. In
+Chrome, Edge, or Safari you can install it as an app to get its own window and
+Dock icon. [app.t3.codes](https://app.t3.codes) is upstream's build: it will not
+have the fork's UI changes and is not tested against a fork server.
 
-```bash
-brew install --cask t3-code
-```
+**Desktop** has no fork build. The desktop app wraps the same web app and
+bundles the same server, so one built from this checkout would include
+everything above, but I do not build, sign, or test it. Without an Apple
+Developer ID the macOS app is unsigned, so macOS blocks it on first launch and
+it cannot update itself. To build one anyway, follow
+[Desktop artifacts](./docs/operations/development.md#desktop-artifacts). The
+desktop apps from upstream's releases, Homebrew, winget, and the AUR are
+upstream builds.
 
-#### Debian, Ubuntu (`.deb`)
+**Mobile** apps on the App Store and Google Play are upstream builds. They
+connect to any T3 Code server, but I have not tested them against a fork server,
+and fork-only features are not in them.
 
-Download the `.deb` from [GitHub Releases](https://github.com/pingdotgg/t3code/releases), then:
+## Remote access
 
-```bash
-sudo apt install ./T3-Code-*.deb
-```
-
-#### Arch Linux (AUR)
-
-Stable:
-
-```bash
-yay -S t3code-bin
-```
-
-Nightly:
-
-```bash
-yay -S t3code-nightly-bin
-```
-
-The AUR packaging is maintained in this repository under [`packaging/aur`](./packaging/aur).
-
-## Some notes
-
-We are very very early in this project. Expect bugs.
-
-We are (mostly) not accepting contributions yet. Small fixes may be considered. Big features will not be.
+Direct network access with `--host` and Tailscale with `--tailscale-serve` work
+as described in [Remote access](./docs/user/remote-access.md). T3 Connect does
+not: it depends on hosted service configuration that only upstream's official
+builds carry.
 
 ## Documentation
 
-Full docs live in [docs/](./docs). There's no docs site yet.
+Full docs live in [docs/](./docs).
 
-- [Install and first run](./docs/user/install.md)
-- [Permission modes](./docs/user/permission-modes.md)
+- [Install and first run](./docs/user/install.md) (describes upstream's installers; use
+  [Running this fork](#running-this-fork) instead)
+- [Composer](./docs/user/composer.md)
 - [Keyboard shortcuts](./docs/user/keybindings.md)
+- [Permission modes](./docs/user/permission-modes.md)
 - [Project settings](./docs/user/project-settings.md)
-- [Appearance preferences](./docs/user/appearance.md)
 - [Remote access from a phone or another machine](./docs/user/remote-access.md)
-- [Connect Claude Code, Codex, ChatGPT and other agents over MCP](./docs/user/outside-agents.md)
-- [Keeping app and server in sync](./docs/user/updating.md)
 - [Source control integrations](./docs/user/source-control.md)
 - Multiple accounts: [Codex](./docs/user/providers-codex.md) · [Claude](./docs/user/providers-claude.md)
-- [Run T3 Code as a background service](./docs/user/background-service.md)
 
-Building from source? Start at [docs/internals/overview.md](./docs/internals/overview.md).
+Building on the code? Start at [docs/internals/overview.md](./docs/internals/overview.md)
+and [AGENTS.md](./AGENTS.md), which includes the fork-local workflow.
 
-## If you REALLY want to contribute still.... read this first
+## Issues and contributions
 
-### Install `vp`
+Bugs in fork-only behavior belong in
+[this repository's issues](https://github.com/asfires/t3code/issues). Bugs you
+can reproduce on upstream belong with
+[upstream](https://github.com/pingdotgg/t3code/issues); please do not report
+fork problems to the T3 Discord.
 
-T3 Code uses Vite+ so you'll need to install the global `vp` command-line tool.
+Pull requests here target this fork's `main` only. Read
+[CONTRIBUTING.md](./CONTRIBUTING.md) for the upstream conventions, which this
+fork follows.
 
-#### macOS / Linux
+## License
 
-```bash
-curl -fsSL https://vite.plus | bash
-```
-
-#### Windows
-
-```bash
-irm https://vite.plus/ps1 | iex
-```
-
-Checkout their getting started guide for more information: https://viteplus.dev/guide/
-
-### Install dependencies
-
-```bash
-vp i
-```
-
-Read [CONTRIBUTING.md](./CONTRIBUTING.md) before reporting a bug or opening a PR.
-
-Have a feature request? Start an [Ideas discussion](https://github.com/pingdotgg/t3code/discussions/categories/ideas).
-
-Need support? Join the [Discord](https://discord.gg/jn4EGJjrvv).
+MIT, same as upstream.
