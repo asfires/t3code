@@ -16,7 +16,12 @@ import * as SqlClient from "effect/sql/SqlClient";
 import { Command, Flag } from "effect/cli";
 
 import * as ProjectionStore from "../src/orchestration-v2/ProjectionStore.ts";
-import { migrationManifest, runMigrations } from "../src/persistence/Migrations.ts";
+import {
+  forkMigrationManifest,
+  forkMigrationsTable,
+  runAllMigrations,
+} from "../src/persistence/ForkMigrations.ts";
+import { migrationManifest } from "../src/persistence/Migrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 export class MigrateDevDbNotInWorktreeError extends Schema.TaggedError<MigrateDevDbNotInWorktreeError>()(
@@ -91,13 +96,14 @@ export class MigrateDevDbDestinationBusyError extends Schema.TaggedError<Migrate
 export class MigrateDevDbSlotCollisionError extends Schema.TaggedError<MigrateDevDbSlotCollisionError>()(
   "MigrateDevDbSlotCollisionError",
   {
+    ledger: Schema.String,
     slot: Schema.Number,
     codeName: Schema.String,
     appliedName: Schema.String,
   },
 ) {
   override get message(): string {
-    return `Migration slot collision at ${this.slot}: this checkout registers '${this.codeName}' but the database already applied '${this.appliedName}' in that slot. Renumber the new migration to a free slot.`;
+    return `Migration slot collision at ${this.ledger} ${this.slot}: this checkout registers '${this.codeName}' but the database already applied '${this.appliedName}' in that slot. Renumber the new migration to a free slot.`;
   }
 }
 
@@ -395,15 +401,22 @@ const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigra
   };
 });
 
+const migrationLedgers = [
+  ["effect_sql_migrations", migrationManifest],
+  [forkMigrationsTable, forkMigrationManifest],
+] as const;
+
 const verifyMigrationSlots = Effect.fn("verifyMigrationSlots")(function* () {
   const sql = yield* SqlClient.SqlClient;
-  const applied = yield* sql<{ migration_id: number; name: string }>`
-    SELECT migration_id, name FROM effect_sql_migrations`;
-  const appliedById = new Map(applied.map((row) => [Number(row.migration_id), row.name]));
-  for (const [slot, codeName] of migrationManifest) {
-    const appliedName = appliedById.get(slot);
-    if (appliedName !== undefined && appliedName !== codeName) {
-      return yield* new MigrateDevDbSlotCollisionError({ slot, codeName, appliedName });
+  for (const [ledger, manifest] of migrationLedgers) {
+    const applied = yield* sql<{ migration_id: number; name: string }>`
+      SELECT migration_id, name FROM ${sql(ledger)}`;
+    const appliedById = new Map(applied.map((row) => [Number(row.migration_id), row.name]));
+    for (const [slot, codeName] of manifest) {
+      const appliedName = appliedById.get(slot);
+      if (appliedName !== undefined && appliedName !== codeName) {
+        return yield* new MigrateDevDbSlotCollisionError({ ledger, slot, codeName, appliedName });
+      }
     }
   }
 });
@@ -488,7 +501,11 @@ export const runMigrateDevDb = Effect.fn("runMigrateDevDb")(function* (
       const sql = yield* SqlClient.SqlClient;
       // Mirror server boot (persistence/Sqlite.ts).
       yield* sql.unsafe("PRAGMA foreign_keys = ON").unprepared;
-      return yield* runMigrations();
+      const { upstream, fork } = yield* runAllMigrations();
+      return [
+        ...upstream.map(([id, name]) => `${id}_${name}`),
+        ...fork.map(([id, name]) => `fork/${id}_${name}`),
+      ];
     }).pipe(
       Effect.provide(NodeSqliteClient.layer({ filename: snapshotPath })),
       wrapPhase("migrate", snapshotPath),
@@ -551,7 +568,7 @@ export const runMigrateDevDb = Effect.fn("runMigrateDevDb")(function* (
     sizeBytes: Number(size),
     projects: pruned.projects,
     eventCount: pruned.eventCount,
-    executedMigrations: executedMigrations.map(([id, name]) => `${id}_${name}`),
+    executedMigrations,
   };
 });
 
