@@ -1,11 +1,3 @@
-/**
- * TerminalManager - Terminal session orchestration service interface.
- *
- * Owns terminal lifecycle operations, output fanout, and session state
- * transitions for thread-scoped terminals.
- *
- * @module TerminalManager
- */
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import {
   DEFAULT_TERMINAL_ID,
@@ -28,6 +20,7 @@ import {
   type TerminalEvent,
   type TerminalMetadataStreamEvent,
   type TerminalOpenInput,
+  type TerminalObserveInput,
   type TerminalResizeInput,
   type ResourceMonitorProcessTableEntry,
   type TerminalRestartInput,
@@ -40,12 +33,18 @@ import {
   ProviderInstanceId,
 } from "@t3tools/contracts";
 import { makeKeyedCoalescingWorker } from "@t3tools/shared/KeyedCoalescingWorker";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as KeyedLock from "@t3tools/shared/KeyedLock";
+import { AgentScope } from "@t3tools/shared/AgentScope";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import { mergePathEntries } from "@t3tools/shared/shell";
+
+import { acpRegistryManagedBinaryDirectories } from "@t3tools/provider-acp-registry/server";
 import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
-import * as Encoding from "effect/Encoding";
+import * as Base64Url from "effect/encoding/Base64Url";
 import * as Equal from "effect/Equal";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -55,25 +54,24 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
-import * as Semaphore from "effect/Semaphore";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 
 import * as ServerConfig from "../config.ts";
-import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
+import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { makeClaudeEnvironment } from "../provider/Drivers/ClaudeHome.ts";
-import { deriveProviderInstanceConfigMap } from "../provider/Layers/ProviderInstanceRegistryHydration.ts";
+import { deriveProviderInstanceConfigMap } from "../provider/ProviderInstanceRegistryHydration.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
   increment,
   terminalRestartsTotal,
   terminalSessionsTotal,
 } from "../observability/Metrics.ts";
-import { expandHomePath } from "../pathExpansion.ts";
+import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as ProcessRunner from "../processRunner.ts";
 import * as PortScanner from "../preview/PortScanner.ts";
 import * as NativeTelemetryClient from "../resourceTelemetry/NativeTelemetryClient.ts";
-import * as PtyAdapter from "./PtyAdapter.ts";
+import * as PtyAdapter from "@t3tools/shared/PtyAdapter";
 
 export {
   TerminalCwdError,
@@ -93,7 +91,7 @@ export {
 const DEFAULT_HISTORY_LINE_LIMIT = 5_000;
 const DEFAULT_HISTORY_BYTE_LIMIT = 8 * 1024 * 1024;
 const MAX_HISTORY_CHUNK_LENGTH = 16 * 1024;
-const DEFAULT_PERSIST_DEBOUNCE_MS = 40;
+const DEFAULT_PERSIST_DEBOUNCE_MS = 250;
 const DEFAULT_SUBPROCESS_POLL_INTERVAL_MS = 1_000;
 const MAX_SUBPROCESS_POLL_INTERVAL_MS = 60_000;
 const DEFAULT_PROCESS_KILL_GRACE_MS = 1_000;
@@ -101,15 +99,6 @@ const DEFAULT_MAX_RETAINED_INACTIVE_SESSIONS = 128;
 const DEFAULT_OPEN_COLS = 120;
 const DEFAULT_OPEN_ROWS = 30;
 const TERMINAL_ENV_BLOCKLIST = new Set(["PORT", "ELECTRON_RENDERER_PORT", "ELECTRON_RUN_AS_NODE"]);
-const PYTHON_VENV_DIRECTORY_NAMES = [".venv", "venv"] as const;
-const PYTHON_PROJECT_MARKER_NAMES = new Set([
-  "pyproject.toml",
-  "requirements.txt",
-  "setup.py",
-  "setup.cfg",
-  "Pipfile",
-]);
-const MAX_PYTHON_VENV_STARTUP_OUTPUT_LENGTH = 65_536;
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 const MAX_TERMINAL_LABEL_LENGTH = 128;
 const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
@@ -150,50 +139,30 @@ class TerminalProcessSignalError extends Schema.TaggedError<TerminalProcessSigna
   }
 }
 
-/**
- * TerminalManager - Service tag for terminal session orchestration.
- */
 export class TerminalManager extends Context.Service<
   TerminalManager,
   {
-    /**
-     * Open or attach to a terminal session.
-     *
-     * Reuses an existing session for the same thread/terminal id and restores
-     * persisted history on first open.
-     */
     readonly open: (
       input: TerminalOpenInput,
     ) => Effect.Effect<TerminalSessionSnapshot, TerminalError>;
 
-    /**
-     * Attach to a terminal and stream its initial snapshot followed by live events.
-     *
-     * Returns an unsubscribe function.
-     */
     readonly attachStream: (
       input: TerminalAttachInput,
       listener: (event: TerminalAttachStreamEvent) => Effect.Effect<void>,
     ) => Effect.Effect<() => void, TerminalError>;
 
-    /**
-     * Write input bytes to a terminal session.
-     */
+    readonly observeStream: (
+      input: TerminalObserveInput,
+      listener: (event: TerminalAttachStreamEvent) => Effect.Effect<void>,
+    ) => Effect.Effect<() => void, TerminalError>;
+
     readonly write: (input: TerminalWriteInput) => Effect.Effect<void, TerminalError>;
 
-    /**
-     * Resize the PTY backing a terminal session.
-     */
     readonly resize: (input: TerminalResizeInput) => Effect.Effect<void, TerminalError>;
 
-    /**
-     * Clear terminal output history.
-     */
     readonly clear: (input: TerminalClearInput) => Effect.Effect<void, TerminalError>;
 
     /**
-     * Restart a terminal session in place.
-     *
      * Always resets history before spawning the new process.
      */
     readonly restart: (
@@ -201,26 +170,19 @@ export class TerminalManager extends Context.Service<
     ) => Effect.Effect<TerminalSessionSnapshot, TerminalError>;
 
     /**
-     * Close an active terminal session.
-     *
      * When `terminalId` is omitted, closes all sessions for the thread.
      */
     readonly close: (input: TerminalCloseInput) => Effect.Effect<void, TerminalError>;
 
-    /**
-     * Subscribe to terminal runtime events with a direct callback.
-     *
-     * Returns an unsubscribe function.
-     */
+    readonly closeIdle: (input: {
+      readonly threadId: string;
+      readonly terminalId?: string;
+    }) => Effect.Effect<void>;
+
     readonly subscribe: (
       listener: (event: TerminalEvent) => Effect.Effect<void>,
     ) => Effect.Effect<() => void>;
 
-    /**
-     * Subscribe to lightweight terminal metadata with an initial full snapshot.
-     *
-     * Returns an unsubscribe function.
-     */
     readonly subscribeMetadata: (
       listener: (event: TerminalMetadataStreamEvent) => Effect.Effect<void>,
     ) => Effect.Effect<() => void>;
@@ -284,13 +246,13 @@ interface TerminalSessionState {
   exitSignal: number | null;
   updatedAt: string;
   eventSequence: number;
+  inputCount: number;
   cols: number;
   rows: number;
   process: PtyAdapter.PtyProcess | null;
   unsubscribeData: (() => void) | null;
   unsubscribeExit: (() => void) | null;
   hasRunningSubprocess: boolean;
-  /** Normalized child command name when `hasRunningSubprocess`; cleared when idle. */
   childCommandLabel: string | null;
   runtimeEnv: Record<string, string> | null;
 }
@@ -701,7 +663,17 @@ function deriveSubprocessInspectResult(
   terminalPid: number,
   platform: NodeJS.Platform,
 ): TerminalSubprocessInspectResult {
-  const childPid = (snapshot.childrenByParent.get(terminalPid) ?? [])[0];
+  const commandName = (pid: number) =>
+    normalizeChildCommandName(snapshot.commandById.get(pid) ?? "", platform);
+  const shellName = commandName(terminalPid);
+  // Async prompt themes fork the shell into a helper that waits with no
+  // children of its own. That copy is not a command the user started.
+  const childPid = (snapshot.childrenByParent.get(terminalPid) ?? []).find(
+    (pid) =>
+      shellName === null ||
+      commandName(pid) !== shellName ||
+      (snapshot.childrenByParent.get(pid)?.length ?? 0) > 0,
+  );
   if (childPid === undefined) {
     return { hasRunningSubprocess: false, childCommand: null, processIds: [] };
   }
@@ -716,7 +688,7 @@ function deriveSubprocessInspectResult(
       pending.push(pid);
     }
   }
-  const normalized = normalizeChildCommandName(snapshot.commandById.get(childPid) ?? "", platform);
+  const normalized = commandName(childPid);
   return {
     hasRunningSubprocess: true,
     childCommand: normalized ? truncateTerminalWireLabel(normalized) : null,
@@ -848,7 +820,6 @@ export class BoundedTerminalHistory {
     this.cachedValue = null;
     if (this.maxBytes <= 0 || this.maxLines <= 0) {
       this.clear();
-      // Preserve the existing zero-line limit's trailing newline behavior.
       if (this.maxBytes > 0 && text.endsWith("\n")) this.appendChunk("\n");
       return;
     }
@@ -959,14 +930,12 @@ export class BoundedTerminalHistory {
         continue;
       }
       if (first.byteLength === first.data.length && first.lineBreaks === 0) {
-        // ASCII without newlines needs no scan to find the byte cutoff.
         this.trimChunk(bytesToDrop, bytesToDrop, 0);
         continue;
       }
       let offset = 0;
       let bytes = 0;
       let lineBreaks = 0;
-      // Scan only the discarded prefix of one small chunk, never all history.
       while (bytes < bytesToDrop) {
         const codePoint = first.data.codePointAt(offset)!;
         bytes += codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
@@ -1090,10 +1059,17 @@ function findEscapeSequenceEndIndex(input: string, start: number): number | null
   return isEscapeFinalByte(input.charCodeAt(cursor)) ? cursor + 1 : start + 1;
 }
 
+// eslint-disable-next-line no-control-regex -- Terminal sequence introducers must reach the parser.
+const HISTORY_SEQUENCE_START = /[\u001b\u0090\u009b\u009d\u009e\u009f]/;
+
 function sanitizeTerminalHistoryChunk(
   pendingControlSequence: string,
   data: string,
 ): { visibleText: string; pendingControlSequence: string } {
+  if (pendingControlSequence.length === 0 && !HISTORY_SEQUENCE_START.test(data)) {
+    return { visibleText: data, pendingControlSequence: "" };
+  }
+
   const input = `${pendingControlSequence}${data}`;
   let visibleText = "";
   let index = 0;
@@ -1211,11 +1187,11 @@ function legacySafeThreadId(threadId: string): string {
 }
 
 function toSafeThreadId(threadId: string): string {
-  return `terminal_${Encoding.encodeBase64Url(threadId)}`;
+  return `terminal_${Base64Url.encode(threadId)}`;
 }
 
 function toSafeTerminalId(terminalId: string): string {
-  return Encoding.encodeBase64Url(terminalId);
+  return Base64Url.encode(terminalId);
 }
 
 function toSessionKey(threadId: string, terminalId: string): string {
@@ -1233,17 +1209,7 @@ function shouldExcludeTerminalEnvKey(key: string): boolean {
   return TERMINAL_ENV_BLOCKLIST.has(normalizedKey);
 }
 
-// Marker variables the AppImage runtime injects into the process it launches.
-// They describe the AppImage itself, not the user's session, so terminals must
-// not inherit them.
 const APPIMAGE_RUNTIME_ENV_KEYS = ["APPIMAGE", "APPDIR", "ARGV0", "OWD"] as const;
-// Colon-separated search-path variables the AppImage runtime points at its
-// temporary mount (e.g. /tmp/.mount_T3-XXXX/usr/bin, the bundled glib schemas,
-// and an $APPDIR/usr/share XDG data entry). Only the mount segments are
-// dropped; the user's real entries are preserved. When nothing but mount
-// segments remain the variable is removed entirely so consumers fall back to
-// their platform default (e.g. gsettings finds the host schemas instead of
-// reporting "No schemas installed"). See issues #1699 and #5059.
 const APPIMAGE_PATH_LIKE_ENV_KEYS = [
   "PATH",
   "LD_LIBRARY_PATH",
@@ -1259,9 +1225,8 @@ function isPathSegmentUnderAppDir(segment: string, appDir: string): boolean {
 // injects APPIMAGE/APPDIR/ARGV0/OWD plus mount entries on PATH/LD_LIBRARY_PATH.
 // The integrated terminal inherits the server process environment, so without
 // this scrub those leak into the PTY and tools resolve against the AppImage
-// mount instead of the user's real environment (e.g. `php` reporting
-// PHP_BINARY as the AppImage path). See issue #1699. The scrub is gated on an
-// actual AppImage launch so non-AppImage environments are left untouched.
+// mount instead of the user's real environment (e.g. `php` reporting PHP_BINARY
+// as the AppImage path). See issue #1699.
 function stripAppImageRuntimeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   if (env.APPIMAGE === undefined && env.APPDIR === undefined) return env;
 
@@ -1291,7 +1256,9 @@ function stripAppImageRuntimeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 
 function createTerminalSpawnEnv(
   baseEnv: NodeJS.ProcessEnv,
-  runtimeEnv?: Record<string, string> | null,
+  runtimeEnv: Record<string, string> | null | undefined,
+  platform: NodeJS.Platform,
+  home: string,
 ): NodeJS.ProcessEnv {
   const spawnEnv: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(baseEnv)) {
@@ -1301,118 +1268,18 @@ function createTerminalSpawnEnv(
   }
   if (runtimeEnv) {
     for (const [key, value] of Object.entries(runtimeEnv)) {
-      spawnEnv[key] =
-        key === "CODEX_HOME" || key === "CLAUDE_CONFIG_DIR" ? expandHomePath(value) : value;
+      const existingKey =
+        platform === "win32"
+          ? Object.keys(spawnEnv).find((candidate) => candidate.toLowerCase() === key.toLowerCase())
+          : undefined;
+      spawnEnv[existingKey ?? key] =
+        key === "CODEX_HOME" || key === "CLAUDE_CONFIG_DIR" ? expandHomePath(value, home) : value;
     }
   }
-  // Both PTY backends feed truecolor-capable terminal clients.
-  if (spawnEnv.COLORTERM === undefined || spawnEnv.COLORTERM === "") {
+  if (!spawnEnv.COLORTERM && runtimeEnv?.COLORTERM === undefined) {
     spawnEnv.COLORTERM = "truecolor";
   }
   return stripAppImageRuntimeEnv(spawnEnv);
-}
-
-function quotePosixShellArgument(value: string): string {
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
-}
-
-function isZshShellLabel(shellLabel: string): boolean {
-  return /(^|[/\\])zsh(?:\s|$)/i.test(shellLabel);
-}
-
-function isBashShellLabel(shellLabel: string): boolean {
-  return /(^|[/\\])bash(?:\s|$)/i.test(shellLabel);
-}
-
-function pythonVenvPosixMarkerScript(venvPath: string): string {
-  const activationScript = quotePosixShellArgument(`${venvPath}/bin/activate`);
-  return `. ${activationScript}
-__t3code_venv_status=$?
-if [ "$__t3code_venv_status" -eq 0 ]; then
-  printf '\\036T3_VENV_%s:0\\037' "$$"
-else
-  printf '\\036T3_VENV_%s:1\\037' "$$"
-fi
-unset __t3code_venv_status`;
-}
-
-interface PythonVenvActivationBootstrap {
-  readonly venvPath: string;
-  readonly command: string;
-  readonly successMarker: string;
-  readonly failureMarker: string;
-}
-
-function pythonVenvActivationCommand(
-  venvPath: string,
-  shellLabel: string,
-  platform: NodeJS.Platform,
-  processPid: number,
-): PythonVenvActivationBootstrap {
-  const markerKey = `T3_VENV_${processPid}`;
-
-  if (platform !== "win32") {
-    const activationScript = quotePosixShellArgument(`${venvPath}/bin/activate`);
-    return {
-      venvPath,
-      command: ` . ${activationScript}; __t3code_venv_status=$?; if [ "$__t3code_venv_status" -eq 0 ]; then printf '\\036%s:0\\037' '${markerKey}'; else printf '\\036%s:1\\037' '${markerKey}'; fi; unset __t3code_venv_status\r`,
-      successMarker: `\x1e${markerKey}:0\x1f`,
-      failureMarker: `\x1e${markerKey}:1\x1f`,
-    };
-  }
-
-  if (/powershell|pwsh/i.test(shellLabel)) {
-    const activationScript = `${venvPath}\\Scripts\\Activate.ps1`.replaceAll("'", "''");
-    const markerExpression = (status: 0 | 1) => `"$([char]30)${markerKey}:${status}$([char]31)"`;
-    return {
-      venvPath,
-      command: `. '${activationScript}'; if ($?) { [Console]::Write(${markerExpression(0)}) } else { [Console]::Write(${markerExpression(1)}) }\r`,
-      successMarker: `\x1e${markerKey}:0\x1f`,
-      failureMarker: `\x1e${markerKey}:1\x1f`,
-    };
-  }
-
-  return {
-    venvPath,
-    command: `call "${venvPath}\\Scripts\\activate.bat" && echo __T3^_VENV_${processPid}_0__ || echo __T3^_VENV_${processPid}_1__\r`,
-    successMarker: `__T3_VENV_${processPid}_0__`,
-    failureMarker: `__T3_VENV_${processPid}_1__`,
-  };
-}
-
-interface PythonVenvStartupOutputGate {
-  readonly venvPath: string;
-  readonly successMarker: string;
-  readonly failureMarker: string;
-  bufferedOutput: string;
-}
-
-function filterPythonVenvStartupOutput(
-  gate: PythonVenvStartupOutputGate,
-  data: string,
-): { readonly output: string; readonly complete: boolean } {
-  gate.bufferedOutput += data;
-  const successIndex = gate.bufferedOutput.indexOf(gate.successMarker);
-  const failureIndex = gate.bufferedOutput.indexOf(gate.failureMarker);
-  const succeeded = successIndex >= 0 && (failureIndex < 0 || successIndex < failureIndex);
-  const markerIndex = succeeded ? successIndex : failureIndex;
-
-  if (markerIndex >= 0) {
-    const marker = succeeded ? gate.successMarker : gate.failureMarker;
-    const remainingOutput = gate.bufferedOutput.slice(markerIndex + marker.length);
-    return {
-      output: succeeded
-        ? remainingOutput
-        : `\r\nAutomatic Python virtual environment activation failed: ${gate.venvPath}\r\n${remainingOutput}`,
-      complete: true,
-    };
-  }
-
-  if (gate.bufferedOutput.length >= MAX_PYTHON_VENV_STARTUP_OUTPUT_LENGTH) {
-    return { output: gate.bufferedOutput, complete: true };
-  }
-
-  return { output: "", complete: false };
 }
 
 function normalizedRuntimeEnv(
@@ -1431,6 +1298,8 @@ interface TerminalManagerOptions {
   ptyAdapter: PtyAdapter.PtyAdapter["Service"];
   shellResolver?: () => string;
   env?: NodeJS.ProcessEnv;
+  managedBinaryCacheDir?: string;
+  managedBinaryToolsDir?: string;
   subprocessInspector?: TerminalSubprocessInspector;
   processTable?: Effect.Effect<
     ReadonlyArray<ResourceMonitorProcessTableEntry>,
@@ -1474,7 +1343,7 @@ export const resolveProviderInstanceTerminalEnvironment = Effect.fn(
     return yield* new TerminalProviderInstanceNotFoundError({ providerInstanceId });
   }
 
-  let resolved = mergeProviderInstanceEnvironment(instance.environment, input.env ?? {});
+  let resolved = yield* mergeProviderInstanceEnvironment(instance.environment, input.env ?? {});
   if (instance.driver === "codex") {
     const config = decodeCodexSettings(instance.config ?? {});
     if (Option.isSome(config)) {
@@ -1500,7 +1369,7 @@ export const resolveProviderInstanceTerminalEnvironment = Effect.fn(
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.fn("TerminalManager.make")(function* () {
-  const { terminalLogsDir } = yield* ServerConfig.ServerConfig;
+  const { terminalLogsDir, providerStatusCacheDir, baseDir } = yield* ServerConfig.ServerConfig;
   const ptyAdapter = yield* PtyAdapter.PtyAdapter;
   const portDiscovery = yield* PortScanner.PortDiscovery;
   const nativeTelemetry = yield* NativeTelemetryClient.NativeTelemetryClient;
@@ -1524,6 +1393,8 @@ export const make = Effect.fn("TerminalManager.make")(function* () {
         (cause) => new TerminalSubprocessCheckError({ cause, command: "resource-monitor" }),
       ),
     ),
+    managedBinaryCacheDir: providerStatusCacheDir,
+    managedBinaryToolsDir: path.join(baseDir, "tools"),
     registerTerminalProcesses: portDiscovery.registerTerminalProcesses,
     unregisterTerminal: portDiscovery.unregisterTerminal,
     resolveProviderInstanceEnvironment,
@@ -1541,11 +1412,12 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const logsDir = options.logsDir;
   const historyLineLimit = options.historyLineLimit ?? DEFAULT_HISTORY_LINE_LIMIT;
   const historyByteLimit = options.historyByteLimit ?? DEFAULT_HISTORY_BYTE_LIMIT;
-  const platform = yield* HostProcessPlatform;
+  const platform = yield* HostProcess.Platform;
+  const architecture = yield* HostProcess.Architecture;
+  const agentScope = yield* AgentScope;
   // Terminals must inherit the user's full environment (minus the blocklist
   // applied in createTerminalSpawnEnv) — an allowlist here silently strips
   // things like PSModulePath, DISPLAY, proxies, and toolchain variables.
-  // `options.env` is the test seam.
   const baseEnv = options.env ?? process.env;
   const shellResolver = options.shellResolver ?? (() => defaultShellResolver(platform, baseEnv));
   const processRunner = yield* ProcessRunner.ProcessRunner;
@@ -1578,11 +1450,6 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const fetchProcessTableSnapshot: Effect.Effect<
     {
       readonly snapshot: TerminalProcessTableSnapshot;
-      /**
-       * False when the sidecar snapshot failed and this table came from the
-       * spawned fallback. The data is still applied, but the tick counts as
-       * a failure so polling backs off instead of hot-looping the fallback.
-       */
       readonly snapshotSucceeded: boolean;
     },
     TerminalSubprocessCheckError
@@ -1633,154 +1500,13 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const registerTerminalProcesses = options.registerTerminalProcesses ?? (() => Effect.void);
   const unregisterTerminal = options.unregisterTerminal ?? (() => Effect.void);
 
-  const isPythonVenv = Effect.fn("terminal.isPythonVenv")(function* (venvPath: string) {
-    const hasConfig = yield* fileSystem
-      .exists(path.join(venvPath, "pyvenv.cfg"))
-      .pipe(Effect.orElseSucceed(() => false));
-    if (!hasConfig) return false;
-
-    const activationScripts =
-      platform === "win32"
-        ? [
-            path.join(venvPath, "Scripts", "Activate.ps1"),
-            path.join(venvPath, "Scripts", "activate.bat"),
-          ]
-        : [path.join(venvPath, "bin", "activate")];
-    for (const activationScript of activationScripts) {
-      if (yield* fileSystem.exists(activationScript).pipe(Effect.orElseSucceed(() => false))) {
-        return true;
-      }
-    }
-    return false;
-  });
-
-  const findPythonVenv = Effect.fn("terminal.findPythonVenv")(function* (
-    session: TerminalSessionState,
-  ) {
-    const projectRoot = session.runtimeEnv?.T3CODE_PROJECT_ROOT;
-    const searchRoots = [session.cwd, projectRoot].filter(
-      (root, index, roots): root is string => Boolean(root) && roots.indexOf(root) === index,
-    );
-
-    for (const root of searchRoots) {
-      for (const directoryName of PYTHON_VENV_DIRECTORY_NAMES) {
-        const venvPath = path.join(root, directoryName);
-        if (yield* isPythonVenv(venvPath)) return venvPath;
-      }
-    }
-
-    const discovered = new Set<string>();
-    for (const root of searchRoots) {
-      const entries = yield* fileSystem
-        .readDirectory(root)
-        .pipe(Effect.orElseSucceed(() => [] as Array<string>));
-      const isPythonProject = entries.some(
-        (entry) => PYTHON_PROJECT_MARKER_NAMES.has(entry) || entry.endsWith(".py"),
-      );
-      if (!isPythonProject) continue;
-
-      for (const entry of entries) {
-        if (PYTHON_VENV_DIRECTORY_NAMES.some((directoryName) => directoryName === entry)) continue;
-        const candidate = path.join(root, entry);
-        if (yield* isPythonVenv(candidate)) discovered.add(candidate);
-      }
-    }
-
-    return discovered.size === 1 ? (discovered.values().next().value ?? null) : null;
-  });
-
-  const preparePythonVenvZshStartup = Effect.fn("terminal.preparePythonVenvZshStartup")(function* (
-    venvPath: string,
-    spawnEnv: NodeJS.ProcessEnv,
-  ) {
-    const userZdotdir = spawnEnv.ZDOTDIR?.trim() || spawnEnv.HOME?.trim();
-    if (!userZdotdir) return null;
-
-    const directory = yield* fileSystem.makeTempDirectory({
-      directory: logsDir,
-      prefix: ".zsh-venv-",
-    });
-    const quotedUserZdotdir = quotePosixShellArgument(userZdotdir);
-    const quotedWrapperZdotdir = quotePosixShellArgument(directory);
-    const sourceUserStartupFile = (name: string) => `ZDOTDIR="$__t3code_user_zdotdir"
-if [[ -r "$ZDOTDIR/${name}" ]]; then
-  source "$ZDOTDIR/${name}"
-fi
-__t3code_user_zdotdir="\${ZDOTDIR:-$HOME}"`;
-
-    yield* Effect.gen(function* () {
-      yield* fileSystem.writeFileString(
-        path.join(directory, ".zshenv"),
-        `typeset -g __t3code_user_zdotdir=${quotedUserZdotdir}
-typeset -g __t3code_wrapper_zdotdir=${quotedWrapperZdotdir}
-${sourceUserStartupFile(".zshenv")}
-ZDOTDIR="$__t3code_wrapper_zdotdir"
-`,
-      );
-      yield* fileSystem.writeFileString(
-        path.join(directory, ".zprofile"),
-        `${sourceUserStartupFile(".zprofile")}
-ZDOTDIR="$__t3code_wrapper_zdotdir"
-`,
-      );
-      yield* fileSystem.writeFileString(
-        path.join(directory, ".zshrc"),
-        `${sourceUserStartupFile(".zshrc")}
-IFS= read -r __t3code_venv_trigger
-unset __t3code_venv_trigger
-${pythonVenvPosixMarkerScript(venvPath)}
-ZDOTDIR="$__t3code_user_zdotdir"
-unset __t3code_user_zdotdir __t3code_wrapper_zdotdir
-`,
-      );
-    }).pipe(
-      Effect.onError(() =>
-        fileSystem.remove(directory, { recursive: true, force: true }).pipe(Effect.ignore),
-      ),
-    );
-
-    return {
-      directory,
-      env: { ...spawnEnv, ZDOTDIR: directory },
-    };
-  });
-
-  const preparePythonVenvBashStartup = Effect.fn("terminal.preparePythonVenvBashStartup")(
-    function* (venvPath: string) {
-      const directory = yield* fileSystem.makeTempDirectory({
-        directory: logsDir,
-        prefix: ".bash-venv-",
-      });
-      const rcfile = path.join(directory, "bashrc");
-
-      yield* fileSystem
-        .writeFileString(
-          rcfile,
-          `if [ -r "$HOME/.bashrc" ]; then
-  . "$HOME/.bashrc"
-fi
-IFS= read -r __t3code_venv_trigger
-unset __t3code_venv_trigger
-${pythonVenvPosixMarkerScript(venvPath)}
-`,
-        )
-        .pipe(
-          Effect.onError(() =>
-            fileSystem.remove(directory, { recursive: true, force: true }).pipe(Effect.ignore),
-          ),
-        );
-
-      return { directory, rcfile };
-    },
-  );
-
   yield* fileSystem.makeDirectory(logsDir, { recursive: true }).pipe(Effect.orDie);
 
   const managerStateRef = yield* SynchronizedRef.make<TerminalManagerState>({
     sessions: new Map(),
     killFibers: new Map(),
   });
-  const threadLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
+  const threadLocks = yield* KeyedLock.make<string>();
   const terminalEventListeners = new Set<(event: TerminalEvent) => Effect.Effect<void>>();
   const workerScope = yield* Scope.make("sequential");
   yield* Effect.addFinalizer(() => Scope.close(workerScope, Exit.void));
@@ -1809,29 +1535,10 @@ ${pythonVenvPosixMarkerScript(venvPath)}
     f: (state: TerminalManagerState) => readonly [A, TerminalManagerState],
   ) => SynchronizedRef.modify(managerStateRef, f);
 
-  const getThreadSemaphore = (threadId: string) =>
-    SynchronizedRef.modifyEffect(threadLocksRef, (current) => {
-      const existing: Option.Option<Semaphore.Semaphore> = Option.fromNullishOr(
-        current.get(threadId),
-      );
-      return Option.match(existing, {
-        onNone: () =>
-          Semaphore.make(1).pipe(
-            Effect.map((semaphore) => {
-              const next = new Map(current);
-              next.set(threadId, semaphore);
-              return [semaphore, next] as const;
-            }),
-          ),
-        onSome: (semaphore) => Effect.succeed([semaphore, current] as const),
-      });
-    });
-
   const withThreadLock = <A, E, R>(
     threadId: string,
     effect: Effect.Effect<A, E, R>,
-  ): Effect.Effect<A, E, R> =>
-    Effect.flatMap(getThreadSemaphore(threadId), (semaphore) => semaphore.withPermit(effect));
+  ): Effect.Effect<A, E, R> => threadLocks.withLock(threadId, effect);
 
   const clearKillFiber = Effect.fn("terminal.clearKillFiber")(function* (
     process: PtyAdapter.PtyProcess | null,
@@ -1860,6 +1567,11 @@ ${pythonVenvPosixMarkerScript(venvPath)}
     fiber: Fiber.Fiber<void, never>,
   ) {
     yield* modifyManagerState((state) => {
+      // The child may finish (and run its finalizer) before this registration.
+      // Check inside the synchronized update so completed fibers are not retained.
+      if (fiber.pollUnsafe() !== undefined) {
+        return [undefined, state] as const;
+      }
       const killFibers = new Map(state.killFibers);
       killFibers.set(process, fiber);
       return [undefined, { ...state, killFibers }] as const;
@@ -1871,49 +1583,66 @@ ${pythonVenvPosixMarkerScript(venvPath)}
     threadId: string,
     terminalId: string,
   ) {
-    const terminated = yield* Effect.try({
-      try: () => process.kill("SIGTERM"),
-      catch: (cause) =>
-        new TerminalProcessSignalError({
-          cause,
-          signal: "SIGTERM",
-          terminalPid: process.pid,
-        }),
-    }).pipe(
-      Effect.as(true),
-      Effect.catch((error) =>
-        Effect.logWarning("failed to kill terminal process", {
-          threadId,
-          terminalId,
-          signal: "SIGTERM",
-          cause: error,
-        }).pipe(Effect.as(false)),
-      ),
-    );
-    if (!terminated) {
-      return;
-    }
+    // Subscribe before SIGTERM so an immediate exit is not missed. Released with
+    // Effect.ensuring because a JS `finally` does not run when the fiber is interrupted.
+    const exited = Deferred.makeUnsafe<void>();
+    const unsubscribeExit = process.onExit(() => {
+      Deferred.doneUnsafe(exited, Effect.void);
+    });
+    yield* Effect.gen(function* () {
+      const terminated = yield* Effect.try({
+        try: () => process.kill("SIGTERM"),
+        catch: (cause) =>
+          new TerminalProcessSignalError({
+            cause,
+            signal: "SIGTERM",
+            terminalPid: process.pid,
+          }),
+      }).pipe(
+        Effect.as(true),
+        Effect.catch((error) =>
+          Effect.logWarning("failed to kill terminal process", {
+            threadId,
+            terminalId,
+            signal: "SIGTERM",
+            cause: error,
+          }).pipe(Effect.as(false)),
+        ),
+      );
+      if (!terminated) {
+        return;
+      }
 
-    yield* Effect.sleep(processKillGraceMs);
+      const exitedBeforeGrace = yield* Deferred.await(exited).pipe(
+        Effect.as(true),
+        Effect.timeoutOrElse({
+          duration: processKillGraceMs,
+          orElse: () => Effect.succeed(false),
+        }),
+      );
+      if (exitedBeforeGrace) {
+        return;
+      }
 
-    yield* Effect.try({
-      try: () => process.kill("SIGKILL"),
-      catch: (cause) =>
-        new TerminalProcessSignalError({
-          cause,
-          signal: "SIGKILL",
-          terminalPid: process.pid,
-        }),
-    }).pipe(
-      Effect.catch((error) =>
-        Effect.logWarning("failed to force-kill terminal process", {
-          threadId,
-          terminalId,
-          signal: "SIGKILL",
-          cause: error,
-        }),
-      ),
-    );
+      yield* Effect.try({
+        try: () => process.kill("SIGKILL"),
+        catch: (cause) =>
+          new TerminalProcessSignalError({
+            cause,
+            signal: "SIGKILL",
+            terminalPid: process.pid,
+          }),
+      }).pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("failed to force-kill terminal process", {
+            threadId,
+            terminalId,
+            signal: "SIGKILL",
+            cause: error,
+          }),
+        ),
+      );
+    }).pipe(Effect.ensuring(Effect.sync(unsubscribeExit)));
   });
 
   const startKillEscalation = Effect.fn("terminal.startKillEscalation")(function* (
@@ -2187,16 +1916,7 @@ ${pythonVenvPosixMarkerScript(venvPath)}
     terminalId: string,
   ): Effect.fn.Return<TerminalSessionState, TerminalSessionLookupError> {
     return yield* Effect.flatMap(getSession(threadId, terminalId), (session) =>
-      Option.match(session, {
-        onNone: () =>
-          Effect.fail(
-            new TerminalSessionLookupError({
-              threadId,
-              terminalId,
-            }),
-          ),
-        onSome: Effect.succeed,
-      }),
+      Effect.fromOption(session, () => new TerminalSessionLookupError({ threadId, terminalId })),
     );
   });
 
@@ -2411,10 +2131,17 @@ ${pythonVenvPosixMarkerScript(venvPath)}
       );
     }
 
+    const launch = yield* agentScope.wrap({
+      command: candidate.shell,
+      args: candidate.args ?? [],
+      name: "terminal",
+      env: spawnEnv,
+      survivesRestart: true,
+    });
     const attempt = yield* Effect.result(
       options.ptyAdapter.spawn({
-        shell: candidate.shell,
-        ...(candidate.args ? { args: candidate.args } : {}),
+        shell: launch.command,
+        ...(launch.args.length > 0 ? { args: [...launch.args] } : {}),
         cwd: session.cwd,
         cols: session.cols,
         rows: session.rows,
@@ -2475,124 +2202,53 @@ ${pythonVenvPosixMarkerScript(venvPath)}
       increment(terminalSessionsTotal, { lifecycle: eventType }).pipe(
         Effect.andThen(
           Effect.gen(function* () {
-            let shellCandidates = resolveShellCandidates(shellResolver, platform, baseEnv);
-            let terminalEnv = createTerminalSpawnEnv(baseEnv, session.runtimeEnv);
-            const pythonVenv = yield* findPythonVenv(session);
-            const preferredShell = shellCandidates[0];
-            const preferredShellLabel = preferredShell
-              ? formatShellCandidate(preferredShell)
-              : null;
-            const preparedZshStartup =
-              pythonVenv && preferredShellLabel && isZshShellLabel(preferredShellLabel)
-                ? yield* preparePythonVenvZshStartup(pythonVenv, terminalEnv).pipe(
-                    Effect.catch((error) =>
-                      Effect.logWarning("failed to prepare zsh virtual environment startup", {
-                        error,
-                        venvPath: pythonVenv,
-                      }).pipe(Effect.as(null)),
-                    ),
-                  )
-                : null;
-            if (preparedZshStartup) terminalEnv = preparedZshStartup.env;
-            const preparedBashStartup =
-              pythonVenv &&
-              preferredShell &&
-              preferredShellLabel &&
-              isBashShellLabel(preferredShellLabel)
-                ? yield* preparePythonVenvBashStartup(pythonVenv).pipe(
-                    Effect.catch((error) =>
-                      Effect.logWarning("failed to prepare bash virtual environment startup", {
-                        error,
-                        venvPath: pythonVenv,
-                      }).pipe(Effect.as(null)),
-                    ),
-                  )
-                : null;
-            if (preparedBashStartup) {
-              shellCandidates = shellCandidates.map((candidate) =>
-                isBashShellLabel(formatShellCandidate(candidate))
-                  ? {
-                      ...candidate,
-                      args: [...(candidate.args ?? []), "--rcfile", preparedBashStartup.rcfile],
-                    }
-                  : candidate,
+            const shellCandidates = resolveShellCandidates(shellResolver, platform, baseEnv);
+            const terminalEnv = createTerminalSpawnEnv(
+              baseEnv,
+              session.runtimeEnv,
+              platform,
+              yield* HostProcess.HomeDirectory,
+            );
+            // Append (never prepend) managed ACP agent install directories so
+            // `kimi login` and friends resolve by name without shadowing any
+            // system or user tool of the same name.
+            if (
+              options.managedBinaryCacheDir !== undefined &&
+              options.managedBinaryToolsDir !== undefined
+            ) {
+              const managedDirectories = yield* acpRegistryManagedBinaryDirectories({
+                cacheDir: options.managedBinaryCacheDir,
+                toolsDir: options.managedBinaryToolsDir,
+                platform,
+                architecture,
+              }).pipe(
+                Effect.provideService(FileSystem.FileSystem, fileSystem),
+                Effect.provideService(Path.Path, path),
               );
+              if (managedDirectories.length > 0) {
+                const delimiter = platform === "win32" ? ";" : ":";
+                const pathKey =
+                  platform === "win32"
+                    ? (Object.keys(terminalEnv).find(
+                        (candidate) => candidate.toLowerCase() === "path",
+                      ) ?? "PATH")
+                    : "PATH";
+                const merged = mergePathEntries(
+                  terminalEnv[pathKey],
+                  managedDirectories.join(delimiter),
+                  platform,
+                );
+                if (merged !== undefined) {
+                  terminalEnv[pathKey] = merged;
+                }
+              }
             }
             const spawnResult = yield* trySpawn(shellCandidates, terminalEnv, session);
             ptyProcess = spawnResult.process;
             startedShell = spawnResult.shellLabel;
 
             const processPid = ptyProcess.pid;
-            const usesZshStartup =
-              preparedZshStartup !== null && isZshShellLabel(spawnResult.shellLabel);
-            const usesBashStartup =
-              preparedBashStartup !== null &&
-              isBashShellLabel(spawnResult.shellLabel) &&
-              spawnResult.shellLabel.includes(preparedBashStartup.rcfile);
-            const usesPreparedStartup = usesZshStartup || usesBashStartup;
-            let startupDirectory =
-              preparedZshStartup?.directory ?? preparedBashStartup?.directory ?? null;
-            if (startupDirectory && !usesPreparedStartup) {
-              yield* fileSystem
-                .remove(startupDirectory, { recursive: true, force: true })
-                .pipe(Effect.ignore);
-              startupDirectory = null;
-            }
-            const cleanupPreparedStartup = () => {
-              const directory = startupDirectory;
-              if (!directory) return;
-              startupDirectory = null;
-              runFork(
-                fileSystem.remove(directory, { recursive: true, force: true }).pipe(Effect.ignore),
-              );
-            };
-            const activationBootstrap = pythonVenv
-              ? pythonVenvActivationCommand(
-                  pythonVenv,
-                  spawnResult.shellLabel,
-                  platform,
-                  processPid,
-                )
-              : null;
-            let startupOutputGate: PythonVenvStartupOutputGate | null = activationBootstrap
-              ? {
-                  venvPath: activationBootstrap.venvPath,
-                  successMarker: activationBootstrap.successMarker,
-                  failureMarker: activationBootstrap.failureMarker,
-                  bufferedOutput: "",
-                }
-              : null;
-            const unsubscribeData = ptyProcess.onData((data) => {
-              let output = data;
-              if (startupOutputGate) {
-                const filtered = filterPythonVenvStartupOutput(startupOutputGate, data);
-                output = filtered.output;
-                if (filtered.complete) {
-                  startupOutputGate = null;
-                  cleanupPreparedStartup();
-                }
-              }
-              if (output.length === 0) return;
-              if (!enqueueProcessEvent(session, processPid, { type: "output", data: output })) {
-                return;
-              }
-              runFork(drainProcessEvents(session, processPid));
-            });
-            const unsubscribeExit = ptyProcess.onExit((event) => {
-              let shouldDrain = false;
-              if (startupOutputGate) {
-                const { venvPath } = startupOutputGate;
-                startupOutputGate = null;
-                cleanupPreparedStartup();
-                shouldDrain = enqueueProcessEvent(session, processPid, {
-                  type: "output",
-                  data: `\r\nAutomatic Python virtual environment activation did not complete: ${venvPath}\r\n`,
-                });
-              }
-              shouldDrain =
-                enqueueProcessEvent(session, processPid, { type: "exit", event }) || shouldDrain;
-              if (shouldDrain) runFork(drainProcessEvents(session, processPid));
-            });
+            let eventsActivated = false;
 
             let eventStamp: ReturnType<typeof advanceEventSequence> = {
               updatedAt: session.updatedAt,
@@ -2602,27 +2258,22 @@ ${pythonVenvPosixMarkerScript(venvPath)}
               session.process = ptyProcess;
               session.pid = processPid;
               session.status = "running";
-              session.unsubscribeData = unsubscribeData;
-              session.unsubscribeExit = unsubscribeExit;
+              // onExit may replay an exit immediately; accept it before subscribing.
+              session.unsubscribeData = spawnResult.process.onData((data) => {
+                if (!enqueueProcessEvent(session, processPid, { type: "output", data })) {
+                  return;
+                }
+                if (eventsActivated) runFork(drainProcessEvents(session, processPid));
+              });
+              session.unsubscribeExit = spawnResult.process.onExit((event) => {
+                if (!enqueueProcessEvent(session, processPid, { type: "exit", event })) {
+                  return;
+                }
+                if (eventsActivated) runFork(drainProcessEvents(session, processPid));
+              });
               eventStamp = advanceEventSequence(session);
               return [undefined, state] as const;
             });
-
-            if (activationBootstrap) {
-              yield* Effect.try({
-                try: () =>
-                  spawnResult.process.write(
-                    usesPreparedStartup ? "\r" : activationBootstrap.command,
-                  ),
-                catch: (cause) =>
-                  new TerminalWriteError({
-                    threadId: session.threadId,
-                    terminalId: session.terminalId,
-                    terminalPid: processPid,
-                    cause,
-                  }),
-              });
-            }
 
             yield* publishEvent({
               type: eventType,
@@ -2631,6 +2282,9 @@ ${pythonVenvPosixMarkerScript(venvPath)}
               sequence: eventStamp.sequence,
               snapshot: snapshot(session),
             });
+            // Publish startup before draining any events replayed during subscription.
+            eventsActivated = true;
+            if (session.processEventDrainRunning) runFork(drainProcessEvents(session, processPid));
           }),
         ),
       ),
@@ -2735,7 +2389,7 @@ ${pythonVenvPosixMarkerScript(venvPath)}
     }
 
     const inspectorOption = yield* acquireSubprocessInspector.pipe(
-      Effect.map(Option.some),
+      Effect.asSome,
       Effect.catch((reason) =>
         Effect.logWarning("failed to snapshot processes for terminal subprocess polling", {
           reason,
@@ -2761,7 +2415,7 @@ ${pythonVenvPosixMarkerScript(venvPath)}
     ) {
       const terminalPid = session.pid;
       const inspectResult = yield* subprocessInspector(terminalPid).pipe(
-        Effect.map(Option.some),
+        Effect.asSome,
         Effect.catch((reason) =>
           Effect.logWarning("failed to check terminal subprocess activity", {
             threadId: session.threadId,
@@ -2914,6 +2568,7 @@ ${pythonVenvPosixMarkerScript(venvPath)}
         exitSignal: null,
         updatedAt: yield* nowIso,
         eventSequence: 0,
+        inputCount: 0,
         cols,
         rows,
         process: null,
@@ -3104,7 +2759,11 @@ ${pythonVenvPosixMarkerScript(venvPath)}
       };
     });
 
-  const attachStream: TerminalManager["Service"]["attachStream"] = (input, listener) => {
+  const streamSession = (
+    input: TerminalObserveInput,
+    initial: Effect.Effect<TerminalSessionSnapshot, TerminalError>,
+    listener: (event: TerminalAttachStreamEvent) => Effect.Effect<void>,
+  ) => {
     let unsubscribe: (() => void) | null = null;
 
     return Effect.gen(function* () {
@@ -3125,7 +2784,7 @@ ${pythonVenvPosixMarkerScript(venvPath)}
         return attachEvent ? listener(attachEvent) : Effect.void;
       });
 
-      const initialSnapshot = yield* openOrAttachForStream(input);
+      const initialSnapshot = yield* initial;
 
       yield* listener({
         type: "snapshot",
@@ -3160,6 +2819,19 @@ ${pythonVenvPosixMarkerScript(venvPath)}
       ),
     );
   };
+
+  const attachStream: TerminalManager["Service"]["attachStream"] = (input, listener) =>
+    streamSession(input, openOrAttachForStream(input), listener);
+
+  const observeStream: TerminalManager["Service"]["observeStream"] = (input, listener) =>
+    streamSession(
+      input,
+      withThreadLock(
+        input.threadId,
+        requireSession(input.threadId, input.terminalId).pipe(Effect.map(snapshot)),
+      ),
+      listener,
+    );
 
   const metadataEventFromTerminalEvent = (
     event: TerminalEvent,
@@ -3254,6 +2926,7 @@ ${pythonVenvPosixMarkerScript(venvPath)}
         terminalId,
       });
     }
+    session.inputCount += 1;
     yield* Effect.try({
       try: () => process.write(input.data),
       catch: (cause) =>
@@ -3268,7 +2941,6 @@ ${pythonVenvPosixMarkerScript(venvPath)}
 
   const resizeLocked = Effect.fn("terminal.resize")(function* (input: TerminalResizeInput) {
     const session = yield* getSession(input.threadId, input.terminalId);
-    // ResizeObserver traffic can already be in flight when the UI closes the session.
     if (Option.isNone(session)) {
       return;
     }
@@ -3335,6 +3007,7 @@ ${pythonVenvPosixMarkerScript(venvPath)}
           exitSignal: null,
           updatedAt: yield* nowIso,
           eventSequence: 0,
+          inputCount: 0,
           cols,
           rows,
           process: null,
@@ -3419,14 +3092,58 @@ ${pythonVenvPosixMarkerScript(venvPath)}
       }),
     );
 
+  const closeIdle: TerminalManager["Service"]["closeIdle"] = (input) =>
+    withThreadLock(
+      input.threadId,
+      Effect.gen(function* () {
+        const running = (yield* sessionsForThread(input.threadId)).filter(
+          (session): session is TerminalSessionState & { pid: number } =>
+            session.status === "running" &&
+            Number.isInteger(session.pid) &&
+            (input.terminalId === undefined || session.terminalId === input.terminalId),
+        );
+        if (running.length === 0) return;
+        const activityMark = (session: TerminalSessionState) =>
+          session.eventSequence + session.inputCount;
+        const marks = new Map(
+          running.map((session) => [session.terminalId, activityMark(session)]),
+        );
+        // Inspect now instead of trusting the last poll, so a command started
+        // since then keeps its terminal.
+        const { inspector } = yield* acquireSubprocessInspector;
+        yield* Effect.forEach(
+          running,
+          (session) =>
+            inspector(session.pid).pipe(
+              Effect.flatMap((result) =>
+                result.hasRunningSubprocess ||
+                activityMark(session) !== marks.get(session.terminalId)
+                  ? Effect.void
+                  : closeSession(input.threadId, session.terminalId, false),
+              ),
+            ),
+          { discard: true },
+        );
+      }),
+    ).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("failed to close idle terminals", {
+          threadId: input.threadId,
+          error: error.message,
+        }),
+      ),
+    );
+
   return TerminalManager.of({
     open,
     attachStream,
+    observeStream,
     write,
     resize,
     clear,
     restart,
     close,
+    closeIdle,
     subscribe,
     subscribeMetadata,
   });

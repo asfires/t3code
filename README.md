@@ -10,36 +10,24 @@ can control them.
 
 ## What is different
 
-Everything upstream ships, plus:
+In October 2026 the fork restarted on upstream's rewritten orchestrator. Its
+earlier changes are coming back one at a time, so for now it is everything
+upstream ships, plus:
 
-- **Pasted-text chips.** Large pastes fold into an editable, numbered chip
-  instead of filling the composer, and survive draft recovery.
-- **New thread defaults.** Pick the model every new thread starts with, and set
-  per-provider defaults for reasoning effort, context window, speed, and
-  permission mode under Settings.
-- **Claude extras.** Fable 5.1 model support, follow-up prompt suggestions after
-  a turn (press Tab to accept), and Codex runs that Claude launches in the
-  background show up in the Agents view.
-- **Fonts and typography.** Pick from the host machine's installed fonts, and
-  size the interface, prompt, code, tool output, and terminal separately.
-- **Worktree branches are project-scoped.** New worktree threads use the
-  project's directory name as their branch namespace.
-- **Terminals activate Python virtual environments** (`.venv` or `venv`)
-  automatically.
-- **Server extras.** `T3CODE_SESSION_TTL` controls how long new browser
-  sessions last, and projections can be rebuilt from event history.
-- **Smaller fixes** across sidebar status, minimap scrolling, theme import,
-  reconnect-after-restart, and Claude session resume.
+- **Its own release channel.** Installs, `t3 update`, and the background
+  service use this repository's builds. See [Running this fork](#running-this-fork).
+- **Pasted-text chips from older fork builds become plain text.** The new
+  orchestrator cannot read the chips, so the database upgrade puts each paste
+  back into its message.
 
-The user docs under [docs/user](./docs/user) describe each of these in the
-relevant feature section. The full change list is
+The full change list is
 [`git log upstream/main..main`](https://github.com/pingdotgg/t3code/compare/main...asfires:t3code:main).
 
 ## Running this fork
 
 > [!WARNING]
 > Install and authenticate at least one provider first. See
-> [Providers](./docs/user/install.md#providers).
+> [Requirements](./docs/user/install.md#requirements).
 
 On Linux (x64) or an Apple Silicon Mac:
 
@@ -77,6 +65,11 @@ existing T3 Code install carries straight over. The fork adds its own database
 migrations in a separate ledger. Moving from the fork back to upstream on the
 same data directory is not something I test, so copy `~/.t3/userdata` somewhere
 safe first, or run the fork against its own directory with `T3CODE_HOME`.
+
+The first start after the orchestrator rewrite copies `state.sqlite` to
+`statev2.sqlite` and imports your threads from the copy, leaving the original
+file as it was. Imported threads keep their messages but not their tool
+activity or reasoning.
 
 ### From source
 
@@ -125,17 +118,16 @@ builds carry.
 
 ## Documentation
 
-Full docs live in [docs/](./docs). Fork changes are documented in place.
+Full docs live in [docs/](./docs).
 
 - [Install and first run](./docs/user/install.md) (describes upstream's installers; use
   [Running this fork](#running-this-fork) instead)
-- [Composer, pasted text, and new thread defaults](./docs/user/composer.md)
+- [Composer](./docs/user/composer.md)
 - [Keyboard shortcuts](./docs/user/keybindings.md)
 - [Permission modes](./docs/user/permission-modes.md)
 - [Project settings](./docs/user/project-settings.md)
 - [Remote access from a phone or another machine](./docs/user/remote-access.md)
 - [Source control integrations](./docs/user/source-control.md)
-- [Terminals](./docs/user/terminals.md)
 - Multiple accounts: [Codex](./docs/user/providers-codex.md) · [Claude](./docs/user/providers-claude.md)
 
 Building on the code? Start at [docs/internals/overview.md](./docs/internals/overview.md)

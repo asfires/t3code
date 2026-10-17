@@ -1,50 +1,30 @@
-import type { OrchestrationMessageContext } from "@t3tools/contracts";
-import type { PastedTextDraft } from "../../lib/pastedTextContext";
-import { restoreComposerPrompt } from "./composerPromptRecovery";
-export {
+import {
   ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
-  recallableComposerPrompt,
-} from "./composerPromptRecovery";
+  collectComposerContextReferences,
+} from "@t3tools/shared/composerContextReferences";
+import { PLAN_IMPLEMENTATION_PROMPT_PREFIX } from "../../proposedPlan";
 
-/**
- * Terminal-style prompt recall for the composer. ArrowUp on an empty
- * composer walks back through the active thread's sent prompts, ArrowDown
- * walks forward and restores the unsent draft past the newest entry.
- *
- * History is per thread and includes pasted-text records. It is derived from the thread's user
- * messages on every keypress, so there is no store to persist or sync.
- */
+const CLAUDE_ULTRATHINK_PREFIX = "Ultrathink:\n";
+const REVIEW_COMMENT_BLOCK_PATTERN = /<review_comment\b[^>]*>[\s\S]*?<\/review_comment>/g;
+const TRAILING_LEGACY_CONTEXT =
+  /\n*<(terminal_context|element_context|preview_annotation)>\n([\s\S]*?)\n<\/\1>\s*$/;
 
 export interface ComposerPromptHistoryMessage {
   readonly id: string;
   readonly role: string;
   readonly text: string;
-  readonly context?: OrchestrationMessageContext | undefined;
 }
 
 export interface ComposerPromptHistoryEntry {
   readonly id: string;
   readonly prompt: string;
-  readonly pastedTexts: PastedTextDraft[];
 }
 
-/**
- * Active recall. `entryId` is resolved against the current entries on every
- * step, so a server ack replacing an optimistic message or an older page
- * loading cannot move the position. `recalled` is the text put in the
- * composer; once the composer no longer matches it, the user has edited or
- * sent and browsing is over.
- */
 export interface ComposerPromptHistoryPosition {
   readonly entryId: string;
   readonly recalled: string;
 }
 
-/**
- * Prefer the id. A consecutive duplicate collapse can retire the recalled
- * id while the same text lives on under a newer one, so fall back to the
- * newest entry with matching text.
- */
 function findActive(
   entries: ReadonlyArray<ComposerPromptHistoryEntry>,
   position: ComposerPromptHistoryPosition,
@@ -57,86 +37,129 @@ function findActive(
 export interface ComposerPromptHistoryStep {
   readonly position: ComposerPromptHistoryPosition | null;
   readonly prompt: string;
-  readonly pastedTexts: PastedTextDraft[];
 }
 
-function samePastedTexts(
-  left: ReadonlyArray<PastedTextDraft>,
-  right: ReadonlyArray<PastedTextDraft>,
-): boolean {
-  return (
-    left.length === right.length &&
-    left.every((paste, index) => paste.id === right[index]?.id && paste.text === right[index]?.text)
-  );
+function stripTrailingReviewComments(prompt: string): string {
+  let cut = prompt.length;
+  for (const match of [...prompt.matchAll(REVIEW_COMMENT_BLOCK_PATTERN)].toReversed()) {
+    const blockEnd = match.index + match[0].length;
+    if (prompt.slice(blockEnd, cut).trim().length > 0) break;
+    cut = match.index;
+  }
+  return cut === prompt.length ? prompt : prompt.slice(0, cut).trimEnd();
 }
 
 /**
- * Oldest first. Consecutive identical prompts collapse into the newest one,
- * matching shell `HISTCONTROL=ignoredups`. Image-only sends have no text and
- * are skipped.
+ * Inline terminal chips are sent as `@terminal-1:12-13` labels in the text with
+ * their content in the trailing block. Once the block is stripped the label
+ * points at nothing, so remove it too.
  */
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function stripInlineTerminalLabels(prompt: string, headers: ReadonlyArray<string>): string {
+  let result = prompt;
+  for (const header of headers) {
+    const match = /^(.+?) lines? (\d+(?:-\d+)?)$/.exec(header);
+    if (!match) continue;
+    const label = `@${match[1]!.trim().toLowerCase().replace(/\s+/g, "-")}:${match[2]}`;
+    const labelPattern = new RegExp(`(?<![\\w@.-])${escapeRegExp(label)}(?![\\d-])`);
+    const index = result.search(labelPattern);
+    if (index < 0) continue;
+    let end = index + label.length;
+    let start = index;
+    if (result[end] === " ") end += 1;
+    else if (result[start - 1] === " ") start -= 1;
+    result = result.slice(0, start) + result.slice(end);
+  }
+  return result;
+}
+
+export function recallableComposerPrompt(messageText: string): string {
+  let prompt = messageText.trim();
+  if (prompt.startsWith(CLAUDE_ULTRATHINK_PREFIX)) {
+    prompt = prompt.slice(CLAUDE_ULTRATHINK_PREFIX.length);
+  }
+
+  while (prompt.length > 0) {
+    const withoutReviewComments = stripTrailingReviewComments(prompt);
+    if (withoutReviewComments !== prompt) {
+      prompt = withoutReviewComments;
+      continue;
+    }
+    const legacy = TRAILING_LEGACY_CONTEXT.exec(prompt);
+    if (legacy) {
+      if (
+        legacy[1] === "preview_annotation" &&
+        /^<preview_annotation>\s*$/m.test(legacy[2]!) &&
+        !/^(?:Id|Page|Comment|Targets): /m.test(legacy[2]!)
+      )
+        break;
+      const headers = Array.from(legacy[2]!.matchAll(/^- (.+):$/gm), (match) => match[1]!);
+      if (legacy[1] !== "preview_annotation" && headers.length === 0) break;
+      prompt = prompt.slice(0, legacy.index).trimEnd();
+      if (legacy[1] === "terminal_context") prompt = stripInlineTerminalLabels(prompt, headers);
+      continue;
+    }
+    break;
+  }
+
+  // Recall is text-only: never create dangling chips without their backing records.
+  for (const reference of collectComposerContextReferences(prompt).toReversed()) {
+    let { start, end } = reference;
+    if (prompt[end] === " ") end += 1;
+    else if (prompt[start - 1] === " ") start -= 1;
+    prompt = prompt.slice(0, start) + prompt.slice(end);
+  }
+
+  const trimmed = prompt.trim();
+  if (
+    trimmed === ATTACHMENT_ONLY_BOOTSTRAP_PROMPT ||
+    trimmed.startsWith(PLAN_IMPLEMENTATION_PROMPT_PREFIX)
+  ) {
+    return "";
+  }
+  return trimmed;
+}
+
 export function buildComposerPromptHistoryEntries(
   messages: ReadonlyArray<ComposerPromptHistoryMessage>,
 ): ComposerPromptHistoryEntry[] {
   const entries: ComposerPromptHistoryEntry[] = [];
   for (const message of messages) {
     if (message.role !== "user") continue;
-    const { prompt, pastedTexts } = restoreComposerPrompt(message);
+    const prompt = recallableComposerPrompt(message.text);
     if (prompt.length === 0) continue;
     const previous = entries[entries.length - 1];
-    if (
-      previous &&
-      previous.prompt === prompt &&
-      samePastedTexts(previous.pastedTexts, pastedTexts)
-    ) {
-      entries[entries.length - 1] = { id: message.id, prompt, pastedTexts };
+    if (previous && previous.prompt === prompt) {
+      entries[entries.length - 1] = { id: message.id, prompt };
       continue;
     }
-    entries.push({ id: message.id, prompt, pastedTexts });
+    entries.push({ id: message.id, prompt });
   }
   return entries;
 }
 
-/**
- * Returns null when the key should fall through to normal caret movement.
- * Backward starts only from an empty composer and stops at the oldest entry.
- * Forward past the newest entry empties the composer and ends browsing. An
- * edited or sent recall no longer matches `recalled`, so browsing restarts
- * from scratch on the next backward step.
- */
 export function stepComposerPromptHistory(input: {
   readonly direction: "backward" | "forward";
   readonly entries: ReadonlyArray<ComposerPromptHistoryEntry>;
   readonly position: ComposerPromptHistoryPosition | null;
   readonly currentPrompt: string;
-  readonly currentPastedTexts?: ReadonlyArray<PastedTextDraft>;
 }): ComposerPromptHistoryStep | null {
   const { entries, position, currentPrompt } = input;
-  const candidateIndex =
-    position && position.recalled === currentPrompt ? findActive(entries, position) : -1;
   const activeIndex =
-    candidateIndex >= 0 &&
-    samePastedTexts(entries[candidateIndex]!.pastedTexts, input.currentPastedTexts ?? [])
-      ? candidateIndex
-      : -1;
+    position && position.recalled === currentPrompt ? findActive(entries, position) : -1;
 
   if (input.direction === "backward") {
     if (activeIndex < 0 && currentPrompt.length > 0) return null;
     const entry = entries[activeIndex < 0 ? entries.length - 1 : activeIndex - 1];
     if (!entry) return null;
-    return {
-      position: { entryId: entry.id, recalled: entry.prompt },
-      prompt: entry.prompt,
-      pastedTexts: entry.pastedTexts,
-    };
+    return { position: { entryId: entry.id, recalled: entry.prompt }, prompt: entry.prompt };
   }
 
   if (activeIndex < 0) return null;
   const entry = entries[activeIndex + 1];
-  if (!entry) return { position: null, prompt: "", pastedTexts: [] };
-  return {
-    position: { entryId: entry.id, recalled: entry.prompt },
-    prompt: entry.prompt,
-    pastedTexts: entry.pastedTexts,
-  };
+  if (!entry) return { position: null, prompt: "" };
+  return { position: { entryId: entry.id, recalled: entry.prompt }, prompt: entry.prompt };
 }

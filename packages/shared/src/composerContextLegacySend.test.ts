@@ -68,11 +68,9 @@ describe("serializeLegacyContextMessage", () => {
     const text = `Look at ${formatComposerContextReference(terminal)} please`;
     const legacy = serializeLegacyContextMessage({ text, records: [terminal] });
 
-    // An older server forwards text verbatim, so the payload has to be in it.
     expect(legacy).not.toContain("t3-context://");
     expect(legacy).toContain("boom");
 
-    // A newer client reading that message reconstructs the same excerpt.
     const upgraded = upgradeLegacyContextMessage(legacy);
     expect(upgraded.records).toHaveLength(1);
     expect(upgraded.records[0]).toMatchObject({
@@ -82,19 +80,6 @@ describe("serializeLegacyContextMessage", () => {
       lineEnd: 4,
       text: "boom\nagain",
     });
-  });
-
-  it("puts a pasted-text record back in place as plain text for an older server", () => {
-    const pasted = {
-      version: 1,
-      contextId: ComposerContextId.make("pasted-text_p1"),
-      kind: "pasted-text",
-      label: "Pasted text",
-      text: "first line\n  second line",
-    } satisfies ComposerContextRecord;
-    const text = `Before ${formatComposerContextReference(pasted)} after`;
-    const legacy = serializeLegacyContextMessage({ text, records: [pasted] });
-    expect(legacy).toBe("Before first line\n  second line after");
   });
 
   it("inlines a review comment with its diff intact", () => {

@@ -3,31 +3,29 @@
  *
  * The Effect Migrator is a high-water mark: it runs every loaded migration
  * whose ID is above the largest ID already recorded in its table. Numbering
- * fork migrations after upstream's (041, 042, ...) therefore breaks the next
- * upstream sync in one of two ways: upstream's own 041 is skipped as already
+ * fork migrations after upstream's therefore breaks the next upstream sync in
+ * one of two ways: upstream's own migration with that ID is skipped as already
  * applied, or a renumbered fork migration crashes on tables that do not exist.
  * Parking them in a high range is worse still, since the mark then sits above
  * every future upstream migration.
  *
- * So fork migrations get their own ID space (1, 2, ...) and their own ledger
- * table, run through a second Migrator after upstream's. `Migrations.ts` stays
- * byte-identical to upstream and upstream can keep numbering from 041.
+ * So fork migrations get their own ID space and their own ledger table, run
+ * through a second Migrator after upstream's. `Migrations.ts` stays
+ * byte-identical to upstream.
  */
 
-import * as Migrator from "effect/unstable/sql/Migrator";
 import * as Effect from "effect/Effect";
+import * as Migrator from "effect/sql/Migrator";
 
 import { runMigrations } from "./Migrations.ts";
-import ForkMigration007 from "./ForkMigrations/007_DropTurnRetractionTables.ts";
-import ForkMigration003 from "./ForkMigrations/003_ProjectionManagedWorktrees.ts";
+import ForkMigration008 from "./ForkMigrations/008_InlinePastedTextContext.ts";
 
 export const forkMigrationsTable = "effect_sql_migrations_fork";
 
-// Retraction migration IDs 1, 2, 4, 5, and 6 are retired; never reuse them.
-export const forkMigrationEntries = [
-  [3, "ProjectionManagedWorktrees", ForkMigration003],
-  [7, "DropTurnRetractionTables", ForkMigration007],
-] as const;
+// IDs 1 through 7 are retired: they served Esc turn retraction and the V1
+// orchestrator's managed worktrees, and existing databases still record them.
+// Never reuse one.
+export const forkMigrationEntries = [[8, "InlinePastedTextContext", ForkMigration008]] as const;
 
 export const forkMigrationManifest = forkMigrationEntries.map(([id, name]) => [id, name] as const);
 

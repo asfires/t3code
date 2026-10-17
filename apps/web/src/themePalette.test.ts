@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vite-plus/test";
+import { converter } from "culori/fn";
 import { BUILT_IN_THEMES } from "@t3tools/shared/themePalettes";
 
 import {
@@ -33,14 +34,10 @@ import {
   IRIS_THEME,
   OCEAN_THEME,
   updateCustomTheme,
+  updateThemeColorFamily,
   CUSTOM_THEMES_STORAGE_KEY,
-  createThemeStatusColors,
   createVividThemeColors,
   getDefaultThemeColors,
-  limitThemeColorStep,
-  readableThemeColorOn,
-  shiftThemeColorLightness,
-  themeColorDistance,
   themeColorToHex,
   toCanonicalThemeColor,
   THEME_FILE_VERSION,
@@ -95,6 +92,78 @@ describe("theme files", () => {
     }
   });
 
+  it("keeps built-in and standard search pairs readable and distinct from inline code", () => {
+    const toOklab = converter("oklab");
+    const distance = (first: string, second: string) => {
+      const a = toOklab(first)!;
+      const b = toOklab(second)!;
+      return Math.hypot(a.l - b.l, a.a - b.a, a.b - b.b);
+    };
+    const palettes = [
+      getStandardThemeColors("light"),
+      getStandardThemeColors("dark"),
+      ...BUILT_IN_THEMES.flatMap((theme) => [theme.colors, ...Object.values(theme.variants ?? {})]),
+    ];
+    for (const colors of palettes) {
+      expect(
+        contrastRatio(colors.searchMatchForeground, colors.searchMatchBackground),
+      ).toBeGreaterThanOrEqual(4.5);
+      expect(
+        contrastRatio(colors.searchMatchActiveForeground, colors.searchMatchActiveBackground),
+      ).toBeGreaterThanOrEqual(4.5);
+      expect(
+        distance(colors.searchMatchBackground, colors.searchMatchActiveBackground),
+      ).toBeGreaterThan(0.14);
+      for (const background of [colors.muted, colors.messageSurface, colors.codeBackground]) {
+        expect(distance(colors.searchMatchBackground, background)).toBeGreaterThan(0.08);
+        expect(distance(colors.searchMatchActiveBackground, background)).toBeGreaterThan(0.08);
+      }
+    }
+  });
+
+  it("round-trips custom search colours and fills them in for older theme files", () => {
+    const legacy = parseThemeFile({
+      version: THEME_FILE_VERSION,
+      name: "Legacy",
+      appearance: "dark",
+      colors: { canvas: "#101010" },
+    });
+    expect(legacy.colors.searchMatchBackground).toBe(
+      getDefaultThemeColors("dark").searchMatchBackground,
+    );
+    const theme = parseThemeFile({
+      version: THEME_FILE_VERSION,
+      name: "Search",
+      appearance: "dark",
+      colors: {
+        searchMatchBackground: "#224466",
+        searchMatchForeground: "#ffffff",
+        searchMatchActiveBackground: "#aaddff",
+        searchMatchActiveForeground: "#112233",
+      },
+      variants: { light: { searchMatchBackground: "#ddeeff", searchMatchForeground: "#112233" } },
+    });
+    const restored = parseThemeFile(JSON.parse(serializeThemeFile(theme)));
+    expect(restored.colors).toEqual(theme.colors);
+    expect(restored.variants).toEqual(theme.variants);
+  });
+
+  it.each(["searchMatchBackground", "searchMatchActiveBackground"] as const)(
+    "editing %s derives readable text without changing the other match or warning colours",
+    (role) => {
+      const original = getDefaultThemeColors("dark");
+      const foreground =
+        role === "searchMatchBackground" ? "searchMatchForeground" : "searchMatchActiveForeground";
+      for (const value of ["#ffffff", "#000000", "#33669980"]) {
+        const updated = updateThemeColorFamily("dark", original, role, value);
+        expect(contrastRatio(updated[foreground], updated[role])).toBeGreaterThanOrEqual(4.5);
+        for (const key of Object.keys(original) as Array<keyof typeof original>) {
+          if (key !== role && key !== foreground) expect(updated[key]).toBe(original[key]);
+        }
+      }
+    },
+  );
+
   it("keeps stock dark controls in the neutral-black surface hierarchy", () => {
     expectThemeColors(getStandardThemeColors("dark"), {
       canvas: "#0a0a0a",
@@ -108,13 +177,27 @@ describe("theme files", () => {
     });
   });
 
+  it("keeps the stock sidebar and chat on distinct surfaces in both appearances", () => {
+    expectThemeColors(getStandardThemeColors("light"), {
+      canvas: "#fcfcfc",
+      sidebar: "#fafafa",
+      sidebarRowActive: "#ffffff",
+      messageSurface: "#f4f4f5",
+    });
+    expectThemeColors(getStandardThemeColors("dark"), {
+      canvas: "#0a0a0a",
+      sidebar: "#000000",
+      sidebarRowActive: "#1a1b1b",
+      messageSurface: "#141414",
+    });
+  });
+
   it("derives readable, distinctive vivid palettes from exact seeds", () => {
     const seeds: ReadonlyArray<["light" | "dark", string, string]> = [
       ["light", "#f4f9f2", "#1d8a4e"],
       ["dark", "#101a2c", "#4f8fe8"],
       ["dark", "#211a23", "#df5398"],
       ["light", "#fdf6ec", "#c2571b"],
-      // Inverted canvases: the palette follows the picked color, not the slot.
       ["light", "#111827", "#8ab4f8"],
       ["dark", "#f5ecf5", "#a84370"],
     ];
@@ -126,12 +209,10 @@ describe("theme files", () => {
       ];
     for (const [appearance, canvas, accent] of seeds) {
       const colors = createVividThemeColors(appearance, canvas, accent);
-      // Exact seeds are honored.
       expect(colors.canvas).toMatch(/^oklch\(/);
       expect(colors.accent).toMatch(/^oklch\(/);
       expect(asHex(colors.canvas)).toBe(canvas);
       expect(asHex(colors.accent)).toBe(accent);
-      // Readability is solved per surface.
       expect(contrastRatio(colors.text, colors.canvas)).toBeGreaterThanOrEqual(7);
       expect(contrastRatio(colors.textMuted, colors.canvas)).toBeGreaterThanOrEqual(4.5);
       expect(contrastRatio(colors.textMuted, colors.canvas)).toBeLessThan(5.5);
@@ -146,6 +227,12 @@ describe("theme files", () => {
       expect(colors.secondaryLabel).toBe(colors.textMuted);
       expect(contrastRatio(colors.accentForeground, colors.accent)).toBeGreaterThanOrEqual(4.5);
       expect(
+        contrastRatio(colors.searchMatchForeground, colors.searchMatchBackground),
+      ).toBeGreaterThanOrEqual(4.5);
+      expect(
+        contrastRatio(colors.searchMatchActiveForeground, colors.searchMatchActiveBackground),
+      ).toBeGreaterThanOrEqual(4.5);
+      expect(
         contrastRatio(colors.messageActionForeground, colors.messageAction),
       ).toBeGreaterThanOrEqual(4.5);
       expect(contrastRatio(colors.messageForeground, colors.messageSurface)).toBeGreaterThanOrEqual(
@@ -155,11 +242,8 @@ describe("theme files", () => {
         4.5,
       );
       expect(contrastRatio(colors.sidebarForeground, colors.sidebar)).toBeGreaterThanOrEqual(4.5);
-      // The companion action is a distinct voice, not the accent again.
       expect(colors.messageAction).not.toBe(colors.accent);
-      // Update family follows the theme, not the default palette.
       expect(asHex(colors.update)).toBe(accent);
-      // Semantic statuses stay red and amber instead of inheriting a brand tint.
       const [errorRed, errorGreen, errorBlue] = channels(colors.error);
       expect(errorRed).toBeGreaterThan(errorGreen * 2);
       expect(errorRed).toBeGreaterThan(errorBlue * 2);
@@ -173,120 +257,7 @@ describe("theme files", () => {
     }
   });
 
-  it("keeps vivid muted text muted instead of at body strength", () => {
-    for (const [appearance, canvas, accent] of [
-      ["dark", "#101a2c", "#4f8fe8"],
-      ["dark", "#292828", "#a89984"],
-      ["light", "#f4f9f2", "#1d8a4e"],
-    ] as const) {
-      const colors = createVividThemeColors(appearance, canvas, accent);
-      // Solving muted text for readability alone left it identical to body
-      // text on dark canvases; it is a mix toward its surface at the stock
-      // palettes' muted strength.
-      expect(contrastRatio(colors.mutedForeground, colors.muted)).toBeLessThan(
-        contrastRatio(colors.text, colors.muted),
-      );
-      expect(contrastRatio(colors.mutedForeground, colors.muted)).toBeGreaterThanOrEqual(4.5);
-      expect(contrastRatio(colors.placeholder, colors.surfaceRaised)).toBeLessThan(
-        contrastRatio(colors.text, colors.surfaceRaised),
-      );
-      expect(contrastRatio(colors.placeholder, colors.surfaceRaised)).toBeGreaterThanOrEqual(4.5);
-    }
-  });
-
-  it("compresses the surface ramp on mid-dark canvases", () => {
-    const lightness = (value: string) =>
-      Number.parseFloat(/^oklch\(([0-9.]+)/.exec(value)?.[1] ?? "NaN");
-    const step = (colors: ReturnType<typeof createVividThemeColors>) =>
-      lightness(colors.messageSurface) - lightness(colors.canvas);
-    const nearBlack = createVividThemeColors("dark", "#0a0a0a", "#346bf1");
-    const midDark = createVividThemeColors("dark", "#292828", "#a89984");
-    expect(step(midDark)).toBeLessThan(step(nearBlack));
-    // Still a visible step, and still ordered.
-    expect(step(midDark)).toBeGreaterThan(0.05);
-    expect(lightness(midDark.surface)).toBeGreaterThan(lightness(midDark.canvas));
-    expect(lightness(midDark.surfaceRaised)).toBeGreaterThan(lightness(midDark.surface));
-    expect(lightness(midDark.surfaceOverlay)).toBeGreaterThan(lightness(midDark.surfaceRaised));
-    // Light canvases keep the full step.
-    const light = createVividThemeColors("light", "#fdf6ec", "#c2571b");
-    expect(lightness(light.canvas) - lightness(light.messageSurface)).toBeGreaterThan(0.09);
-  });
-
-  it("builds derived text from a seeded foreground pulled toward the stock text", () => {
-    const lightness = (value: string) =>
-      Number.parseFloat(/^oklch\(([0-9.]+)/.exec(value)?.[1] ?? "NaN");
-    const hue = (value: string) =>
-      Number.parseFloat(/^oklch\([0-9.]+ [0-9.]+ ([0-9.]+)/.exec(value)?.[1] ?? "NaN");
-    // Editor foregrounds are code colors at mid lightness; primary text
-    // travels most of the way to the stock near-white while keeping a
-    // tint of the seed's hue, and every derived text role follows it.
-    const seeded = createVividThemeColors("dark", "#292828", "#a89984", { text: "#d4be98" });
-    const seedL = lightness(toCanonicalThemeColor("#d4be98")!);
-    expect(lightness(seeded.text)).toBeGreaterThan(seedL + 0.08);
-    expect(lightness(seeded.text)).toBeLessThan(0.97);
-    expect(Math.abs(hue(seeded.text) - hue(toCanonicalThemeColor("#d4be98")!))).toBeLessThan(6);
-    for (const role of ["codeForeground", "sidebarForeground", "messageForeground"] as const) {
-      expect(asHex(seeded[role])).toBe(asHex(seeded.text));
-    }
-    // Light canvases pull toward the stock near-black instead.
-    const light = createVividThemeColors("light", "#fbf1c7", "#7c6f64", { text: "#654735" });
-    expect(lightness(light.text)).toBeLessThan(lightness(toCanonicalThemeColor("#654735")!) - 0.08);
-    expect(lightness(light.text)).toBeGreaterThan(0.27);
-    // A foreground that cannot read on the canvas keeps its hue and gains lightness.
-    const lifted = createVividThemeColors("dark", "#101010", "#69b1ff", { text: "#3a2f2a" });
-    expect(asHex(lifted.text)).not.toBe("#3a2f2a");
-    expect(contrastRatio(lifted.text, lifted.canvas)).toBeGreaterThanOrEqual(4.5);
-    // Without a seed, text is still solved to AAA.
-    const synthesized = createVividThemeColors("dark", "#292828", "#a89984");
-    expect(contrastRatio(synthesized.text, synthesized.canvas)).toBeGreaterThanOrEqual(7);
-  });
-
-  it("derives status surfaces and foregrounds from theme-supplied signals", () => {
-    const status = createThemeStatusColors("#292828", { error: "#ea6962", warning: "#d8a657" });
-    expect(asHex(status.error)).toBe("#ea6962");
-    expect(asHex(status.warning)).toBe("#d8a657");
-    expect(contrastRatio(status.errorForeground, status.errorSurface)).toBeGreaterThanOrEqual(4.5);
-    expect(contrastRatio(status.warningForeground, status.warningSurface)).toBeGreaterThanOrEqual(
-      4.5,
-    );
-    // The surface is the signal laid over the canvas, not the standard red.
-    expect(themeColorDistance(status.errorSurface, "#292828")).toBeLessThan(0.15);
-    // Without signals the standard pair still applies.
-    const standard = createThemeStatusColors("#0a0a0a");
-    expect(asHex(standard.error)).toBe("#fb414a");
-  });
-
-  it("lifts colors along their own hue and shifts lightness in place", () => {
-    const lifted = readableThemeColorOn("#928374", "#292828");
-    expect(contrastRatio(lifted, "#292828")).toBeGreaterThanOrEqual(4.5);
-    const hue = (value: string) =>
-      Number.parseFloat(/^oklch\([0-9.]+ [0-9.]+ ([0-9.]+)/.exec(value)?.[1] ?? "NaN");
-    expect(Math.abs(hue(lifted) - hue(toCanonicalThemeColor("#928374")!))).toBeLessThan(3);
-    // Already readable colors are returned as they are.
-    expect(asHex(readableThemeColorOn("#d4be98", "#292828"))).toBe("#d4be98");
-    const shifted = shiftThemeColorLightness("#a89984", 0.06);
-    expect(Math.abs(hue(shifted) - hue(toCanonicalThemeColor("#a89984")!))).toBeLessThan(3);
-    expect(contrastRatio(shifted, "#292828")).toBeGreaterThan(contrastRatio("#a89984", "#292828"));
-    expect(themeColorDistance("#292828", "#292828")).toBe(0);
-    expect(themeColorDistance("#292828", "#32302f")).toBeGreaterThan(0.02);
-  });
-
-  it("limits a color's lightness step off its base along a straight OKLab line", () => {
-    const lightness = (value: string) =>
-      Number.parseFloat(/^oklch\(([0-9.]+)/.exec(value)?.[1] ?? "NaN");
-    const base = toCanonicalThemeColor("#1e1e2e")!;
-    const limited = limitThemeColorStep("#585b70", "#1e1e2e", 0.11);
-    expect(lightness(limited) - lightness(base)).toBeCloseTo(0.11, 2);
-    // Within the cap the color is returned as-is (canonicalized).
-    expect(limitThemeColorStep("#45403d", "#292828", 0.11)).toBe(toCanonicalThemeColor("#45403d"));
-    // Works in the light direction too.
-    const light = limitThemeColorStep("#acb0be", "#eff1f5", 0.11);
-    expect(lightness(toCanonicalThemeColor("#eff1f5")!) - lightness(light)).toBeCloseTo(0.11, 2);
-  });
-
   it("keys status colors off the canvas, not the appearance slot", () => {
-    // Inverted seeds: a dark canvas in the light slot must still get the dark
-    // status pair, or the alert foreground lands on a dark surface unreadable.
     const inverted = [
       createVividThemeColors("light", "#111827", "#8ab4f8"),
       createVividThemeColors("dark", "#f5ecf5", "#a84370"),
@@ -1078,7 +1049,6 @@ describe("theme files", () => {
 
 describe("stored theme preferences", () => {
   it("lets a configured half unlock an appearance the base theme lacks", () => {
-    // Light-only base: without halves, dark requests fall back to light.
     const lightOnly = parseThemeFile({
       version: THEME_FILE_VERSION,
       id: "paper",
@@ -1124,9 +1094,7 @@ describe("stored theme preferences", () => {
       expect(isKnownThemePreference(legacy)).toBe(true);
       expect(canonicalThemePreference(legacy)).toBe(theme.id);
     }
-    // The dark-variant alias keeps its raw form: it still carries a mode hint.
     expect(canonicalThemePreference("t3-chat-dark")).toBe("t3-chat-dark");
-    // A stored mix that predates the rename resolves to the new ids.
     expect(parseThemeHalves(JSON.stringify({ light: "t3-ocean", dark: "t3-grove" }))).toEqual({
       light: OCEAN_THEME.id,
       dark: GROVE_THEME.id,

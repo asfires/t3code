@@ -1,140 +1,10 @@
-import {
-  ProviderDriverKind,
-  ProviderInstanceId,
-  type ModelSelection,
-  type ServerProvider,
-} from "@t3tools/contracts";
-
-import { resolveNewThreadConfiguredState } from "./useHandleNewThread";
-
-const codexId = ProviderInstanceId.make("codex");
-const claudeId = ProviderInstanceId.make("claudeAgent");
-
-function provider(input: {
-  readonly instanceId: typeof codexId;
-  readonly driver: string;
-  readonly model: string;
-  readonly enabled?: boolean;
-}): ServerProvider {
-  return {
-    instanceId: input.instanceId,
-    driver: ProviderDriverKind.make(input.driver),
-    enabled: input.enabled ?? true,
-    installed: true,
-    version: null,
-    status: "ready",
-    auth: { status: "authenticated" },
-    checkedAt: "2026-01-01T00:00:00.000Z",
-    models: [
-      {
-        slug: input.model,
-        name: input.model,
-        isCustom: false,
-        isDefault: true,
-        capabilities: {
-          optionDescriptors: [
-            {
-              id: "effort",
-              label: "Effort",
-              type: "select",
-              options: [
-                { id: "low", label: "Low", isDefault: true },
-                { id: "high", label: "High" },
-              ],
-            },
-          ],
-        },
-      },
-    ],
-    slashCommands: [],
-    skills: [],
-  };
-}
-
-const providers = [
-  provider({ instanceId: codexId, driver: "codex", model: "gpt" }),
-  provider({ instanceId: claudeId, driver: "claudeAgent", model: "claude" }),
-];
-const selection = (instanceId: typeof codexId, model: string): ModelSelection => ({
-  instanceId,
-  model,
-});
-const settings = {
-  providerNewThreadDefaults: {
-    [claudeId]: {
-      modelOptions: [{ id: "effort", value: "high" }],
-      runtimeMode: "approval-required" as const,
-    },
-  },
-};
-
-function resolve(input: {
-  projectDefaultModel?: ModelSelection | null;
-  configuredModel?: ModelSelection | null;
-  carryModel?: ModelSelection | null;
-  providersOverride?: ReadonlyArray<ServerProvider>;
-}) {
-  return resolveNewThreadConfiguredState({
-    projectDefaultModel: input.projectDefaultModel,
-    configuredModel: input.configuredModel ?? null,
-    carryModel: input.carryModel ?? null,
-    stickyActiveProvider: selection(codexId, "gpt"),
-    providers: input.providersOverride ?? providers,
-    settings,
-  });
-}
-
-describe("new-thread model defaults", () => {
-  it("honors project model options before provider defaults", () => {
-    const projectDefaultModel = {
-      ...selection(claudeId, "claude"),
-      options: [{ id: "effort", value: "low" }],
-    };
-    expect(resolve({ projectDefaultModel, configuredModel: selection(codexId, "gpt") })).toEqual({
-      modelSelection: projectDefaultModel,
-      runtimeMode: "approval-required",
-    });
-  });
-  it("uses Always model before carry and sticky, with configured options and runtime mode", () => {
-    const result = resolve({
-      configuredModel: selection(claudeId, "claude"),
-      carryModel: selection(codexId, "gpt"),
-    });
-
-    expect(result).toEqual({
-      modelSelection: {
-        instanceId: claudeId,
-        model: "claude",
-        options: [{ id: "effort", value: "high" }],
-      },
-      runtimeMode: "approval-required",
-    });
-  });
-
-  it("keeps the last-used carry path when Always is null", () => {
-    expect(resolve({ carryModel: selection(claudeId, "claude") }).modelSelection?.instanceId).toBe(
-      claudeId,
-    );
-  });
-
-  it("falls through when the configured instance is disabled", () => {
-    const disabledProviders = [providers[0]!, { ...providers[1]!, enabled: false }];
-    expect(
-      resolve({
-        configuredModel: selection(claudeId, "claude"),
-        carryModel: selection(codexId, "gpt"),
-        providersOverride: disabledProviders,
-      }).modelSelection?.instanceId,
-    ).toBe(codexId);
-  });
-});
-
 import { describe, expect, it, vi } from "vite-plus/test";
 import type { RuntimeMode } from "@t3tools/contracts";
 
 const testState = vi.hoisted(() => {
   let completeProjectFileRead: (value: null) => void = () => undefined;
   let projectFileRead = Promise.resolve<null>(null);
+  let projectRemoved = false;
   let targetSettings = {
     defaultThreadEnvMode: "local" as "local" | "worktree",
     newWorktreesStartFromOrigin: false,
@@ -165,7 +35,6 @@ const testState = vi.hoisted(() => {
     setDraftThreadContext: vi.fn(),
     setLogicalProjectDraftThreadId: vi.fn(),
     setModelSelection: vi.fn(),
-    setRuntimeMode: vi.fn(),
   };
 
   return {
@@ -173,6 +42,12 @@ const testState = vi.hoisted(() => {
     draftStore,
     get projectFileRead() {
       return projectFileRead;
+    },
+    get projectRemoved() {
+      return projectRemoved;
+    },
+    removeProject() {
+      projectRemoved = true;
     },
     get targetSettings() {
       return targetSettings;
@@ -185,6 +60,7 @@ const testState = vi.hoisted(() => {
       },
     ) {
       storedDraft = nextStoredDraft;
+      projectRemoved = false;
       targetSettings = {
         defaultThreadEnvMode: workspaceDefaults.envMode,
         newWorktreesStartFromOrigin: workspaceDefaults.startFromOrigin,
@@ -203,47 +79,60 @@ const testState = vi.hoisted(() => {
   };
 });
 
+const testServerConfigs = () =>
+  new Map([
+    [
+      "environment-primary",
+      {
+        settings: {
+          ...testState.targetSettings,
+          newWorktreesStartFromOrigin: !testState.targetSettings.newWorktreesStartFromOrigin,
+        },
+      },
+    ],
+    ["environment-ssh", { settings: testState.targetSettings }],
+  ]);
+
+vi.mock("../rpc/atomRegistry", () => ({
+  appAtomRegistry: { get: () => testServerConfigs() },
+}));
+
 vi.mock("@effect/atom-react", () => ({
   useAtomValue: (atom: unknown) =>
     atom === "primary-settings"
       ? { newWorktreesStartFromOrigin: !testState.targetSettings.newWorktreesStartFromOrigin }
-      : new Map([
-          [
-            "environment-primary",
-            {
-              settings: {
-                ...testState.targetSettings,
-                newWorktreesStartFromOrigin: !testState.targetSettings.newWorktreesStartFromOrigin,
-              },
-            },
-          ],
-          ["environment-ssh", { settings: testState.targetSettings }],
-        ]),
+      : testServerConfigs(),
 }));
 vi.mock("@t3tools/client-runtime/environment", () => ({
   scopedProjectKey: () => "remote-project",
   scopeProjectRef: (environmentId: string, projectId: string) => ({ environmentId, projectId }),
   scopeThreadRef: (environmentId: string, threadId: string) => ({ environmentId, threadId }),
 }));
-vi.mock("@t3tools/contracts", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@t3tools/contracts")>()),
+vi.mock("@t3tools/contracts", () => ({
   DEFAULT_RUNTIME_MODE: "default",
-  DEFAULT_SERVER_SETTINGS: { providerNewThreadDefaults: {} },
+  DEFAULT_SERVER_SETTINGS: {},
 }));
 vi.mock("@t3tools/shared/projectSettings", () => ({
-  // Environment settings pass through; the tests set project fields on the
-  // project record, which the hook still honors until the server folds them.
-  resolveProjectSettings: (settings: Record<string, unknown>) => ({
-    settings,
+  resolveProjectSettings: (
+    settings: Record<string, unknown>,
+    _projectId: unknown,
+    _project: unknown,
+    projectFile?: { defaultThreadEnvMode?: "local" | "worktree" } | null,
+  ) => ({
+    settings:
+      projectFile === undefined
+        ? settings
+        : {
+            ...settings,
+            defaultThreadEnvMode:
+              settings.defaultThreadEnvMode ?? projectFile?.defaultThreadEnvMode ?? "local",
+          },
     sources: { defaultModelSelection: "environment", defaultThreadEnvMode: "environment" },
     overrides: {},
   }),
-}));
-vi.mock("@t3tools/shared/threadEnvMode", () => ({
-  resolveDefaultThreadEnvMode: (input: {
-    readonly projectFile: "local" | "worktree" | null;
-    readonly globalDefault: "local" | "worktree";
-  }) => input.projectFile ?? input.globalDefault,
+  resolveNewThreadEnvMode: (input: {
+    projectSettings: { settings: { defaultThreadEnvMode: "local" | "worktree" } };
+  }) => input.projectSettings.settings.defaultThreadEnvMode,
 }));
 vi.mock("@tanstack/react-router", () => ({
   useParams: () => null,
@@ -270,7 +159,7 @@ vi.mock("../lib/chatThreadActions", async (importOriginal) => ({
   resolveNewThreadModelSelectionOverride: () => null,
 }));
 vi.mock("../lib/t3ProjectFileDefaults", () => ({
-  readT3ProjectFileDefaultThreadEnvMode: () => testState.projectFileRead,
+  readT3ProjectFile: () => testState.projectFileRead,
 }));
 vi.mock("../lib/utils", () => ({
   newDraftId: () => "draft-delayed",
@@ -281,21 +170,23 @@ vi.mock("../logicalProject", () => ({
   getProjectOrderKey: () => "remote-project",
   selectProjectGroupingSettings: () => ({}),
 }));
-vi.mock("../state/entities", () => ({
-  readProjects: () => [
-    {
-      id: "project-remote",
-      environmentId: "environment-ssh",
-      workspaceRoot: "/remote/project",
-      defaultThreadEnvMode: null,
-      defaultModelSelection: null,
-    },
-  ],
-  readThreadShell: () => null,
-  useProjects: () => [],
-  useServerConfigs: () => new Map(),
-  useThread: () => null,
-}));
+vi.mock("../state/entities", () => {
+  const project = {
+    id: "project-remote",
+    environmentId: "environment-ssh",
+    workspaceRoot: "/remote/project",
+    defaultThreadEnvMode: null,
+    defaultModelSelection: null,
+  };
+  return {
+    readProject: () => (testState.projectRemoved ? null : project),
+    readProjects: () => (testState.projectRemoved ? [] : [project]),
+    readThreadShell: () => null,
+    readThreadShells: () => [],
+    useProjects: () => [],
+    useThread: () => null,
+  };
+});
 vi.mock("../state/server", () => ({
   environmentServerConfigsAtom: {},
   primaryServerSettingsAtom: "primary-settings",
@@ -356,6 +247,21 @@ describe.each([
     await pendingOpen;
 
     expect(testState.router.state.location.href).toBe("/usage");
+    expect(testState.router.navigate).not.toHaveBeenCalled();
+    expect(testState.draftStore.setLogicalProjectDraftThreadId).not.toHaveBeenCalled();
+  });
+
+  it("abandons a delayed draft open when the project is removed meanwhile", async () => {
+    testState.reset(draft);
+    const pendingOpen = useNewThreadHandler()(
+      { environmentId: "environment-ssh", projectId: "project-remote" } as never,
+      { replace: true },
+    );
+
+    testState.removeProject();
+    testState.completeProjectFileRead(null);
+
+    await expect(pendingOpen).resolves.toBeNull();
     expect(testState.router.navigate).not.toHaveBeenCalled();
     expect(testState.draftStore.setLogicalProjectDraftThreadId).not.toHaveBeenCalled();
   });
