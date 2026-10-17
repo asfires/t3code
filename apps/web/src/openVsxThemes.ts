@@ -46,11 +46,17 @@ const USED_WORKBENCH_COLORS = new Set([
   "descriptionForeground",
   "disabledForeground",
   "dropdown.background",
+  "dropdown.border",
   "editor.background",
   "editor.foreground",
+  "editor.findMatchBackground",
+  "editor.findMatchForeground",
+  "editor.findMatchHighlightBackground",
+  "editor.findMatchHighlightForeground",
   "editor.selectionBackground",
   "editorCursor.foreground",
   "editorError.foreground",
+  "editorGroup.border",
   "editorPane.background",
   "editorWarning.foreground",
   "editorWidget.background",
@@ -60,14 +66,11 @@ const USED_WORKBENCH_COLORS = new Set([
   "input.border",
   "input.placeholderForeground",
   "list.activeSelectionBackground",
-  "list.errorForeground",
   "list.hoverBackground",
   "list.inactiveSelectionBackground",
-  "list.warningForeground",
   "menu.background",
   "panel.background",
   "panel.border",
-  "problemsWarningIcon.foreground",
   "progressBar.background",
   "quickInput.background",
   "scrollbarSlider.background",
@@ -245,8 +248,6 @@ export async function searchOpenVsxThemes(
   url.searchParams.set("category", "Themes");
   url.searchParams.set("sortBy", sortBy);
   url.searchParams.set("sortOrder", "desc");
-  // Ask for a few extras because results without a supported SPDX license
-  // are intentionally omitted.
   url.searchParams.set("size", "16");
   const value = await withSearchTimeout(async (requestSignal) => {
     const response = await fetch(url, { signal: requestSignal });

@@ -2,9 +2,9 @@ import * as NodeOS from "node:os";
 
 import { QrCode } from "@t3tools/shared/qrCode";
 import * as Effect from "effect/Effect";
-import { HttpServer } from "effect/unstable/http";
+import { HttpServer } from "effect/http";
 
-import { ServerConfig } from "./config.ts";
+import * as ServerConfig from "./config.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 
 export interface HeadlessServeAccessInfo {
@@ -20,14 +20,12 @@ export const isLoopbackHost = (host: string | undefined): boolean => {
     return true;
   }
 
-  const normalizedHost = host.toLowerCase();
   return (
-    normalizedHost === "localhost" ||
-    normalizedHost.endsWith(".localhost") ||
-    normalizedHost === "127.0.0.1" ||
-    normalizedHost === "::1" ||
-    normalizedHost === "[::1]" ||
-    normalizedHost.startsWith("127.")
+    host === "localhost" ||
+    host === "127.0.0.1" ||
+    host === "::1" ||
+    host === "[::1]" ||
+    host.startsWith("127.")
   );
 };
 
@@ -133,7 +131,7 @@ export const formatHeadlessServeOutput = (accessInfo: HeadlessServeAccessInfo): 
   ].join("\n");
 
 export const issueHeadlessServeAccessInfo = Effect.fn("issueHeadlessServeAccessInfo")(function* () {
-  const serverConfig = yield* ServerConfig;
+  const serverConfig = yield* ServerConfig.ServerConfig;
   const httpServer = yield* HttpServer.HttpServer;
   const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
   const connectionString = resolveHeadlessConnectionString(

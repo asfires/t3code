@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import {
-  getThemeColorsForMode,
-  themeColorToHex,
-  toCanonicalThemeColor,
-  THEME_FILE_VERSION,
-} from "./themePalette";
+import { getThemeColorsForMode, themeColorToHex, THEME_FILE_VERSION } from "./themePalette";
 import {
   isVsCodeThemeFile,
   pairVsCodeThemes,
@@ -35,8 +30,6 @@ function contrastRatio(first: string, second: string): number {
   return (lighter + 0.05) / (darker + 0.05);
 }
 
-// Shaped like a real workbench theme: dotted keys, alpha overlays, and a lot
-// of roles simply left out.
 const VSCODE_DARK = {
   name: "pierre-dark-soft",
   type: "dark",
@@ -60,55 +53,6 @@ const VSCODE_DARK = {
   tokenColors: [],
 };
 
-// The Gruvbox Material Dark workbench colors that matter here, verbatim from
-// the extension: transparent focus and hover, every widget surface equal to
-// the editor, a dim error squiggle ahead of the real red, and a sidebar
-// foreground dimmer than the editor's.
-const GRUVBOX_MATERIAL_DARK = {
-  name: "Gruvbox Material Dark",
-  type: "dark",
-  colors: {
-    "editor.background": "#292828",
-    "editor.foreground": "#d4be98",
-    foreground: "#a89984",
-    descriptionForeground: "#928374",
-    focusBorder: "#45403d00",
-    "button.background": "#a89984",
-    "button.foreground": "#292828",
-    "textLink.foreground": "#a9b665",
-    "editorWidget.background": "#292828",
-    "dropdown.background": "#292828",
-    "dropdown.border": "#45403d",
-    "menu.background": "#292828",
-    "panel.background": "#292828",
-    "panel.border": "#292828",
-    "input.border": "#45403d",
-    "input.placeholderForeground": "#7c6f64",
-    "sideBar.background": "#292828",
-    "sideBar.foreground": "#928374",
-    "list.hoverBackground": "#29282800",
-    "list.activeSelectionBackground": "#45403d60",
-    "list.inactiveSelectionBackground": "#45403d48",
-    "editorError.foreground": "#b85651",
-    errorForeground: "#ea6962",
-    "editorWarning.foreground": "#c18f41",
-    "list.warningForeground": "#d8a657",
-    "textCodeBlock.background": "#32302f",
-    "terminal.foreground": "#d4be98",
-    "terminalCursor.foreground": "#d4be98",
-    "scrollbarSlider.background": "#7c6f6480",
-  },
-  tokenColors: [],
-};
-
-function oklchLightness(value: string): number {
-  return Number.parseFloat(/^oklch\(([0-9.]+)/.exec(value)?.[1] ?? "NaN");
-}
-
-function oklchHue(value: string): number {
-  return Number.parseFloat(/^oklch\([0-9.]+ [0-9.]+ ([0-9.]+)/.exec(value)?.[1] ?? "NaN");
-}
-
 describe("VS Code theme import", () => {
   it("recognises workbench themes and rejects our own files", () => {
     expect(isVsCodeThemeFile(VSCODE_DARK)).toBe(true);
@@ -126,14 +70,10 @@ describe("VS Code theme import", () => {
 
   it("carries the editor surfaces and accent across", () => {
     const theme = parseVsCodeThemeFile(VSCODE_DARK);
-    // The slug name is read as words; a displayName would win verbatim.
     expect(theme.label).toBe("Pierre Dark Soft");
     expect(theme.appearance).toBe("dark");
     expect(asHex(theme.colors.canvas)).toBe("#171717");
-    // Text is the editor foreground carried toward the stock near-white.
-    expect(oklchLightness(theme.colors.text)).toBeGreaterThan(
-      oklchLightness(toCanonicalThemeColor("#d4d4d4")!),
-    );
+    expect(asHex(theme.colors.text)).toBe("#d4d4d4");
     expect(asHex(theme.colors.accent)).toBe("#69b1ff");
     expect(asHex(theme.colors.sidebar)).toBe("#101010");
     expect(asHex(theme.colors.terminalBackground)).toBe("#101010");
@@ -141,7 +81,6 @@ describe("VS Code theme import", () => {
 
   it("flattens alpha overlays onto the surface they sit on", () => {
     const theme = parseVsCodeThemeFile(VSCODE_DARK);
-    // #1f3e5e59 over the #101010 sidebar, not left semi-transparent.
     expect(theme.colors.sidebarRowHover).toMatch(/^oklch\(/);
     expect(asHex(theme.colors.sidebarRowHover)).not.toBe("#1f3e5e59");
     expect(theme.colors.sidebarRowSelected).not.toBe(theme.colors.sidebar);
@@ -169,6 +108,281 @@ describe("VS Code theme import", () => {
     );
   });
 
+  it("moves reserved VS Code names to a non-reserved id", () => {
+    const darkPlus = parseVsCodeThemeFile({
+      name: "Dark+",
+      type: "dark",
+      colors: { "editor.background": "#1e1e1e" },
+    });
+    expect(darkPlus.label).toBe("Dark+");
+    expect(darkPlus.id).not.toBe("dark");
+    expect(darkPlus.id).toBe("dark-vscode");
+  });
+
+  it("keeps Dark+ and Light+ as separate themes instead of pairing them as +", () => {
+    const themes = pairVsCodeThemes([
+      parseVsCodeThemeFile({
+        name: "Light+",
+        type: "light",
+        colors: { "editor.background": "#ffffff" },
+      }),
+      parseVsCodeThemeFile({
+        name: "Dark+",
+        type: "dark",
+        colors: { "editor.background": "#1e1e1e" },
+      }),
+    ]);
+    expect(themes.map((theme) => [theme.id, theme.label])).toEqual([
+      ["light-vscode", "Light+"],
+      ["dark-vscode", "Dark+"],
+    ]);
+  });
+
+  it("prefers a visible input background over a transparent border", () => {
+    const catppuccin = parseVsCodeThemeFile({
+      name: "Catppuccin Mocha",
+      type: "dark",
+      colors: {
+        "editor.background": "#1e1e2e",
+        "input.border": "#00000000",
+        "input.background": "#313244",
+      },
+    });
+    expect(asHex(catppuccin.colors.input)).toBe("#313244");
+  });
+
+  it("keeps unchecked inputs distinct from the checked action color", () => {
+    const gruvbox = parseVsCodeThemeFile({
+      name: "Gruvbox Light Soft",
+      type: "light",
+      colors: {
+        "editor.background": "#f2e5bc",
+        "button.background": "#45858880",
+        "input.background": "#45858880",
+        "input.border": "#928374",
+      },
+    });
+    expect(
+      contrastRatio(gruvbox.colors.input, gruvbox.colors.messageAction),
+    ).toBeGreaterThanOrEqual(1.1);
+  });
+
+  it("keeps the derived input distinct when a button reuses it", () => {
+    const theme = parseVsCodeThemeFile({
+      name: "Derived input collision",
+      type: "dark",
+      colors: {
+        "editor.background": "#1e1e2e",
+        focusBorder: "#89b4fa",
+        "button.background": "#525661",
+      },
+    });
+
+    expect(asHex(theme.colors.messageAction)).toBe("#525661");
+    expect(asHex(theme.colors.input)).not.toBe("#525661");
+    expect(contrastRatio(theme.colors.input, theme.colors.canvas)).toBeGreaterThanOrEqual(1.1);
+    expect(contrastRatio(theme.colors.input, theme.colors.messageAction)).toBeGreaterThanOrEqual(
+      1.1,
+    );
+  });
+
+  it("skips a transparent focus border for a visible accent key", () => {
+    const vitesse = parseVsCodeThemeFile({
+      name: "Vitesse Dark",
+      type: "dark",
+      colors: {
+        "editor.background": "#121212",
+        focusBorder: "#00000000",
+        "button.background": "#4d9375",
+      },
+    });
+    expect(asHex(vitesse.colors.accent)).toBe("#4d9375");
+    expect(asHex(vitesse.colors.focus)).toBe("#4d9375");
+    expect(contrastRatio(vitesse.colors.focus, vitesse.colors.canvas)).toBeGreaterThanOrEqual(1.1);
+  });
+
+  it("keeps focus visible against an explicit raised surface", () => {
+    const theme = parseVsCodeThemeFile({
+      name: "Raised focus",
+      type: "dark",
+      colors: {
+        "editor.background": "#000000",
+        focusBorder: "#111111",
+        "editorWidget.background": "#111111",
+        "button.background": "#4d9375",
+      },
+    });
+    expect(contrastRatio(theme.colors.focus, theme.colors.surfaceRaised)).toBeGreaterThanOrEqual(
+      1.1,
+    );
+    expect(asHex(theme.colors.focus)).toBe("#4d9375");
+  });
+
+  it("keeps the fallback focus visible against an explicit raised surface", () => {
+    const theme = parseVsCodeThemeFile({
+      name: "Raised fallback focus",
+      type: "dark",
+      colors: {
+        "editor.background": "#121212",
+        "editorWidget.background": "#346bf1",
+      },
+    });
+    expect(asHex(theme.colors.focus)).toBe("#ffffff");
+    expect(contrastRatio(theme.colors.focus, theme.colors.canvas)).toBeGreaterThanOrEqual(1.1);
+    expect(contrastRatio(theme.colors.focus, theme.colors.surfaceRaised)).toBeGreaterThanOrEqual(
+      1.1,
+    );
+  });
+
+  it("skips a transparent button background for the action color", () => {
+    const theme = parseVsCodeThemeFile({
+      name: "Transparent button",
+      type: "dark",
+      colors: {
+        "editor.background": "#121212",
+        focusBorder: "#4d9375",
+        "button.background": "#00000000",
+      },
+    });
+    expect(asHex(theme.colors.messageAction)).toBe("#4d9375");
+  });
+
+  it("skips a button background that matches the raised surface", () => {
+    const theme = parseVsCodeThemeFile({
+      name: "Raised button",
+      type: "dark",
+      colors: {
+        "editor.background": "#121212",
+        focusBorder: "#4d9375",
+        "editorWidget.background": "#2a2d3a",
+        "button.background": "#2a2d3a",
+      },
+    });
+    expect(asHex(theme.colors.messageAction)).toBe("#4d9375");
+  });
+
+  it("uses a visible default accent when the file has no usable accent key", () => {
+    const theme = parseVsCodeThemeFile({
+      name: "No accent",
+      type: "dark",
+      colors: { "editor.background": "#121212", focusBorder: "#121212" },
+    });
+    expect(contrastRatio(theme.colors.focus, theme.colors.canvas)).toBeGreaterThanOrEqual(1.1);
+  });
+
+  it("validates placeholders against the resolved raised surface", () => {
+    const lightPlus = parseVsCodeThemeFile({
+      name: "Light Plus Shape",
+      type: "light",
+      colors: {
+        "editor.background": "#eaeff3",
+        "editor.foreground": "#1f1f1f",
+        "editorWidget.background": "#ffffff",
+        "input.placeholderForeground": "#767676",
+      },
+    });
+    expect(
+      contrastRatio(lightPlus.colors.placeholder, lightPlus.colors.surfaceRaised),
+    ).toBeGreaterThanOrEqual(4.5);
+    expect(
+      contrastRatio(lightPlus.colors.placeholder, lightPlus.colors.surfaceRaised),
+    ).toBeLessThan(contrastRatio(lightPlus.colors.text, lightPlus.colors.surfaceRaised));
+  });
+  it("imports current and other find matches as independent background/text pairs", () => {
+    const { colors } = parseVsCodeThemeFile({
+      type: "dark",
+      colors: {
+        "editor.background": "#202020",
+        "editor.findMatchBackground": "#663399",
+        "editor.findMatchForeground": "#ffffff",
+        "editor.findMatchHighlightBackground": "#bce4ff",
+        "editor.findMatchHighlightForeground": "#17314a",
+      },
+    });
+
+    expect(asHex(colors.searchMatchActiveBackground)).toBe("#663399");
+    expect(asHex(colors.searchMatchActiveForeground)).toBe("#ffffff");
+    expect(asHex(colors.searchMatchBackground)).toBe("#bce4ff");
+    expect(asHex(colors.searchMatchForeground)).toBe("#17314a");
+  });
+
+  it("composites find backgrounds onto the canvas and foregrounds onto their match", () => {
+    const { colors } = parseVsCodeThemeFile({
+      type: "dark",
+      colors: {
+        "editor.background": "#202020",
+        "editor.findMatchBackground": "#33669980",
+        "editor.findMatchForeground": "#ffffffcc",
+        "editor.findMatchHighlightBackground": "#ffcc0040",
+        "editor.findMatchHighlightForeground": "#ffffff",
+      },
+    });
+
+    expect(asHex(colors.searchMatchActiveBackground)).toBe("#2a435d");
+    expect(asHex(colors.searchMatchActiveForeground)).toBe("#d4d9df");
+    expect(asHex(colors.searchMatchBackground)).toBe("#584b18");
+    expect(asHex(colors.searchMatchForeground)).toBe("#ffffff");
+  });
+
+  it("uses editor text when no find foreground is specified", () => {
+    const { colors } = parseVsCodeThemeFile({
+      type: "dark",
+      colors: {
+        "editor.background": "#101010",
+        "editor.foreground": "#eeeeee",
+        "editor.findMatchBackground": "#304050",
+        "editor.findMatchHighlightBackground": "#403020",
+      },
+    });
+
+    expect(asHex(colors.searchMatchActiveForeground)).toBe("#eeeeee");
+    expect(asHex(colors.searchMatchForeground)).toBe("#eeeeee");
+  });
+
+  it.each(["light", "dark"])(
+    "keeps missing or invalid find colours readable in %s themes",
+    (type) => {
+      const base = {
+        "editor.background": type === "dark" ? "#101010" : "#fafafa",
+      };
+      const missing = parseVsCodeThemeFile({ type, colors: base }).colors;
+      const invalid = parseVsCodeThemeFile({
+        type,
+        colors: {
+          ...base,
+          "editor.findMatchBackground": "not-a-colour",
+          "editor.findMatchForeground": 42,
+          "editor.findMatchHighlightBackground": null,
+          "editor.findMatchHighlightForeground": "invalid",
+        },
+      }).colors;
+      const unreadable = parseVsCodeThemeFile({
+        type,
+        colors: {
+          ...base,
+          "editor.findMatchBackground": "#ffffcc",
+          "editor.findMatchForeground": "#ffffff",
+          "editor.findMatchHighlightBackground": "#101020",
+          "editor.findMatchHighlightForeground": "#111111",
+        },
+      }).colors;
+
+      for (const colors of [missing, invalid, unreadable]) {
+        expect(
+          contrastRatio(colors.searchMatchForeground, colors.searchMatchBackground),
+        ).toBeGreaterThanOrEqual(4.5);
+        expect(
+          contrastRatio(colors.searchMatchActiveForeground, colors.searchMatchActiveBackground),
+        ).toBeGreaterThanOrEqual(4.5);
+      }
+      expect(invalid.searchMatchBackground).toBe(missing.searchMatchBackground);
+      expect(invalid.searchMatchActiveBackground).toBe(missing.searchMatchActiveBackground);
+      expect(missing.searchMatchBackground).not.toBe(missing.searchMatchActiveBackground);
+      expect(missing.searchMatchBackground).not.toBe(missing.canvas);
+      expect(missing.searchMatchActiveBackground).not.toBe(missing.canvas);
+    },
+  );
+
   it("fills every role the file omits with a readable derived value", () => {
     const theme = parseVsCodeThemeFile(VSCODE_DARK);
     const colors = getThemeColorsForMode(theme, "dark")!;
@@ -180,301 +394,6 @@ describe("VS Code theme import", () => {
     expect(
       contrastRatio(colors.messageActionForeground, colors.messageAction),
     ).toBeGreaterThanOrEqual(4.5);
-  });
-
-  it("reads a fully transparent color as unset, not as the surface", () => {
-    const theme = parseVsCodeThemeFile(GRUVBOX_MATERIAL_DARK);
-    // focusBorder #45403d00 would flatten to the canvas; the accent falls
-    // through to the button color instead of vanishing.
-    expect(asHex(theme.colors.accent)).toBe("#a89984");
-    expect(asHex(theme.colors.focus)).toBe("#a89984");
-    // list.hoverBackground #29282800 likewise; hover keeps a visible step.
-    expect(theme.colors.sidebarRowHover).not.toBe(theme.colors.sidebar);
-    expect(contrastRatio(theme.colors.sidebarRowHover, theme.colors.sidebar)).toBeGreaterThan(1.1);
-  });
-
-  it("keeps a tonal step when a widget surface equals the canvas", () => {
-    const theme = parseVsCodeThemeFile(GRUVBOX_MATERIAL_DARK);
-    const canvasL = oklchLightness(theme.colors.canvas);
-    const surfaces = [
-      theme.colors.surface,
-      theme.colors.surfaceRaised,
-      theme.colors.surfaceOverlay,
-      theme.colors.border,
-    ];
-    for (const surface of surfaces) {
-      expect(surface).not.toBe(theme.colors.canvas);
-    }
-    // Progressively lighter, the way the stock dark palette stacks.
-    const lightness = surfaces.map(oklchLightness);
-    for (let index = 0; index < lightness.length; index += 1) {
-      expect(lightness[index]!).toBeGreaterThan(index === 0 ? canvasL : lightness[index - 1]!);
-    }
-    // A surface the theme did distinguish is honored as given.
-    expect(asHex(theme.colors.codeBackground)).toBe("#32302f");
-    expect(asHex(theme.colors.input)).toBe("#45403d");
-  });
-
-  it("builds every derived text color from the theme's own foreground", () => {
-    const theme = parseVsCodeThemeFile(GRUVBOX_MATERIAL_DARK);
-    // Primary text is the editor foreground pulled toward the stock
-    // near-white with its warm hue kept, not the code color verbatim and not
-    // a synthesized neutral.
-    const seed = toCanonicalThemeColor("#d4be98")!;
-    expect(oklchLightness(theme.colors.text)).toBeGreaterThan(oklchLightness(seed) + 0.08);
-    expect(Math.abs(oklchHue(theme.colors.text) - oklchHue(seed))).toBeLessThan(6);
-    // The sidebar, code, toolbar, and message text all follow it.
-    for (const role of [
-      "sidebarForeground",
-      "codeForeground",
-      "toolbarForeground",
-      "messageForeground",
-      "secondaryForeground",
-    ] as const) {
-      expect(asHex(theme.colors[role])).toBe(asHex(theme.colors.text));
-    }
-    // Muted text is a dimmer relative, not body text again.
-    for (const role of ["mutedForeground", "placeholder", "textMuted"] as const) {
-      expect(contrastRatio(theme.colors[role], theme.colors.canvas)).toBeLessThan(
-        contrastRatio(theme.colors.text, theme.colors.canvas),
-      );
-      expect(contrastRatio(theme.colors[role], theme.colors.canvas)).toBeGreaterThanOrEqual(4.4);
-    }
-    expect(theme.colors.secondaryLabel).toBe(theme.colors.textMuted);
-    expect(theme.colors.iconMuted).toBe(theme.colors.textMuted);
-  });
-
-  it("lifts an unreadable color along its own hue instead of replacing it", () => {
-    const theme = parseVsCodeThemeFile(GRUVBOX_MATERIAL_DARK);
-    // descriptionForeground #928374 is 4.0:1 on the canvas: same warm hue,
-    // slightly lighter, rather than a neutral grey.
-    const descriptionHue = oklchHue(toCanonicalThemeColor("#928374")!);
-    expect(Math.abs(oklchHue(theme.colors.textMuted) - descriptionHue)).toBeLessThan(3);
-    expect(contrastRatio(theme.colors.textMuted, theme.colors.canvas)).toBeGreaterThanOrEqual(4.5);
-    expect(oklchLightness(theme.colors.textMuted)).toBeGreaterThan(
-      oklchLightness(toCanonicalThemeColor("#928374")!),
-    );
-  });
-
-  it("uses the theme's own status colors, and never white", () => {
-    const theme = parseVsCodeThemeFile(GRUVBOX_MATERIAL_DARK);
-    // editorError.foreground #b85651 is unreadable on the canvas and used to
-    // drag the whole family down to a white fallback; the readable red wins.
-    expect(asHex(theme.colors.error)).toBe("#ea6962");
-    expect(asHex(theme.colors.warning)).toBe("#d8a657");
-    // Surfaces and foregrounds follow the theme's signal, not the standard.
-    expect(
-      Math.abs(oklchHue(theme.colors.errorForeground) - oklchHue(theme.colors.error)),
-    ).toBeLessThan(3);
-    expect(
-      Math.abs(oklchHue(theme.colors.warningForeground) - oklchHue(theme.colors.warning)),
-    ).toBeLessThan(3);
-    expect(
-      contrastRatio(theme.colors.errorForeground, theme.colors.errorSurface),
-    ).toBeGreaterThanOrEqual(4.5);
-    expect(
-      contrastRatio(theme.colors.warningForeground, theme.colors.warningSurface),
-    ).toBeGreaterThanOrEqual(4.5);
-  });
-
-  it("derives the action hover and update family from the colors that won", () => {
-    const theme = parseVsCodeThemeFile(GRUVBOX_MATERIAL_DARK);
-    expect(asHex(theme.colors.messageAction)).toBe("#a89984");
-    expect(theme.colors.messageActionHover).not.toBe(theme.colors.messageAction);
-    expect(
-      Math.abs(oklchHue(theme.colors.messageActionHover) - oklchHue(theme.colors.messageAction)),
-    ).toBeLessThan(3);
-    expect(asHex(theme.colors.update)).toBe("#a89984");
-    expect(theme.colors.updateSurface).not.toBe(theme.colors.canvas);
-  });
-
-  it("maps a dim sideBar.foreground to secondary sidebar text, never a bright one", () => {
-    const dim = parseVsCodeThemeFile(GRUVBOX_MATERIAL_DARK);
-    expect(contrastRatio(dim.colors.sidebarMutedForeground, dim.colors.sidebar)).toBeLessThan(
-      contrastRatio(dim.colors.sidebarForeground, dim.colors.sidebar),
-    );
-    expect(
-      Math.abs(
-        oklchHue(dim.colors.sidebarMutedForeground) - oklchHue(toCanonicalThemeColor("#928374")!),
-      ),
-    ).toBeLessThan(3);
-    // A theme whose sidebar text is full strength keeps the hierarchy.
-    const bright = parseVsCodeThemeFile({
-      ...GRUVBOX_MATERIAL_DARK,
-      colors: { ...GRUVBOX_MATERIAL_DARK.colors, "sideBar.foreground": "#d4be98" },
-    });
-    expect(contrastRatio(bright.colors.sidebarMutedForeground, bright.colors.sidebar)).toBeLessThan(
-      contrastRatio(bright.colors.sidebarForeground, bright.colors.sidebar) * 0.9,
-    );
-  });
-
-  it("prefers an accent that clears 3:1 over a barely visible focus ring", () => {
-    // Nord and One Dark put a near-canvas grey in focusBorder; the link and
-    // button colors carry the accent people recognize.
-    const theme = parseVsCodeThemeFile({
-      name: "Nordish",
-      type: "dark",
-      colors: {
-        "editor.background": "#2e3440",
-        "editor.foreground": "#d8dee9",
-        focusBorder: "#3b4252",
-        "button.background": "#88c0d0",
-      },
-    });
-    expect(asHex(theme.colors.accent)).toBe("#88c0d0");
-    // With no candidate clearing 3:1 the first visible one still wins.
-    const dim = parseVsCodeThemeFile({
-      name: "Dim",
-      type: "dark",
-      colors: { "editor.background": "#2e3440", focusBorder: "#3b4252" },
-    });
-    expect(asHex(dim.colors.accent)).toBe("#3b4252");
-  });
-
-  it("skips a status color that is not a signal", () => {
-    // Solarized's errorForeground is the pale pink of message text; taking
-    // it as the theme's red would paint destructive buttons near-white.
-    const theme = parseVsCodeThemeFile({
-      name: "Solarish",
-      type: "dark",
-      colors: {
-        "editor.background": "#002b36",
-        "editor.foreground": "#839496",
-        errorForeground: "#ffeaea",
-      },
-    });
-    expect(asHex(theme.colors.error)).not.toBe("#ffeaea");
-    expect(contrastRatio(theme.colors.error, theme.colors.canvas)).toBeGreaterThanOrEqual(4.5);
-    const hue = oklchHue(theme.colors.error);
-    expect(hue < 40 || hue > 340).toBe(true);
-  });
-
-  it("does not let a full-strength descriptionForeground flatten muted text", () => {
-    // One Dark Pro sets descriptionForeground to the editor foreground.
-    const theme = parseVsCodeThemeFile({
-      name: "One Darkish",
-      type: "dark",
-      colors: {
-        "editor.background": "#282c34",
-        "editor.foreground": "#abb2bf",
-        descriptionForeground: "#abb2bf",
-        "input.placeholderForeground": "#abb2bf",
-      },
-    });
-    for (const role of ["textMuted", "placeholder", "mutedForeground"] as const) {
-      expect(contrastRatio(theme.colors[role], theme.colors.canvas)).toBeLessThan(
-        contrastRatio(theme.colors.text, theme.colors.canvas) * 0.9,
-      );
-    }
-  });
-
-  it("pulls heavy borders back to hairline weight, keeping their hue", () => {
-    // Catppuccin Mocha: panel.border is surface2, three steps above the
-    // base, and dropdown.border is the mauve accent.
-    const theme = parseVsCodeThemeFile({
-      name: "Catppuccin Mocha",
-      type: "dark",
-      colors: {
-        "editor.background": "#1e1e2e",
-        "editor.foreground": "#cdd6f4",
-        focusBorder: "#cba6f7",
-        "panel.border": "#585b70",
-        "input.border": "#00000000",
-        "dropdown.border": "#cba6f7",
-      },
-    });
-    const canvasL = oklchLightness(theme.colors.canvas);
-    for (const role of ["border", "input", "sidebarBorder", "toolbarBorder"] as const) {
-      const base = role === "sidebarBorder" ? theme.colors.sidebar : theme.colors.canvas;
-      expect(oklchLightness(theme.colors[role]) - oklchLightness(base)).toBeLessThanOrEqual(0.115);
-      expect(oklchLightness(theme.colors[role])).toBeGreaterThan(oklchLightness(base) + 0.04);
-    }
-    // The border keeps surface2's cool hue rather than turning neutral.
-    expect(
-      Math.abs(oklchHue(theme.colors.border) - oklchHue(toCanonicalThemeColor("#585b70")!)),
-    ).toBeLessThan(15);
-    // The accent-colored dropdown border never becomes the input outline.
-    expect(asHex(theme.colors.input)).not.toBe("#cba6f7");
-    expect(oklchLightness(theme.colors.input)).toBeLessThan(canvasL + 0.115);
-    // A border already at hairline weight is left as the theme wrote it.
-    const gruvbox = parseVsCodeThemeFile(GRUVBOX_MATERIAL_DARK);
-    expect(asHex(gruvbox.colors.input)).toBe("#45403d");
-  });
-
-  it("honors a quiet hover the theme steps below its sidebar", () => {
-    // Tokyo Night hovers 0.014 OKLab darker than the sidebar; that is a
-    // choice, not the same color.
-    const theme = parseVsCodeThemeFile({
-      name: "Tokyo Nightish",
-      type: "dark",
-      colors: {
-        "editor.background": "#1a1b26",
-        "editor.foreground": "#a9b1d6",
-        "sideBar.background": "#16161e",
-        "list.hoverBackground": "#13131a",
-      },
-    });
-    expect(asHex(theme.colors.sidebarRowHover)).toBe("#13131a");
-  });
-
-  it("keeps derived surfaces in a tinted canvas's own family", () => {
-    // Gruvbox Material Light: a cream canvas with a near-neutral accent. The
-    // derived hover and popover step into deeper cream, not grey.
-    const theme = parseVsCodeThemeFile({
-      name: "Gruvbox Material Light",
-      type: "light",
-      colors: {
-        "editor.background": "#fbf1c7",
-        "editor.foreground": "#654735",
-        "button.background": "#7c6f64",
-        "menu.background": "#fbf1c7",
-        "list.hoverBackground": "#fbf1c700",
-      },
-    });
-    const canvasHue = oklchHue(theme.colors.canvas);
-    const chroma = (value: string) =>
-      Number.parseFloat(/^oklch\([0-9.]+ ([0-9.]+)/.exec(value)?.[1] ?? "NaN");
-    const canvasChroma = chroma(theme.colors.canvas);
-    for (const role of ["surfaceOverlay", "sidebarRowHover", "surfaceRaised", "muted"] as const) {
-      expect(Math.abs(oklchHue(theme.colors[role]) - canvasHue)).toBeLessThan(6);
-      expect(chroma(theme.colors[role])).toBeGreaterThanOrEqual(canvasChroma - 0.002);
-      expect(theme.colors[role]).not.toBe(theme.colors.canvas);
-    }
-  });
-
-  it("keeps the list highlight a visible step off the popover it sits on", () => {
-    // Gruvbox Dark Hard: the selection color sits at the same tone as the
-    // derived popover surface, so the hovered file in the mention picker
-    // vanished.
-    const theme = parseVsCodeThemeFile({
-      name: "Gruvbox Dark Hard",
-      type: "dark",
-      colors: {
-        "editor.background": "#1d2021",
-        "editor.foreground": "#ebdbb2",
-        "menu.background": "#1d2021",
-        "list.activeSelectionBackground": "#3c383680",
-      },
-    });
-    expect(
-      Math.abs(
-        oklchLightness(theme.colors.accentSurface) - oklchLightness(theme.colors.surfaceOverlay),
-      ),
-    ).toBeGreaterThanOrEqual(0.039);
-    expect(
-      contrastRatio(theme.colors.accentSurfaceForeground, theme.colors.accentSurface),
-    ).toBeGreaterThanOrEqual(4.5);
-    // A highlight that already clears the popover is left alone (Catppuccin: mantle popover, surface0 highlight).
-    const catppuccin = parseVsCodeThemeFile({
-      name: "Mocha",
-      type: "dark",
-      colors: {
-        "editor.background": "#1e1e2e",
-        "menu.background": "#181825",
-        "list.activeSelectionBackground": "#313244",
-      },
-    });
-    expect(asHex(catppuccin.colors.accentSurface)).toBe("#313244");
   });
 
   it("falls back to the editor background when the type is missing or odd", () => {
@@ -502,8 +421,6 @@ describe("VS Code theme import", () => {
   });
 
   it("stays readable when the file replaces a surface but not its foreground", () => {
-    // A dark theme with a light sidebar: the derived sidebar foreground was
-    // solved for a dark surface and would vanish on this one.
     const theme = parseVsCodeThemeFile({
       name: "Split",
       type: "dark",
@@ -524,8 +441,6 @@ describe("VS Code theme import", () => {
   });
 
   it("reads wide-gamut color() notation", () => {
-    // Themes authored for P3 displays (the shipped Pierre "vibrant" pair) use
-    // this instead of hex.
     const theme = parseVsCodeThemeFile({
       name: "Vibrant",
       type: "dark",
@@ -538,7 +453,6 @@ describe("VS Code theme import", () => {
     });
     expect(asHex(theme.colors.canvas)).toMatch(/^#0[89ab]/);
     expect(asHex(theme.colors.text)).toMatch(/^#f[a-f0-9]/);
-    // The P3 blue lands in sRGB blue, not black or a clipped grey.
     const accent = asHex(theme.colors.accent);
     const [red, green, blue] = [1, 3, 5].map((index) =>
       Number.parseInt(accent.slice(index, index + 2), 16),
@@ -574,7 +488,6 @@ describe("VS Code theme import", () => {
     expect(getThemeColorsForMode(github, "dark")).not.toBeNull();
     expect(asHex(getThemeColorsForMode(github, "dark")!.canvas)).toBe("#101014");
     expect(asHex(github.colors.canvas)).toBe("#fdfdfd");
-    // The unpaired dimmed variant stays a single dark theme.
     expect(getThemeColorsForMode(themes[2]!, "light")).toBeNull();
   });
 
@@ -590,14 +503,10 @@ describe("VS Code theme import", () => {
       make("solar-dark-soft", "dark"),
       make("solar-light", "light"),
     ]);
-    // "solar-dark-soft" groups under its own key with no light partner, so
-    // it keeps its full name; the remaining pair merges.
     expect(themes.map((theme) => theme.label).sort()).toEqual(["Solar", "Solar Dark Soft"]);
   });
 
   it("keeps derived surfaces neutral instead of washing them with the accent", () => {
-    // A gray theme with a blue focusBorder: roles the file omits (code
-    // surface, plain surfaces) must stay near the canvas, not turn blue.
     const theme = parseVsCodeThemeFile(VSCODE_DARK);
     const spread = (value: string) => {
       const hex = asHex(value);
@@ -607,7 +516,6 @@ describe("VS Code theme import", () => {
     expect(spread(theme.colors.codeBackground)).toBeLessThanOrEqual(8);
     expect(spread(theme.colors.surface)).toBeLessThanOrEqual(8);
     expect(spread(theme.colors.text)).toBeLessThanOrEqual(12);
-    // The accent itself keeps the file's color.
     expect(asHex(theme.colors.accent)).toBe("#69b1ff");
   });
 
@@ -626,7 +534,6 @@ describe("VS Code theme import", () => {
     ]);
     expect(themes.map((theme) => theme.label)).toEqual(["Dracula", "Dracula Soft"]);
     expect(themes.map((theme) => theme.id)).toEqual(["dracula", "dracula-soft"]);
-    // Without file names the second falls back to numbering.
     const numbered = resolveThemeLabelCollisions([
       { theme: dracula("#282a36") },
       { theme: dracula("#22232e") },

@@ -7,13 +7,21 @@ import {
   ProviderInstanceId,
   type ProviderOptionDescriptor,
   type ProviderOptionSelection,
-  type RuntimeMode,
-  type ServerSettings,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import { copySorted } from "./Array.ts";
 
 const DEFAULT_PROVIDER_DRIVER_KIND = ProviderDriverKind.make("codex");
+
+export function modelSelectionCommandType(
+  currentInstanceId: ProviderInstanceId,
+  selection: ModelSelection,
+) {
+  return currentInstanceId === selection.instanceId
+    ? ("thread.model-selection.set" as const)
+    : ("provider.switch" as const);
+}
 
 export interface SelectableModelOption {
   slug: string;
@@ -72,6 +80,40 @@ export function getModelSelectionBooleanOptionValue(
   id: string,
 ): boolean | undefined {
   return getProviderOptionBooleanSelectionValue(modelSelection?.options, id);
+}
+
+function canonicalModelSelectionOptions(
+  modelSelection: ModelSelection,
+): ReadonlyArray<readonly [id: string, value: string | boolean]> {
+  return copySorted(
+    (modelSelection.options ?? []).map(
+      (selection): readonly [id: string, value: string | boolean] => [
+        selection.id,
+        selection.value,
+      ],
+    ),
+    (
+      [leftId, leftValue]: readonly [id: string, value: string | boolean],
+      [rightId, rightValue]: readonly [id: string, value: string | boolean],
+    ) => {
+      const idOrder = leftId.localeCompare(rightId);
+      return idOrder !== 0 ? idOrder : String(leftValue).localeCompare(String(rightValue));
+    },
+  );
+}
+
+export function modelSelectionsEqual(left: ModelSelection, right: ModelSelection): boolean {
+  if (left.instanceId !== right.instanceId || left.model !== right.model) {
+    return false;
+  }
+  const leftOptions = canonicalModelSelectionOptions(left);
+  const rightOptions = canonicalModelSelectionOptions(right);
+  return (
+    leftOptions.length === rightOptions.length &&
+    leftOptions.every(
+      ([id, value], index) => id === rightOptions[index]?.[0] && value === rightOptions[index]?.[1],
+    )
+  );
 }
 
 function resolveDescriptorChoiceValue(
@@ -155,12 +197,35 @@ export function getProviderOptionDescriptors(input: {
   );
 }
 
+function getReportedOptionValue(
+  id: string,
+  selection?: ModelSelection | null,
+  reportedSelection?: ModelSelection | null,
+) {
+  if (
+    !selection ||
+    !reportedSelection ||
+    selection.instanceId !== reportedSelection.instanceId ||
+    selection.model !== reportedSelection.model ||
+    selection.options?.some((option) => option.id === id)
+  )
+    return undefined;
+  return getRawSelectionValueById(reportedSelection.options, id);
+}
+
 export function getProviderOptionCurrentValue(
   descriptor: ProviderOptionDescriptor | null | undefined,
+  selection?: ModelSelection | null,
+  reportedSelection?: ModelSelection | null,
 ): string | boolean | undefined {
   if (!descriptor) {
     return undefined;
   }
+  const hasExplicitOption = selection?.options?.some((option) => option.id === descriptor.id);
+  // Reported values are display-only; callers that build dispatch options omit this context.
+  const reportedValue = getReportedOptionValue(descriptor.id, selection, reportedSelection);
+  if (reportedValue !== undefined) return reportedValue;
+  if (descriptor.id === "variant" && selection && !hasExplicitOption) return undefined;
   if (descriptor.type === "boolean") {
     return descriptor.currentValue;
   }
@@ -172,6 +237,8 @@ export function getProviderOptionCurrentValue(
 
 export function getProviderOptionCurrentLabel(
   descriptor: ProviderOptionDescriptor | null | undefined,
+  selection?: ModelSelection | null,
+  reportedSelection?: ModelSelection | null,
 ): string | undefined {
   if (!descriptor) {
     return undefined;
@@ -183,11 +250,15 @@ export function getProviderOptionCurrentLabel(
         : "Off"
       : undefined;
   }
-  const currentValue = getProviderOptionCurrentValue(descriptor);
-  if (typeof currentValue !== "string") {
-    return undefined;
-  }
-  return descriptor.options.find((option) => option.id === currentValue)?.label;
+  const currentValue = getProviderOptionCurrentValue(descriptor, selection, reportedSelection);
+  return (
+    descriptor.options.find((option) => option.id === currentValue)?.label ??
+    (getReportedOptionValue(descriptor.id, selection, reportedSelection) === "default"
+      ? "Default"
+      : descriptor.id === "variant"
+        ? "Unknown"
+        : undefined)
+  );
 }
 
 export function buildProviderOptionSelectionsFromDescriptors(
@@ -209,41 +280,6 @@ export function buildProviderOptionSelectionsFromDescriptors(
   return nextSelections.length > 0 ? nextSelections : undefined;
 }
 
-export function resolveConfiguredProviderOptionDefaults(input: {
-  settings: Pick<ServerSettings, "providerNewThreadDefaults">;
-  instanceId: ProviderInstanceId;
-  descriptors: ReadonlyArray<ProviderOptionDescriptor>;
-}): ReadonlyArray<ProviderOptionSelection> {
-  const configured = input.settings.providerNewThreadDefaults[input.instanceId]?.modelOptions;
-  const configuredById = new Map(configured?.map((selection) => [selection.id, selection.value]));
-  const selections: ProviderOptionSelection[] = [];
-
-  for (const descriptor of input.descriptors) {
-    const configuredValue = configuredById.get(descriptor.id);
-    const value =
-      descriptor.type === "boolean"
-        ? typeof configuredValue === "boolean"
-          ? configuredValue
-          : getProviderOptionCurrentValue(descriptor)
-        : typeof configuredValue === "string" &&
-            descriptor.options.some((option) => option.id === configuredValue)
-          ? configuredValue
-          : getProviderOptionCurrentValue(descriptor);
-    if (typeof value === "string" || typeof value === "boolean") {
-      selections.push({ id: descriptor.id, value });
-    }
-  }
-
-  return selections;
-}
-
-export function resolveConfiguredRuntimeMode(
-  settings: Pick<ServerSettings, "providerNewThreadDefaults">,
-  instanceId: ProviderInstanceId,
-): RuntimeMode | null {
-  return settings.providerNewThreadDefaults[instanceId]?.runtimeMode ?? null;
-}
-
 export function buildExplicitProviderOptionSelectionsFromDescriptors(
   descriptors: ReadonlyArray<ProviderOptionDescriptor> | null | undefined,
   selections: ReadonlyArray<ProviderOptionSelection> | null | undefined,
@@ -262,9 +298,28 @@ export function isClaudeUltrathinkPrompt(text: string | null | undefined): boole
   return typeof text === "string" && /\bultrathink\b/i.test(text);
 }
 
-/** Compare Codex model families without changing provider-owned dispatch identifiers. */
 export function codexModelFamily(slug: string): string {
   return slug.startsWith("openai.gpt-") ? slug.slice("openai.".length) : slug;
+}
+
+export function formatCodexModelName(name: string): string {
+  return name.replace(/^gpt/i, "GPT").replace(/-([a-z])/g, (_, c) => "-" + c.toUpperCase());
+}
+
+export function formatModelSlugName(slug: string): string {
+  const separator = slug.lastIndexOf("/") + 1;
+  const prefix = slug.slice(0, separator);
+  const name = slug.slice(separator);
+  if (/^gpt-\d/i.test(name)) return prefix + formatCodexModelName(name);
+  if (!/^(claude-(opus|sonnet|haiku|fable)|gemini|grok|composer)-\d/i.test(name)) return slug;
+  return (
+    prefix +
+    name
+      .replace(/^(claude-[a-z]+-\d+)-(\d{1,2})(?=-|\[|$)/i, "$1.$2")
+      .split("-")
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(" ")
+  );
 }
 
 export function normalizeModelSlug(
@@ -292,7 +347,6 @@ export function normalizeCustomModelSlug(model: string | null | undefined): stri
   return model.trim() || null;
 }
 
-/** A custom model setting with its optional fields resolved. */
 export interface CustomModelDefinition {
   readonly slug: string;
   readonly name: string;
@@ -301,13 +355,6 @@ export interface CustomModelDefinition {
 
 const decodeCustomModelCapabilities = Schema.decodeUnknownOption(ModelCapabilities);
 
-/**
- * Read a `customModels` setting into resolved definitions. Accepts the typed
- * union as well as the opaque `providerInstances[id].config` blob clients see,
- * so it tolerates bare slugs, malformed rows, and unparseable capabilities
- * (dropped rather than failing the whole list). Slugs are trimmed and
- * deduplicated, first occurrence wins; `name` falls back to the slug.
- */
 export function readCustomModelEntries(value: unknown): CustomModelDefinition[] {
   if (!Array.isArray(value)) return [];
   const entries: CustomModelDefinition[] = [];
@@ -340,10 +387,6 @@ export function readCustomModelEntries(value: unknown): CustomModelDefinition[] 
   return entries;
 }
 
-/**
- * Write a definition back to the compact stored shape: a bare slug when it
- * carries nothing custom, otherwise an entry with only the set fields.
- */
 export function toCustomModelSetting(entry: CustomModelDefinition): CustomModelSetting {
   const descriptors = entry.capabilities?.optionDescriptors ?? [];
   const name = entry.name !== entry.slug ? entry.name : undefined;
@@ -397,7 +440,6 @@ export function resolveSelectableModel(
   return resolved ? resolved.slug : null;
 }
 
-/** Trim a string, returning null for empty/missing values. */
 function trimOrNull<T extends string>(value: T | null | undefined): T | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim() as T;
@@ -423,14 +465,6 @@ export function createModelSelection(
   return selections.length > 0 ? { ...base, options: selections } : base;
 }
 
-/**
- * Returns the effort value if it is a prompt-injected value according to
- * any select descriptor in the given capabilities, or null otherwise.
- *
- * Unlike a single `find`, this checks every descriptor so that the
- * correct descriptor's `promptInjectedValues` list is consulted even when
- * multiple select descriptors exist.
- */
 export function resolvePromptInjectedEffort(
   caps: ModelCapabilities,
   rawEffort: string | null | undefined,

@@ -17,7 +17,7 @@
 # instead of fetching the release again.
 set -eu
 
-repo="asfires/t3code" # Fork-local release repository.
+repo="pingdotgg/t3code"
 base_url="${T3CODE_RELEASE_BASE_URL:-https://github.com/${repo}/releases/download}"
 t3_home="${T3CODE_HOME:-$HOME/.t3}"
 bin_dir="${T3CODE_INSTALL_BIN_DIR:-$HOME/.local/bin}"
@@ -221,35 +221,7 @@ mkdir -p "$bin_dir"
 ln -sfn "${target_dir}/t3" "${bin_dir}/t3"
 if "$interactive"; then printf '\r\033[2K' >&2; fi
 printf '  %sInstalled T3 Code %s%s\n\n' "$green" "$version" "$reset" >&2
-# Fork-local: macOS never puts ~/.local/bin on PATH, and Ubuntu only does once
-# the directory exists at login, so a first `t3` would be "command not found".
-# Add the directory to the login shell's profile instead of only printing a
-# hint. Set T3CODE_NO_MODIFY_PATH to opt out. `t3 uninstall` leaves the line in
-# place on purpose: other tools share that directory.
-path_hint() { printf '  Add %s to your PATH, then run %st3%s.\n\n' "$bin_dir" "$bold" "$reset"; }
 case ":${PATH}:" in
   *":${bin_dir}:"*) printf '  Run %st3%s to get started.\n\n' "$bold" "$reset" ;;
-  *)
-    if [ "$bin_dir" = "$HOME/.local/bin" ]; then path_entry='$HOME/.local/bin'; else path_entry="$bin_dir"; fi
-    profile=
-    profile_line="export PATH=\"${path_entry}:\$PATH\""
-    case "$(basename "${SHELL:-}")" in
-      zsh) profile="${ZDOTDIR:-$HOME}/.zshrc" ;;
-      bash) if [ "$platform" = darwin ]; then profile="$HOME/.bash_profile"; else profile="$HOME/.bashrc"; fi ;;
-      fish)
-        profile="$HOME/.config/fish/config.fish"
-        profile_line="fish_add_path \"${path_entry}\""
-        ;;
-    esac
-    if [ -n "${T3CODE_NO_MODIFY_PATH:-}" ] || [ -z "$profile" ]; then
-      path_hint
-    elif [ -f "$profile" ] && grep -qF "$path_entry" "$profile"; then
-      printf '  Open a new terminal, then run %st3%s.\n  If it is not found, add %s to your PATH.\n\n' "$bold" "$reset" "$bin_dir"
-    elif mkdir -p "$(dirname "$profile")" 2>/dev/null &&
-      printf '\n%s # Added by the T3 Code installer\n' "$profile_line" >>"$profile" 2>/dev/null; then
-      printf '  Added %s to your PATH in %s.\n  Open a new terminal, then run %st3%s.\n\n' "$bin_dir" "$profile" "$bold" "$reset"
-    else
-      path_hint
-    fi
-    ;;
+  *) printf '  Add %s to your PATH, then run %st3%s.\n\n' "$bin_dir" "$bold" "$reset" ;;
 esac

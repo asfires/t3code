@@ -1,5 +1,7 @@
+import { useAndroidControlSizing } from "../../components/ui/useAndroidControlSizing";
+import { resolveScratchProjectScopeKey } from "@t3tools/client-runtime/state/project-grouping";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
-import { createThreadMovePlanner } from "./threadOrder";
+import { computeThreadMoveAvailability } from "./threadOrder";
 import type {
   EnvironmentProject,
   EnvironmentThreadShell,
@@ -11,52 +13,35 @@ import {
 import { LegendList } from "@legendapp/list/react-native";
 import type { MenuAction } from "@react-native-menu/menu";
 import { useAtomValue } from "@effect/atom-react";
-import { type EnvironmentId, resolveEnvironmentMachineKind } from "@t3tools/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { LayoutChangeEvent } from "react-native";
+import type { LayoutChangeEvent, TextInputInstance } from "react-native";
 import { Platform, StyleSheet, TextInput, View } from "react-native";
-import { Gesture, GestureDetector } from "react-native-gesture-handler";
+import { GestureDetector, useNativeGesture } from "react-native-gesture-handler";
 import type { SwipeableMethods } from "react-native-gesture-handler/ReanimatedSwipeable";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { SearchBarCommands } from "react-native-screens";
 
-import { AppText as Text } from "../../components/AppText";
+import { AppText as Text } from "../../components/ui/AppText";
 import { CompactBrandTitle } from "../../components/CompactBrandTitle";
-import { ControlPillMenu } from "../../components/ControlPill";
-import { SymbolView } from "../../components/AppSymbol";
+import { Menu } from "../../components/ui/Menu";
+import { SymbolView } from "../../components/ui/AppSymbol";
 import { NATIVE_LIQUID_GLASS_SUPPORTED } from "../../native/native-glass";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { scopedProjectKey, scopedThreadKey } from "../../lib/scopedEntities";
-import { useProjects, useThreadShells } from "../../state/entities";
+import { useProjects, useNavigationThreadShells } from "../../state/entities";
 import { useThreadSearch } from "../../state/queries";
-import { useThreadListV2Enabled } from "./use-thread-list-v2-enabled";
 import { useThreadListV2ShelfPreferences } from "./use-thread-list-v2-shelf-preferences";
 import { usePendingThreadOrder } from "../../state/thread-order";
-import { environmentServerConfigsAtom } from "../../state/server";
+import { threadListEnvironmentsAtom } from "../../state/server";
 import { usePendingNewTasks } from "../../state/use-pending-new-tasks";
 import { useQueuedThreadKeys } from "../../state/use-thread-outbox";
 import { useWorkspaceState } from "../../state/workspace";
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
 import { useHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
 import { useThreadJumpShortcuts } from "../keyboard/threadKeyboardShortcuts";
-import {
-  hasCustomHomeListOptions,
-  PROJECT_SORT_OPTIONS,
-  THREAD_SORT_OPTIONS,
-  useHomeListOptions,
-} from "../home/home-list-options";
+import { useHomeListOptions } from "../home/home-list-options";
 import { buildHomeListFilterMenu } from "../home/home-list-filter-menu";
-import {
-  buildHomeListLayout,
-  DEFAULT_GROUP_DISPLAY_STATE,
-  EMPTY_HOME_LIST_LAYOUT,
-  homeListItemsAreEqual,
-  nextGroupDisplayState,
-  type HomeGroupDisplayAction,
-  type HomeGroupDisplayState,
-  type HomeListItem,
-} from "../home/homeListItems";
-import { buildHomeProjectScopes, buildHomeThreadGroups } from "../home/homeThreadList";
+import { buildHomeProjectScopes } from "../home/homeThreadList";
 import { SwipeableScrollGateProvider, useSwipeableScrollGate } from "../home/thread-swipe-actions";
 import { usePendingTaskListActions } from "../home/usePendingTaskListActions";
 import { useThreadListActions } from "../home/useThreadListActions";
@@ -65,40 +50,34 @@ import {
   WorkspaceConnectionTitle,
 } from "../home/WorkspaceConnectionTitle";
 import { SidebarHeaderActions } from "./sidebar-header-actions";
-import { MaterialThreadListToolbar } from "../home/MaterialThreadListToolbar";
-import { useMaterialToolbarHeight } from "../../components/useMaterialToolbarHeight";
-import { useMaterialFabScroll } from "../home/MaterialFabScrollContext";
+import { ThreadListToolbar } from "../home/ThreadListToolbar";
+import { useToolbarLayout } from "../../components/ui/useToolbarLayout";
+import { useFabScroll } from "../home/FabScrollContext";
 import { SidebarFilterButton } from "./sidebar-filter-button";
 import { createSidebarHeaderItems } from "./sidebar-native-header-items";
 import { SidebarNavigationShell } from "./sidebar-navigation-shell";
-import {
-  PendingTaskListRow,
-  ThreadListGroupHeader,
-  ThreadListRow,
-  ThreadListShowMoreRow,
-} from "./thread-list-items";
 import {
   ThreadListV2PendingRow,
   ThreadListV2Row,
   ThreadListV2SettledShelfHeader,
   ThreadListV2ShowMoreRow,
   ThreadListV2SnoozedShelfHeader,
+  ThreadListV2WorkingShelfHeader,
 } from "./thread-list-v2-items";
-import { resolveThreadProviderInstance } from "./thread-provider-instance";
+import { useThreadRowProviderInstanceResolver } from "./thread-provider-instance";
 import {
   buildThreadListV2Items,
   getThreadListV2OrderedSection,
   buildThreadListV2ListItems,
+  isThreadListV2ListItem,
+  threadListV2ListItemsAreEqual,
+  threadListInboxReturns,
   THREAD_LIST_V2_SETTLED_INITIAL_COUNT,
   THREAD_LIST_V2_SETTLED_PAGE_COUNT,
   type ThreadListV2ListItem,
 } from "./threadListV2";
 
-/** The sidebar list serves both lists: v1 grouped items or, when the Thread
-    List v2 beta is on, flat v2 rows with queued tasks spliced in, and a settled
-    "Show more" pager. */
 type SidebarListItem =
-  | HomeListItem
   | ThreadListV2ListItem
   | { readonly type: "v2-show-more"; readonly key: string; readonly hiddenCount: number };
 
@@ -118,15 +97,6 @@ interface ThreadNavigationSidebarProps {
   readonly searchQuery: string;
 }
 
-/**
- * iPad/large-width sidebar column.
- *
- * On iOS the pane is hosted inside its own navigation-inert single-screen
- * native stack (SidebarNavigationShell) so the header is a real
- * UINavigationBar: large title, native bar-button items, and a
- * UISearchController search field — the same chrome a UISplitViewController
- * column gets. Other platforms keep the custom header chrome.
- */
 export function ThreadNavigationSidebar(props: ThreadNavigationSidebarProps) {
   if (Platform.OS !== "ios") {
     return <ThreadNavigationSidebarPane {...props} nativeChrome={false} />;
@@ -152,17 +122,18 @@ function ThreadNavigationSidebarPane(
   props: ThreadNavigationSidebarProps & { readonly nativeChrome: boolean },
 ) {
   const { themeVariables: materialTheme } = useAppearancePreferences();
-  const screenColor = materialTheme["--color-screen"];
+  const drawerColor = materialTheme["--color-drawer"];
 
   const insets = useSafeAreaInsets();
+  const { fabClearance } = useAndroidControlSizing();
   const projects = useProjects();
-  const threads = useThreadShells();
+  const threads = useNavigationThreadShells();
   const { environments: workspaceEnvironments, state: catalogState } = useWorkspaceState();
   const { savedConnectionsById } = useSavedRemoteConnections();
-  const searchInputRef = useRef<TextInput>(null);
+  const searchInputRef = useRef<TextInputInstance>(null);
   const searchBarRef = useRef<SearchBarCommands>(null);
   const openSwipeableRef = useRef<SwipeableMethods | null>(null);
-  const sidebarScrollGesture = useMemo(() => Gesture.Native(), []);
+  const sidebarScrollGesture = useNativeGesture();
   const {
     archiveThread,
     confirmDeleteThread,
@@ -172,11 +143,11 @@ function ThreadNavigationSidebarPane(
     unsettleThread,
     pinThread,
     unpinThread,
+    setThreadAutoSettle,
     moveThread,
     renameThread,
     regenerateThreadTitle,
   } = useThreadListActions();
-  const threadListV2Enabled = useThreadListV2Enabled();
   const pendingTasks = usePendingNewTasks();
   const queuedThreadKeys = useQueuedThreadKeys();
   const { openPendingTask, confirmDeletePendingTask } = usePendingTaskListActions();
@@ -194,7 +165,7 @@ function ThreadNavigationSidebarPane(
     () => new Set(environments.map((environment) => environment.environmentId)),
     [environments],
   );
-  const { options, setSelectedEnvironmentId, setProjectSortOrder, setThreadSortOrder } =
+  const { options, setSelectedEnvironmentId, setSelectedProjectKey } =
     useHomeListOptions(availableEnvironmentIds);
   const searchEnvironmentIds = useMemo(
     () =>
@@ -225,7 +196,16 @@ function ThreadNavigationSidebarPane(
     () => new Set(threadSearch.matches.map(threadSearchMatchKey)),
     [threadSearch.matches],
   );
-  const [selectedProjectKey, setSelectedProjectKey] = useState<string | null>(null);
+  const projectScopeKey = options.selectedProjectKey;
+  const resolvedProjectKey = resolveScratchProjectScopeKey(projectScopeKey, projects, {
+    sidebarProjectGroupingMode: options.projectGroupingMode,
+    sidebarProjectGroupingOverrides: {},
+  });
+  useEffect(() => {
+    if (resolvedProjectKey !== projectScopeKey) {
+      setSelectedProjectKey(resolvedProjectKey);
+    }
+  }, [projectScopeKey, resolvedProjectKey, setSelectedProjectKey]);
   const projectScopes = useMemo(
     () =>
       buildHomeProjectScopes({
@@ -259,20 +239,10 @@ function ThreadNavigationSidebarPane(
     [projectScopes],
   );
   const selectedProjectScope = useMemo(
-    () =>
-      selectedProjectKey === null
-        ? null
-        : (projectScopes.find((scope) => scope.key === selectedProjectKey) ?? null),
-    [projectScopes, selectedProjectKey],
+    () => projectScopes.find((scope) => scope.key === resolvedProjectKey) ?? null,
+    [projectScopes, resolvedProjectKey],
   );
-  useEffect(() => {
-    if (
-      selectedProjectKey !== null &&
-      !projectFilterOptions.some((project) => project.key === selectedProjectKey)
-    ) {
-      setSelectedProjectKey(null);
-    }
-  }, [projectFilterOptions, selectedProjectKey]);
+  const selectedProjectKey = selectedProjectScope?.key ?? null;
   const selectedProjectRefs = useMemo(
     () =>
       selectedProjectScope === null
@@ -284,93 +254,6 @@ function ThreadNavigationSidebarPane(
           ),
     [selectedProjectScope],
   );
-  const scopedProjects = useMemo(
-    () =>
-      threadListV2Enabled
-        ? []
-        : selectedProjectRefs === null
-          ? projects
-          : projects.filter((project) =>
-              selectedProjectRefs.has(scopedProjectKey(project.environmentId, project.id)),
-            ),
-    [threadListV2Enabled, projects, selectedProjectRefs],
-  );
-  const scopedThreads = useMemo(
-    () =>
-      threadListV2Enabled
-        ? []
-        : selectedProjectRefs === null
-          ? threads
-          : threads.filter((thread) =>
-              selectedProjectRefs.has(scopedProjectKey(thread.environmentId, thread.projectId)),
-            ),
-    [threadListV2Enabled, selectedProjectRefs, threads],
-  );
-  const scopedPendingTasks = useMemo(
-    () =>
-      threadListV2Enabled
-        ? []
-        : selectedProjectRefs === null
-          ? pendingTasks
-          : pendingTasks.filter((pendingTask) =>
-              selectedProjectRefs.has(
-                scopedProjectKey(pendingTask.environmentId, pendingTask.projectId),
-              ),
-            ),
-    [threadListV2Enabled, pendingTasks, selectedProjectRefs],
-  );
-  const groups = useMemo(
-    () =>
-      threadListV2Enabled
-        ? []
-        : buildHomeThreadGroups({
-            projects: scopedProjects,
-            threads: scopedThreads,
-            pendingTasks: scopedPendingTasks,
-            queuedThreadKeys,
-            environmentId: options.selectedEnvironmentId,
-            searchQuery: props.searchQuery,
-            matchedThreadKeys,
-            projectSortOrder: options.projectSortOrder,
-            threadSortOrder: options.threadSortOrder,
-            projectGroupingMode: options.projectGroupingMode,
-          }),
-    [
-      threadListV2Enabled,
-      queuedThreadKeys,
-      matchedThreadKeys,
-      options,
-      props.searchQuery,
-      scopedPendingTasks,
-      scopedProjects,
-      scopedThreads,
-    ],
-  );
-  const [groupDisplayStates, setGroupDisplayStates] = useState<
-    ReadonlyMap<string, HomeGroupDisplayState>
-  >(() => new Map());
-  const updateGroupDisplay = useCallback((key: string, action: HomeGroupDisplayAction) => {
-    setGroupDisplayStates((previous) => {
-      const next = new Map(previous);
-      next.set(
-        key,
-        nextGroupDisplayState(previous.get(key) ?? DEFAULT_GROUP_DISPLAY_STATE, action),
-      );
-      return next;
-    });
-  }, []);
-  const hasSearchQuery = props.searchQuery.trim().length > 0;
-  const listLayout = useMemo(
-    () =>
-      threadListV2Enabled
-        ? EMPTY_HOME_LIST_LAYOUT
-        : buildHomeListLayout({
-            groups,
-            displayStates: groupDisplayStates,
-            showAllThreads: hasSearchQuery,
-          }),
-    [threadListV2Enabled, groups, groupDisplayStates, hasSearchQuery],
-  );
   const projectByKey = useMemo(() => {
     const map = new Map<string, EnvironmentProject>();
     for (const project of projects) {
@@ -379,10 +262,6 @@ function ThreadNavigationSidebarPane(
     return map;
   }, [projects]);
 
-  // Thread List v2 (beta) support — same model as the compact Home list
-  // (HomeScreen.tsx): flat creation-order card block + settled recency tail.
-  // The settled tail renders in pages; expansion resets when the filter
-  // context changes so environment/search flips never inherit a deep page.
   const [settledVisibleCount, setSettledVisibleCount] = useState(
     THREAD_LIST_V2_SETTLED_INITIAL_COUNT,
   );
@@ -400,104 +279,44 @@ function ThreadNavigationSidebarPane(
     loaded: shelfPreferencesLoaded,
     settledShelfExpanded,
     snoozedShelfExpanded,
+    workingShelfEnabled,
+    workingShelfExpanded,
     toggleSettledShelf,
     toggleSnoozedShelf,
+    toggleWorkingShelf,
   } = useThreadListV2ShelfPreferences();
-  // The queued-start and snooze helpers need a clock while the pane stays open.
   const [nowMinute, setNowMinute] = useState(() => new Date().toISOString().slice(0, 16));
-  // Snooze wake times are second-precise; a counter bumped exactly at the
-  // next wake boundary re-runs the partition with a fresh clock so a woken
-  // thread reappears immediately instead of on the next minute tick.
   const [snoozeWakeTick, bumpSnoozeWakeTick] = useState(0);
   useEffect(() => {
-    if (!threadListV2Enabled) return;
-    // Refresh immediately because the mount-time value can be hours old.
     setNowMinute(new Date().toISOString().slice(0, 16));
     const id = setInterval(() => setNowMinute(new Date().toISOString().slice(0, 16)), 60_000);
     return () => clearInterval(id);
-  }, [threadListV2Enabled]);
-  // Threads on servers without the settlement capability never classify as
-  // settled (the user could neither un-settle nor pin them).
-  const serverConfigs = useAtomValue(environmentServerConfigsAtom);
-  const settlementEnvironmentIds = useMemo(() => {
-    const supported = new Set<EnvironmentId>();
-    for (const [environmentId, config] of serverConfigs) {
-      if (config.environment.capabilities.threadSettlement === true) {
-        supported.add(environmentId);
-      }
-    }
-    return supported;
-  }, [serverConfigs]);
-  const snoozeEnvironmentIds = useMemo(() => {
-    const supported = new Set<EnvironmentId>();
-    for (const [environmentId, config] of serverConfigs) {
-      if (config.environment.capabilities.threadSnooze === true) {
-        supported.add(environmentId);
-      }
-    }
-    return supported;
-  }, [serverConfigs]);
-  const pinningEnvironmentIds = useMemo(() => {
-    const supported = new Set<EnvironmentId>();
-    for (const [environmentId, config] of serverConfigs) {
-      if (config.environment.capabilities.threadPinning === true) {
-        supported.add(environmentId);
-      }
-    }
-    return supported;
-  }, [serverConfigs]);
-  const pinReorderEnvironmentIds = useMemo(() => {
-    const supported = new Set<EnvironmentId>();
-    for (const [environmentId, config] of serverConfigs) {
-      if (config.environment.capabilities.threadPinReorder === true) {
-        supported.add(environmentId);
-      }
-    }
-    return supported;
-  }, [serverConfigs]);
-  const activeReorderEnvironmentIds = useMemo(() => {
-    const supported = new Set<EnvironmentId>();
-    for (const [environmentId, config] of serverConfigs) {
-      if (config.environment.capabilities.threadActiveReorder === true) {
-        supported.add(environmentId);
-      }
-    }
-    return supported;
-  }, [serverConfigs]);
-  const titleRegenerationEnvironmentIds = useMemo(() => {
-    const supported = new Set<EnvironmentId>();
-    for (const [environmentId, config] of serverConfigs) {
-      if (config.environment.capabilities.threadTitleRegeneration === true) {
-        supported.add(environmentId);
-      }
-    }
-    return supported;
-  }, [serverConfigs]);
-  const machineByEnvironmentId = useMemo(
-    () =>
-      new Map(
-        [...serverConfigs].map(
-          ([environmentId, config]) =>
-            [environmentId, resolveEnvironmentMachineKind(config)] as const,
-        ),
-      ),
-    [serverConfigs],
-  );
+  }, []);
+  const listEnvironments = useAtomValue(threadListEnvironmentsAtom);
+  const {
+    providersByEnvironmentId,
+    machineByEnvironmentId,
+    settlementEnvironmentIds,
+    snoozeEnvironmentIds,
+    pinningEnvironmentIds,
+    autoSettleOptOutEnvironmentIds,
+    pinReorderEnvironmentIds,
+    activeReorderEnvironmentIds,
+    titleRegenerationEnvironmentIds,
+  } = listEnvironments;
+  const resolveProviderInstance = useThreadRowProviderInstanceResolver(providersByEnvironmentId);
   const pendingOrder = usePendingThreadOrder(nowMinute, snoozeWakeTick);
-  const threadMovePlanners = useMemo(() => {
-    const sectionPlanner = (section: "pinned" | "active") =>
-      createThreadMovePlanner({
+  // Up/down menu availability for every card, computed once per section per
+  // rebuild (see computeThreadMoveAvailability): per-thread planner calls made
+  // list construction quadratic, and this list rebuilds on every minute tick.
+  const threadMoveAvailability = useMemo(() => {
+    const sectionAvailability = (section: "pinned" | "active") =>
+      computeThreadMoveAvailability({
         allThreads: threads,
         section,
-        reorderableEnvironmentIds: new Set(
-          [...serverConfigs].flatMap(([id, config]) =>
-            (section === "pinned"
-              ? config.environment.capabilities.threadPinReorder
-              : config.environment.capabilities.threadActiveReorder) === true
-              ? [id]
-              : [],
-          ),
-        ),
+        pendingOrder,
+        reorderableEnvironmentIds:
+          section === "pinned" ? pinReorderEnvironmentIds : activeReorderEnvironmentIds,
         ordered: getThreadListV2OrderedSection({
           threads,
           section,
@@ -508,9 +327,14 @@ function ThreadNavigationSidebarPane(
           queuedThreadKeys,
         }),
       });
-    return { pinned: sectionPlanner("pinned"), active: sectionPlanner("active") };
+    return new Map([
+      ...sectionAvailability("pinned"),
+      ...(workingShelfEnabled ? [] : sectionAvailability("active")),
+    ]);
   }, [
-    serverConfigs,
+    workingShelfEnabled,
+    pinReorderEnvironmentIds,
+    activeReorderEnvironmentIds,
     threads,
     pendingOrder,
     queuedThreadKeys,
@@ -520,16 +344,7 @@ function ThreadNavigationSidebarPane(
     snoozeWakeTick,
   ]);
   const threadListV2Layout = useMemo(() => {
-    if (!threadListV2Enabled)
-      return {
-        items: [],
-        hiddenSettledCount: 0,
-        snoozedCount: 0,
-        snoozedShelfHeaderIndex: null,
-        settledCount: 0,
-        settledShelfHeaderIndex: null,
-        nextSnoozeWakeAt: null,
-      };
+    threadListInboxReturns.observe(workingShelfEnabled ? threads : null);
     return buildThreadListV2Items({
       pendingOrder,
       threads: threads.filter((thread) => thread.archivedAt === null),
@@ -542,11 +357,16 @@ function ThreadNavigationSidebarPane(
       queuedThreadKeys,
       settledLimit: settledVisibleCount,
       now: new Date().toISOString(),
+      workingShelfEnabled,
+      workingShelfExpanded,
+      inboxReturnAt: threadListInboxReturns.returnedAt,
       snoozedShelfExpanded,
       settledShelfExpanded,
       selectedThreadKey: props.selectedThreadKey ?? null,
     });
   }, [
+    workingShelfEnabled,
+    workingShelfExpanded,
     pendingOrder,
     queuedThreadKeys,
     nowMinute,
@@ -560,12 +380,9 @@ function ThreadNavigationSidebarPane(
     settledVisibleCount,
     settlementEnvironmentIds,
     snoozeEnvironmentIds,
-    threadListV2Enabled,
     threads,
     selectedProjectScope,
   ]);
-  // Re-partition the moment the earliest snooze expires (clamped to the
-  // signed-32-bit setTimeout range; far-future wakes re-arm at the clamp).
   const nextSnoozeWakeAt = threadListV2Layout.nextSnoozeWakeAt;
   useEffect(() => {
     if (nextSnoozeWakeAt === null) return;
@@ -579,12 +396,6 @@ function ThreadNavigationSidebarPane(
     // range) the boundary string is identical and the chain would die.
   }, [nextSnoozeWakeAt, snoozeWakeTick]);
   const listItems = useMemo<readonly SidebarListItem[]>(() => {
-    if (!threadListV2Enabled) return listLayout.items;
-    // Queued offline tasks are not thread shells, so the v2 item builder
-    // never sees them; the shared splice puts them below the active block
-    // (mirrors the compact Home v2 list) where they stay visible and
-    // deletable while their environment is offline. Same environment scope
-    // and search filter as the list.
     const v2SearchQuery = props.searchQuery.trim().toLocaleLowerCase();
     const v2PendingTasks = pendingTasks.filter(
       (pendingTask) =>
@@ -600,6 +411,9 @@ function ThreadNavigationSidebarPane(
     const items: SidebarListItem[] = buildThreadListV2ListItems({
       items: threadListV2Layout.items,
       pendingTasks: v2PendingTasks,
+      workingCount: threadListV2Layout.workingCount,
+      workingShelfExpanded,
+      workingShelfHeaderIndex: threadListV2Layout.workingShelfHeaderIndex,
       snoozedCount: threadListV2Layout.snoozedCount,
       snoozedShelfExpanded,
       snoozedShelfHeaderIndex: threadListV2Layout.snoozedShelfHeaderIndex,
@@ -607,6 +421,10 @@ function ThreadNavigationSidebarPane(
       settledShelfExpanded,
       settledShelfHeaderIndex: threadListV2Layout.settledShelfHeaderIndex,
       snoozeLabelNow: `${nowMinute}:00.000Z`,
+      snoozeEnvironmentIds,
+      queuedThreadKeys,
+      moveAvailability: threadMoveAvailability,
+      shelfPreferencesLoading: !shelfPreferencesLoaded,
     });
     if (settledShelfExpanded && threadListV2Layout.hiddenSettledCount > 0) {
       items.push({
@@ -617,16 +435,19 @@ function ThreadNavigationSidebarPane(
     }
     return items;
   }, [
-    listLayout.items,
     nowMinute,
     options.selectedEnvironmentId,
     pendingTasks,
     props.searchQuery,
+    queuedThreadKeys,
+    threadMoveAvailability,
     selectedProjectRefs,
     settledShelfExpanded,
+    shelfPreferencesLoaded,
     snoozedShelfExpanded,
-    threadListV2Enabled,
+    snoozeEnvironmentIds,
     threadListV2Layout,
+    workingShelfExpanded,
   ]);
   const listMenuActions = useMemo<MenuAction[]>(
     () => [
@@ -671,33 +492,8 @@ function ThreadNavigationSidebarPane(
               ],
             },
           ] satisfies MenuAction[])),
-      // v2 lays the list out in fixed creation order — offering sort/group
-      // controls it silently ignores would be a lie. Environment still
-      // scopes the v2 partition, so it stays.
-      ...(threadListV2Enabled
-        ? []
-        : ([
-            {
-              id: "project-sort",
-              title: "Sort projects",
-              subactions: PROJECT_SORT_OPTIONS.map((option) => ({
-                id: `project-sort:${option.value}`,
-                title: option.label,
-                state: options.projectSortOrder === option.value ? "on" : "off",
-              })),
-            },
-            {
-              id: "thread-sort",
-              title: "Sort threads",
-              subactions: THREAD_SORT_OPTIONS.map((option) => ({
-                id: `thread-sort:${option.value}`,
-                title: option.label,
-                state: options.threadSortOrder === option.value ? "on" : "off",
-              })),
-            },
-          ] satisfies MenuAction[])),
     ],
-    [environments, options, projectFilterOptions, selectedProjectKey, threadListV2Enabled],
+    [environments, options, projectFilterOptions, selectedProjectKey],
   );
   const handleListMenuAction = useCallback(
     ({ nativeEvent }: { readonly nativeEvent: { readonly event: string } }) => {
@@ -724,39 +520,19 @@ function ThreadNavigationSidebarPane(
         }
         return;
       }
-      const projectSort = PROJECT_SORT_OPTIONS.find(
-        (option) => `project-sort:${option.value}` === event,
-      );
-      if (projectSort) {
-        setProjectSortOrder(projectSort.value);
-        return;
-      }
-      const threadSort = THREAD_SORT_OPTIONS.find(
-        (option) => `thread-sort:${option.value}` === event,
-      );
-      if (threadSort) {
-        setThreadSortOrder(threadSort.value);
-        return;
-      }
     },
-    [
-      environments,
-      projectFilterOptions,
-      setProjectSortOrder,
-      setSelectedEnvironmentId,
-      setThreadSortOrder,
-    ],
+    [environments, projectFilterOptions, setSelectedEnvironmentId, setSelectedProjectKey],
   );
 
   const [measuredHeaderHeight, setMeasuredHeaderHeight] = useState<number | null>(null);
-  const materialToolbarHeight = useMaterialToolbarHeight();
+  const { height, paddingTop, paddingBottom } = useToolbarLayout();
   // The sticky header (title row, search field, optional connection status)
   // is measured so the list inset always matches its real height — no
   // hardcoded per-variant constants.
   const stickyHeaderHeight =
     measuredHeaderHeight ??
     (Platform.OS === "android"
-      ? Math.max(insets.top, 12) + materialToolbarHeight + 8
+      ? paddingTop + height + paddingBottom
       : insets.top + SIDEBAR_STICKY_HEADER_HEIGHT);
   const topListInset = stickyHeaderHeight + 6;
   const handleStickyHeaderLayout = useCallback((event: LayoutChangeEvent) => {
@@ -784,77 +560,46 @@ function ThreadNavigationSidebarPane(
   const handleScrollBeginDrag = useCallback(() => {
     openSwipeableRef.current?.close();
   }, []);
-  const onMaterialFabScroll = useMaterialFabScroll();
+  const onFabScroll = useFabScroll();
   const { swipeEnabled, scrollGateHandlers } = useSwipeableScrollGate({
-    onScroll: onMaterialFabScroll,
+    onScroll: onFabScroll,
     onScrollBeginDrag: handleScrollBeginDrag,
   });
-  // Project shells load after the first rows draw, so the maps they feed have
-  // to bust the recycler's memoization — otherwise a row keeps the blank
-  // favicon and fallback title it was first rendered with.
+  // The sticky header's project shells and search maps feed row props, so
+  // they have to bust the recycler's memoization — otherwise a row keeps the
+  // blank favicon and fallback title it was first rendered with. The minute
+  // clock deliberately stays out: its per-row text lives on the items, so a
+  // tick only re-renders rows whose displayed text actually moved.
   const listExtraData = useMemo(
     () => ({
       selectedThreadKey: props.selectedThreadKey ?? "",
       projectByKey,
       projectTitleByProjectKey,
       savedConnectionsById,
-      serverConfigs,
-      snoozePresetMinute: nowMinute,
+      listEnvironments,
       threadSearchMatchByKey,
+      workingShelfEnabled,
     }),
     [
       props.selectedThreadKey,
       projectByKey,
       projectTitleByProjectKey,
       savedConnectionsById,
-      serverConfigs,
-      nowMinute,
+      listEnvironments,
       threadSearchMatchByKey,
+      workingShelfEnabled,
     ],
   );
   useThreadJumpShortcuts(listItems, handleSelectThread);
   const sidebarItemsAreEqual = useCallback(
     (previous: SidebarListItem, item: SidebarListItem): boolean => {
-      if (previous.type === "v2-thread" && item.type === "v2-thread") {
-        return (
-          previous.key === item.key &&
-          previous.item.thread === item.item.thread &&
-          previous.item.variant === item.item.variant &&
-          previous.item.snoozed === item.item.snoozed &&
-          previous.item.pinned === item.item.pinned &&
-          previous.snoozeWakeLabelText === item.snoozeWakeLabelText
-        );
+      if (isThreadListV2ListItem(previous) && isThreadListV2ListItem(item)) {
+        return threadListV2ListItemsAreEqual(previous, item);
       }
       if (previous.type === "v2-show-more" && item.type === "v2-show-more") {
         return previous.hiddenCount === item.hiddenCount;
       }
-      if (previous.type === "v2-pending" && item.type === "v2-pending") {
-        return (
-          previous.pendingTask === item.pendingTask &&
-          previous.showPendingDivider === item.showPendingDivider
-        );
-      }
-      if (previous.type === "v2-snoozed-shelf" && item.type === "v2-snoozed-shelf") {
-        return previous.count === item.count && previous.expanded === item.expanded;
-      }
-      if (previous.type === "v2-settled-shelf" && item.type === "v2-settled-shelf") {
-        return previous.count === item.count && previous.expanded === item.expanded;
-      }
-      if (
-        previous.type === "v2-thread" ||
-        previous.type === "v2-show-more" ||
-        previous.type === "v2-pending" ||
-        previous.type === "v2-snoozed-shelf" ||
-        previous.type === "v2-settled-shelf" ||
-        item.type === "v2-thread" ||
-        item.type === "v2-show-more" ||
-        item.type === "v2-pending" ||
-        item.type === "v2-snoozed-shelf" ||
-        item.type === "v2-settled-shelf"
-      ) {
-        return false;
-      }
-      return homeListItemsAreEqual(previous, item);
+      return false;
     },
     [],
   );
@@ -904,24 +649,22 @@ function ThreadNavigationSidebarPane(
         }
         case "v2-thread": {
           const thread = item.item.thread;
-          const movePlanner = item.item.pinned
-            ? threadMovePlanners.pinned
-            : threadMovePlanners.active;
-          const movedId = `${thread.environmentId}:${thread.id}`;
           const scopeKey = scopedProjectKey(thread.environmentId, thread.projectId);
           return (
             <ThreadListV2Row
               onNewThreadOnBranch={props.onNewThreadOnBranch}
               thread={thread}
               variant={item.item.variant}
-              hasQueuedMessages={queuedThreadKeys.has(`${thread.environmentId}:${thread.id}`)}
+              hasQueuedMessages={item.hasQueuedMessages}
               snoozed={item.item.snoozed}
               pinned={item.item.pinned}
-              snoozePresetMinute={nowMinute}
+              snoozePresetMinute={item.snoozePresetMinute ?? ""}
               snoozeWakeLabelText={item.snoozeWakeLabelText}
+              timeLabel={item.timeLabel}
               project={projectByKey.get(scopeKey) ?? null}
               projectTitle={projectTitleByProjectKey.get(scopeKey)}
-              providerInstance={resolveThreadProviderInstance(serverConfigs, thread)}
+              providerInstance={resolveProviderInstance(thread)}
+              providers={providersByEnvironmentId.get(thread.environmentId)}
               environmentLabel={
                 Object.keys(savedConnectionsById).length > 1
                   ? (savedConnectionsById[thread.environmentId]?.environmentLabel ?? null)
@@ -935,7 +678,7 @@ function ThreadNavigationSidebarPane(
                 }),
               )}
               searchQuery={props.searchQuery}
-              pane={Platform.OS === "android" ? "screen" : "sidebar"}
+              pane="sidebar"
               selected={
                 scopedThreadKey(thread.environmentId, thread.id) === props.selectedThreadKey
               }
@@ -950,18 +693,20 @@ function ThreadNavigationSidebarPane(
               onSettleThread={settleThread}
               snoozeSupported={snoozeEnvironmentIds.has(thread.environmentId)}
               pinningSupported={pinningEnvironmentIds.has(thread.environmentId)}
+              autoSettleOptOutSupported={autoSettleOptOutEnvironmentIds.has(thread.environmentId)}
               reorderSupported={
                 item.item.pinned
                   ? pinReorderEnvironmentIds.has(thread.environmentId)
-                  : activeReorderEnvironmentIds.has(thread.environmentId)
+                  : !workingShelfEnabled && activeReorderEnvironmentIds.has(thread.environmentId)
               }
-              canMoveUp={pendingOrder === null && movePlanner(movedId, "up") !== null}
-              canMoveDown={pendingOrder === null && movePlanner(movedId, "down") !== null}
+              canMoveUp={item.canMoveUp}
+              canMoveDown={item.canMoveDown}
               onSnoozeThread={snoozeThread}
               onUnsnoozeThread={unsnoozeThread}
               onUnsettleThread={unsettleThread}
               onPinThread={pinThread}
               onUnpinThread={unpinThread}
+              onSetThreadAutoSettle={setThreadAutoSettle}
               onMoveThread={moveThread}
               onSwipeableClose={handleSwipeableClose}
               onSwipeableWillOpen={handleSwipeableWillOpen}
@@ -969,106 +714,42 @@ function ThreadNavigationSidebarPane(
             />
           );
         }
+        case "v2-working-shelf":
+          return (
+            <ThreadListV2WorkingShelfHeader
+              count={item.count}
+              disabled={item.disabled}
+              expanded={item.expanded}
+              onToggle={toggleWorkingShelf}
+              pane="sidebar"
+            />
+          );
         case "v2-snoozed-shelf":
           return (
             <ThreadListV2SnoozedShelfHeader
               count={item.count}
-              disabled={!shelfPreferencesLoaded}
+              disabled={item.disabled}
               expanded={item.expanded}
               onToggle={toggleSnoozedShelf}
-              pane={Platform.OS === "android" ? "screen" : "sidebar"}
+              pane="sidebar"
             />
           );
         case "v2-settled-shelf":
           return (
             <ThreadListV2SettledShelfHeader
               count={item.count}
-              disabled={!shelfPreferencesLoaded}
+              disabled={item.disabled}
               expanded={item.expanded}
               onToggle={toggleSettledShelf}
-              pane={Platform.OS === "android" ? "screen" : "sidebar"}
+              pane="sidebar"
             />
           );
         case "v2-show-more":
           return (
-            <ThreadListV2ShowMoreRow hiddenCount={item.hiddenCount} onPress={showMoreSettled} />
-          );
-        case "header":
-          return (
-            <ThreadListGroupHeader
-              variant={Platform.OS === "android" ? "compact" : "sidebar"}
-              collapsed={item.collapsed}
-              isFirst={item.isFirst}
-              groupKey={item.group.key}
-              onGroupAction={updateGroupDisplay}
-              // Same gating as the compact Home list: aggregated groups have no
-              // single target project, and pending-project groups hold a
-              // placeholder shell rather than a real project.
-              newThreadTarget={item.group.newThreadTarget}
-              onNewThread={props.onNewThreadInProject}
-              project={item.group.representative}
-              threadCount={item.group.threads.length + item.group.pendingTasks.length}
-              title={item.group.title}
-            />
-          );
-        case "pending-task":
-          return (
-            <PendingTaskListRow
-              variant={Platform.OS === "android" ? "compact" : "sidebar"}
-              pendingTask={item.pendingTask}
-              environmentLabel={
-                savedConnectionsById[item.pendingTask.environmentId]?.environmentLabel ?? null
-              }
-              environmentMachine={machineByEnvironmentId.get(item.pendingTask.environmentId)}
-              isLast={item.isLast}
-              onSelectPendingTask={openPendingTask}
-              onDeletePendingTask={confirmDeletePendingTask}
-            />
-          );
-        case "thread": {
-          const thread = item.thread;
-          return (
-            <ThreadListRow
-              onNewThreadOnBranch={props.onNewThreadOnBranch}
-              variant="sidebar"
-              thread={thread}
-              hasQueuedMessages={queuedThreadKeys.has(`${thread.environmentId}:${thread.id}`)}
-              environmentLabel={
-                savedConnectionsById[thread.environmentId]?.environmentLabel ?? null
-              }
-              environmentMachine={machineByEnvironmentId.get(thread.environmentId)}
-              isLast={item.isLast}
-              searchMatch={threadSearchMatchByKey.get(
-                threadSearchMatchKey({
-                  environmentId: thread.environmentId,
-                  threadId: thread.id,
-                }),
-              )}
-              searchQuery={props.searchQuery}
-              selected={
-                scopedThreadKey(thread.environmentId, thread.id) === props.selectedThreadKey
-              }
-              fullSwipeWidth={props.width - 20}
-              onArchiveThread={archiveThread}
-              onDeleteThread={confirmDeleteThread}
-              onRenameThread={renameThread}
-              onRegenerateThreadTitle={regenerateThreadTitle}
-              titleRegenerationSupported={titleRegenerationEnvironmentIds.has(thread.environmentId)}
-              onSelectThread={handleSelectThread}
-              onSwipeableClose={handleSwipeableClose}
-              onSwipeableWillOpen={handleSwipeableWillOpen}
-              simultaneousSwipeGesture={sidebarScrollGesture}
-            />
-          );
-        }
-        case "show-more":
-          return (
-            <ThreadListShowMoreRow
-              variant={Platform.OS === "android" ? "compact" : "sidebar"}
+            <ThreadListV2ShowMoreRow
+              pane="sidebar"
               hiddenCount={item.hiddenCount}
-              canShowLess={item.canShowLess}
-              groupKey={item.groupKey}
-              onGroupAction={updateGroupDisplay}
+              onPress={showMoreSettled}
             />
           );
       }
@@ -1076,9 +757,6 @@ function ThreadNavigationSidebarPane(
     [
       archiveThread,
       activeReorderEnvironmentIds,
-      threadMovePlanners,
-      pendingOrder,
-      queuedThreadKeys,
       confirmDeletePendingTask,
       confirmDeleteThread,
       handleSelectThread,
@@ -1090,18 +768,20 @@ function ThreadNavigationSidebarPane(
       pinReorderEnvironmentIds,
       pinThread,
       pinningEnvironmentIds,
+      autoSettleOptOutEnvironmentIds,
+      autoSettleOptOutEnvironmentIds,
+      setThreadAutoSettle,
       projectByKey,
       projectTitleByProjectKey,
       regenerateThreadTitle,
       renameThread,
-      props.onNewThreadInProject,
       props.onNewThreadOnBranch,
       props.searchQuery,
       props.selectedThreadKey,
       props.width,
       savedConnectionsById,
-      serverConfigs,
-      shelfPreferencesLoaded,
+      resolveProviderInstance,
+      providersByEnvironmentId,
       threadSearchMatchByKey,
       titleRegenerationEnvironmentIds,
       settleThread,
@@ -1110,20 +790,16 @@ function ThreadNavigationSidebarPane(
       sidebarScrollGesture,
       snoozeEnvironmentIds,
       snoozeThread,
-      nowMinute,
       toggleSettledShelf,
       toggleSnoozedShelf,
+      toggleWorkingShelf,
       unpinThread,
       unsettleThread,
       unsnoozeThread,
-      updateGroupDisplay,
+      workingShelfEnabled,
     ],
   );
-  // v2 ignores the sort/group options, so only the environment filter can
-  // light the "customized" state while the beta is on.
-  const filterCustomized = threadListV2Enabled
-    ? options.selectedEnvironmentId !== null || selectedProjectKey !== null
-    : hasCustomHomeListOptions({ ...options, selectedProjectKey });
+  const filterCustomized = options.selectedEnvironmentId !== null || selectedProjectKey !== null;
   const filterIcon = filterCustomized
     ? "line.3.horizontal.decrease.circle.fill"
     : "line.3.horizontal.decrease.circle";
@@ -1134,23 +810,16 @@ function ThreadNavigationSidebarPane(
         projects: projectFilterOptions,
         selectedEnvironmentId: options.selectedEnvironmentId,
         selectedProjectKey,
-        projectSortOrder: options.projectSortOrder,
-        threadSortOrder: options.threadSortOrder,
         onEnvironmentChange: setSelectedEnvironmentId,
         onProjectChange: setSelectedProjectKey,
-        onProjectSortOrderChange: setProjectSortOrder,
-        onThreadSortOrderChange: setThreadSortOrder,
-        listOrganization: !threadListV2Enabled,
       }),
     [
       environments,
       options,
       projectFilterOptions,
       selectedProjectKey,
-      setProjectSortOrder,
       setSelectedEnvironmentId,
-      setThreadSortOrder,
-      threadListV2Enabled,
+      setSelectedProjectKey,
     ],
   );
   const nativeHeaderItems = useMemo(
@@ -1162,14 +831,12 @@ function ThreadNavigationSidebarPane(
       }),
     [filterIcon, filterMenu, props.onOpenSettings],
   );
-  // Snoozed threads need no special case: the shelf header is a list row
-  // even while collapsed.
   const listEmpty = (
     <Text
       className={
         Platform.OS === "android"
-          ? "px-4 py-4 text-center text-sm text-foreground-muted"
-          : "px-2 py-4 text-sm text-foreground-muted"
+          ? "px-4 py-4 text-center text-sm text-drawer-foreground-muted"
+          : "px-2 py-4 text-sm text-drawer-foreground-muted"
       }
     >
       {catalogState.isLoadingConnections
@@ -1192,9 +859,6 @@ function ThreadNavigationSidebarPane(
         <NativeStackScreenOptions
           optionsVersion={[nativeHeaderItems, props.width]}
           options={{
-            // Re-applies the shell's static brand slot with the
-            // connection-status swap so reconnects surface in the header
-            // instead of shifting the list.
             ...getConnectionAwareBrandHeaderOptions({
               headerWidth: props.width,
               trailingItemCount: nativeHeaderItems.length,
@@ -1205,8 +869,6 @@ function ThreadNavigationSidebarPane(
               ref: searchBarRef,
               autoCapitalize: "none",
               hideNavigationBar: false,
-              // Keep the search bar pinned under the title — UIKit's default
-              // hidesSearchBarWhenScrolling collapses it on scroll.
               hideWhenScrolling: false,
               obscureBackground: false,
               placeholder: "Search",
@@ -1267,7 +929,8 @@ function ThreadNavigationSidebarPane(
       className={
         Platform.OS === "android" ? "flex-1 bg-header" : "flex-1 border-r border-border bg-drawer"
       }
-      style={{ width: props.width }}
+      // Android fills its pane, which animates its width while a hinge resizes the split.
+      style={Platform.OS === "android" ? undefined : { width: props.width }}
     >
       <View
         className="flex-1"
@@ -1277,7 +940,7 @@ function ThreadNavigationSidebarPane(
                 marginTop: stickyHeaderHeight,
                 marginHorizontal: 4,
                 paddingBottom: insets.bottom,
-                backgroundColor: screenColor,
+                backgroundColor: drawerColor,
                 borderTopLeftRadius: 28,
                 borderTopRightRadius: 28,
                 overflow: "hidden",
@@ -1305,7 +968,7 @@ function ThreadNavigationSidebarPane(
                   {
                     paddingBottom:
                       Platform.OS === "android"
-                        ? Math.max(insets.bottom, 16) + 148 - insets.bottom
+                        ? Math.max(insets.bottom, 16) + fabClearance - insets.bottom
                         : 16 + insets.bottom,
                     paddingTop: Platform.OS === "android" ? 6 : topListInset,
                   },
@@ -1325,7 +988,7 @@ function ThreadNavigationSidebarPane(
       </View>
 
       {Platform.OS === "android" ? (
-        <MaterialThreadListToolbar
+        <ThreadListToolbar
           sidebar
           onLayout={handleStickyHeaderLayout}
           searchQuery={props.searchQuery}
@@ -1346,9 +1009,6 @@ function ThreadNavigationSidebarPane(
           style={{ paddingTop: insets.top }}
         >
           <View className="h-[50px] flex-row items-end gap-0.5 pr-2 pl-5">
-            {/* Title slot doubles as the connection status surface: while an
-              environment reconnects, the brand fades to a status label in
-              place (no layout shift in the list below). */}
             <WorkspaceConnectionTitle
               grow
               onPress={props.onOpenEnvironmentSettings}
@@ -1360,12 +1020,9 @@ function ThreadNavigationSidebarPane(
               }
             />
             <View className="flex-row items-center gap-2.5">
-              <ControlPillMenu actions={listMenuActions} onPressAction={handleListMenuAction}>
-                <SidebarFilterButton
-                  accessibilityLabel="Filter and sort threads"
-                  icon={filterIcon}
-                />
-              </ControlPillMenu>
+              <Menu actions={listMenuActions} onPressAction={handleListMenuAction}>
+                <SidebarFilterButton accessibilityLabel="Filter threads" icon={filterIcon} />
+              </Menu>
               <SidebarHeaderActions onOpenSettings={props.onOpenSettings} />
             </View>
           </View>
@@ -1374,7 +1031,7 @@ function ThreadNavigationSidebarPane(
             <SymbolView
               name="magnifyingglass"
               size={15}
-              tintColorClassName="accent-foreground-muted"
+              tintColorClassName="accent-drawer-foreground-muted"
               type="monochrome"
             />
             <TextInput
@@ -1390,7 +1047,7 @@ function ThreadNavigationSidebarPane(
               cursorColorClassName={undefined}
               selectionHandleColorClassName={undefined}
               returnKeyType="search"
-              className="h-[34px] flex-1 px-0 py-0 font-sans text-base text-foreground"
+              className="h-[34px] flex-1 px-0 py-0 font-sans text-base text-drawer-foreground"
               value={props.searchQuery}
             />
           </View>

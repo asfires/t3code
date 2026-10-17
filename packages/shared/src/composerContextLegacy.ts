@@ -1,6 +1,4 @@
 import {
-  COMPOSER_CONTEXT_MAX_RECORDS,
-  COMPOSER_CONTEXT_PASTED_TEXT_MAX_CHARS,
   type ComposerContextId,
   ComposerContextRecord,
   type ElementContextRecord,
@@ -13,10 +11,6 @@ import * as Schema from "effect/Schema";
 import { formatComposerContextReference } from "./composerContextReferences.ts";
 
 /**
- * Upgrades a message written before inline context references: trailing
- * `<terminal_context>`, `<element_context>` and `<preview_annotation>` blocks, inline or
- * trailing `<review_comment>` blocks, and U+FFFC terminal placeholders. Produces canonical
- * reference links plus records so old messages render and copy through the new path.
  * Event history is never rewritten; this runs in memory on read.
  */
 
@@ -26,8 +20,10 @@ export interface UpgradedLegacyContext {
 }
 
 const PLACEHOLDER = "￼";
-const TRAILING_TERMINAL = /\n*<terminal_context>\n([\s\S]*?)\n<\/terminal_context>\s*$/;
-const TRAILING_ELEMENT = /\n*<element_context>\n([\s\S]*?)\n<\/element_context>\s*$/;
+const TRAILING_TERMINAL =
+  /\n*<terminal_context>\n((?:(?!\n<\/terminal_context>)[\s\S])*)\n<\/terminal_context>\s*$/;
+const TRAILING_ELEMENT =
+  /\n*<element_context>\n((?:(?!\n<\/element_context>)[\s\S])*)\n<\/element_context>\s*$/;
 const TRAILING_PREVIEW =
   /\n*<preview_annotation>\n((?:(?!\n<\/preview_annotation>)[\s\S])*)\n<\/preview_annotation>\s*$/;
 const REVIEW_OR_CONTEXT_BLOCK =
@@ -70,7 +66,6 @@ function parseEntries(block: string): ParsedEntry[] | null {
   return entries;
 }
 
-/** The inline label the old send path wrote for a terminal excerpt: `@terminal-1:509-514`. */
 function inlineTerminalLabel(record: TerminalContextRecord): string {
   const slug = record.terminalLabel.trim().toLowerCase().replace(/\s+/g, "-");
   const range =
@@ -315,65 +310,7 @@ function replaceReviewBlocks(
   return parts.join("");
 }
 
-/** Reads the fork's old length-prefixed pastes before parsing any context inside them. */
 export function upgradeLegacyContextMessage(text: string): UpgradedLegacyContext {
-  const startMarker = "\uE000t3-pasted-text:";
-  if (!text.includes(startMarker)) return upgradeLegacyContextBlocks(text);
-
-  let token = "\uE002";
-  while (text.includes(token)) token += "\uE002";
-  const pastes: string[] = [];
-  const parts: string[] = [];
-  let cursor = 0;
-  let searchFrom = 0;
-  for (;;) {
-    const start = text.indexOf(startMarker, searchFrom);
-    if (start === -1) break;
-    const lengthStart = start + startMarker.length;
-    const lengthEnd = text.indexOf(":", lengthStart);
-    const rawLength = lengthEnd < 0 ? "" : text.slice(lengthStart, lengthEnd);
-    const length = Number(rawLength);
-    const contentStart = lengthEnd + 1;
-    const contentEnd = contentStart + length;
-    searchFrom = lengthStart;
-    if (!/^\d+$/.test(rawLength) || !Number.isSafeInteger(length) || text[contentEnd] !== "\uE001")
-      continue;
-
-    parts.push(text.slice(cursor, start), `${token}${pastes.length}${token}`);
-    pastes.push(text.slice(contentStart, contentEnd));
-    cursor = contentEnd + 1;
-    searchFrom = cursor;
-  }
-  if (pastes.length === 0) return upgradeLegacyContextBlocks(text);
-  parts.push(text.slice(cursor));
-  const upgraded = upgradeLegacyContextBlocks(parts.join(""));
-  const records = [...upgraded.records];
-  const restored = upgraded.text.replace(
-    new RegExp(`${token}(\\d+)${token}`, "g"),
-    (_, index: string) => {
-      const payload = pastes[Number(index)]!;
-      // Old drafts had no record cap. Keep oversized content whole as plain text.
-      if (
-        !payload.length ||
-        payload.length > COMPOSER_CONTEXT_PASTED_TEXT_MAX_CHARS ||
-        records.length >= COMPOSER_CONTEXT_MAX_RECORDS
-      )
-        return payload;
-      const record = {
-        version: 1 as const,
-        kind: "pasted-text" as const,
-        contextId: legacyId("pasted-text", Number(index) + 1),
-        label: "Pasted text",
-        text: payload,
-      };
-      records.push(record);
-      return formatComposerContextReference(record);
-    },
-  );
-  return { text: restored, records };
-}
-
-function upgradeLegacyContextBlocks(text: string): UpgradedLegacyContext {
   if (!LEGACY_MARKERS.test(text)) return { text, records: [] };
 
   const terminalEntries: ParsedEntry[] = [];
@@ -387,11 +324,8 @@ function upgradeLegacyContextBlocks(text: string): UpgradedLegacyContext {
   const reviewTokenPattern = new RegExp(`${reviewToken}(\\d+)${reviewToken}`, "g");
   const trailingReviewTokenPattern = new RegExp(`(?:\\s*${reviewToken}\\d+${reviewToken})+\\s*$`);
 
-  // Review blocks become tokens in place first so they neither hide the trailing blocks
-  // behind them nor lose their position. Unparseable blocks stay as text.
   let rest = replaceReviewBlocks(text, (whole, attributes, rawBody) => {
     const record = reviewRecord(attributes, rawBody, reviews.length + 1);
-    // Keep the original prose if converting it would produce a record the wire drops.
     if (!record || !isReviewCommentContextRecord(record)) return whole;
     reviews.push(record);
     return `${reviewToken}${reviews.length - 1}${reviewToken}`;
@@ -462,15 +396,13 @@ function upgradeLegacyContextBlocks(text: string): UpgradedLegacyContext {
     formatComposerContextReference(reviews[Number(index)]!),
   );
 
-  // Placeholders bind to terminal entries in order, like the old materialize step did.
   let placeholderIndex = 0;
   body = body.replace(new RegExp(PLACEHOLDER, "g"), () => {
     const record = terminals[placeholderIndex];
     placeholderIndex += 1;
     return record ? formatComposerContextReference(record) : "";
   });
-  // Sent messages carry the materialized `@terminal-1:509-514` label instead of the
-  // placeholder; each such label becomes the chip in place.
+
   const placedTerminals = new Set(terminals.slice(0, placeholderIndex));
   for (const record of terminals) {
     if (placedTerminals.has(record)) continue;

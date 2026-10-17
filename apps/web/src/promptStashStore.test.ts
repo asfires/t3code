@@ -6,9 +6,6 @@ import {
 } from "@t3tools/shared/assistantCitations";
 
 import { removeLocalStorageItem } from "./hooks/useLocalStorage";
-import { pastedTextContextRecord, pastedTextContextReference } from "./lib/composerContextRecords";
-import { formatInlineContextReference } from "./lib/composerContextReferences";
-import { restoreComposerPrompt } from "./components/chat/composerPromptRecovery";
 
 import {
   MAX_STASH_ENTRIES,
@@ -102,34 +99,6 @@ describe("promptStashStore", () => {
     resetPromptStashStore();
   });
 
-  it.each([10_000, 130_000])(
-    "restores a %i-character pasted chip after stash persistence",
-    (size) => {
-      const pasted = {
-        id: "paste",
-        text: "x".repeat(size) + "\n  tail\n",
-        createdAt: "2026-09-17T12:00:00.000Z",
-      };
-      const prompt = `Review ${formatInlineContextReference(pastedTextContextReference(pasted))}`;
-      const entry = {
-        ...makeEntry({ id: "paste-stash", prompt }),
-        records: [pastedTextContextRecord(pasted)],
-      };
-      usePromptStashStore.getState().stashEntry(entry);
-      const entries = usePromptStashStore.getState().entries;
-      usePromptStashStore.setState({ entries: [] });
-      writePromptStashStorageForTest(JSON.stringify({ version: 2, state: { entries } }));
-      const saved = usePromptStashStore.getState().takeEntry("paste-stash").entry;
-      const restored = restoreComposerPrompt({
-        text: saved!.prompt,
-        context: { version: 1, records: saved!.records ?? [] },
-      });
-      expect(restored.prompt).toBe(prompt);
-      expect(restored.pastedTexts[0]?.text).toBe(pasted.text);
-      expect(usePromptStashStore.getState().takeEntry("paste-stash").entry).toBeNull();
-    },
-  );
-
   it("prepends entries so the newest stash is first", () => {
     const store = usePromptStashStore.getState();
     store.stashEntry(makeEntry({ id: "first" }));
@@ -178,9 +147,6 @@ describe("promptStashStore", () => {
     expect(entries[0]?.id).toBe("overflow");
   });
 
-  // This test environment has no `localStorage`, so the store runs on its
-  // in-memory fallback — the exact "kept for this session, gone on reload"
-  // case the composer must distinguish from an outright write failure.
   it("distinguishes a memory-only write (written, not durable) from a failed one", () => {
     const store = usePromptStashStore.getState();
     const result = store.stashEntry(makeEntry({ id: "memory-only" }));
@@ -285,7 +251,6 @@ describe("promptStashStore", () => {
   it("finalizeEntryImages reports false when the entry was already taken", () => {
     const store = usePromptStashStore.getState();
     store.stashEntry({ ...makeEntry({ id: "racing" }), pendingImageCount: 1 });
-    // Restored (or deleted) while its images were still encoding.
     store.takeEntry("racing");
 
     const { attached } = store.finalizeEntryImages("racing", {
@@ -307,16 +272,12 @@ describe("promptStashStore", () => {
       }),
     );
 
-    // Hydration must settle the stale count, or the entry would stay stuck
-    // showing "saving…" with images that no longer exist anywhere.
     const entry = usePromptStashStore.getState().entries[0];
     expect(entry?.pendingImageCount).toBe(0);
     expect(entry?.unreadableImageNames).toHaveLength(2);
   });
 
   it("ignores an unreadable v1 payload seeded under the current key", () => {
-    // The v1 shape (per-provider queues) does not decode as v2; hydration
-    // must fall back to an empty stash rather than throw.
     writePromptStashStorageForTest(
       JSON.stringify({
         version: 1,

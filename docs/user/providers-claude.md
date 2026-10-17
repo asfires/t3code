@@ -4,22 +4,6 @@ T3 Code uses Claude Code's login and configuration. Start with the default provi
 for one account; [provider setup](./install.md#providers) covers installation and
 shared provider settings.
 
-After Claude finishes a turn, it may suggest a likely follow-up in the empty message composer.
-Press Tab to copy that suggestion into the composer; T3 Code does not send it until you submit it.
-Prompt suggestions are on by default and can be changed for each Claude provider in Settings.
-
-## Codex Agents Launched By Claude
-
-When Claude starts `codex exec` as a background Bash command, T3 Code presents that task in the
-Agents view and groups launches into the same agent summary shown for Claude's own subagents.
-Ordinary background commands still appear as Monitoring.
-
-Recognition is based on the command Claude actually launches, not on a particular skill or phrase.
-A skill can teach Claude when and how to delegate to Codex, but T3 Code does not require one. When
-the command includes an explicit Codex model or reasoning effort, the Agents view displays it.
-Claude's task lifecycle supplies status and progress; Codex token and tool counts are not shown
-unless that lifecycle reports them.
-
 ## Separate accounts or configurations
 
 Use a separate Claude config directory for each account. This also works for named
@@ -65,9 +49,13 @@ Set **Auto-compact after** in the Claude provider settings to an integer between
 window. Leave it empty for Claude Code's default.
 
 You can also send `/compact` in an existing conversation. Web and desktop offer
-**Compact context** from the context meter and may suggest it when you return to
-a large older thread. See [commands and skills](./composer.md#commands-and-skills)
-for using composer commands.
+**Compact context** from the context meter. When you return to a large thread
+after Claude's prompt cache expires, a **Compact** chip with the thread's token count shows
+next to the send button. While it is on, Enter summarizes the history first, then
+sends your message. Click the chip to switch it to **Full** and keep the full
+history for that message. The cache lasts about an hour on a Claude
+subscription and 5 minutes with an API key, Bedrock, or Vertex. See [commands and skills](./composer.md#commands-and-skills) for using
+composer commands.
 
 ## Usage limits
 
