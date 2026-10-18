@@ -1,3 +1,4 @@
+import type { PastedTextDraft } from "../lib/pastedTextContext";
 import * as Option from "effect/Option";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import {
@@ -1253,6 +1254,7 @@ export function shouldRefocusComposerOnWindowFocus(
 export interface PlanFollowUpComposerSnapshot {
   readonly prompt: string;
   readonly terminalContexts: ReadonlyArray<TerminalContextDraft>;
+  readonly pastedTexts: ReadonlyArray<PastedTextDraft>;
   readonly reviewComments: ReadonlyArray<ReviewCommentContext>;
   readonly previewAnnotations: ReadonlyArray<PreviewAnnotationPayload>;
   readonly threadContexts: ReadonlyArray<ThreadContextRecord>;
@@ -1266,6 +1268,7 @@ export interface PlanFollowUpComposerSnapshot {
 export function restorePlanFollowUpComposer(input: {
   readonly snapshot: PlanFollowUpComposerSnapshot;
   readonly writePrompt: (prompt: string) => void;
+  readonly writePastedTexts: (pastes: ReadonlyArray<PastedTextDraft>) => void;
   readonly writeTerminalContexts: (contexts: ReadonlyArray<TerminalContextDraft>) => void;
   readonly writeReviewComments: (comments: ReadonlyArray<ReviewCommentContext>) => void;
   readonly writePreviewAnnotations: (annotations: ReadonlyArray<PreviewAnnotationPayload>) => void;
@@ -1278,6 +1281,7 @@ export function restorePlanFollowUpComposer(input: {
 }): void {
   input.writePrompt(input.snapshot.prompt);
   input.writeTerminalContexts(input.snapshot.terminalContexts);
+  input.writePastedTexts(input.snapshot.pastedTexts);
   input.writeReviewComments(input.snapshot.reviewComments);
   input.writePreviewAnnotations(input.snapshot.previewAnnotations);
   input.writeThreadContexts(input.snapshot.threadContexts);

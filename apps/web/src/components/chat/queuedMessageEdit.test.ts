@@ -1,3 +1,6 @@
+import { ComposerContextId } from "@t3tools/contracts";
+import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
+import { buildMessageContext } from "../../lib/composerContextRecords";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
@@ -7,7 +10,11 @@ import {
   type ComposerFileAttachment,
   type ComposerImageAttachment,
 } from "../../composerDraftStore";
-import { prepareQueuedEditAttachments, recoverQueuedMessageEdit } from "./queuedMessageEdit";
+import {
+  prepareQueuedEditAttachments,
+  recoverQueuedMessageEdit,
+  restoreQueuedMessagePastedTexts,
+} from "./queuedMessageEdit";
 
 const environmentId = EnvironmentId.make("remote-environment");
 const threadTarget = scopeThreadRef(environmentId, ThreadId.make("thread:edit"));
@@ -120,5 +127,76 @@ describe("queued message file edits", () => {
     );
     expect(store.getComposerDraft(threadTarget)?.prompt).toBe("Separate draft");
     expect(store.getComposerDraft(editTarget)).toBeNull();
+  });
+});
+
+describe("queued pasted-text edits", () => {
+  const context = {
+    version: 1 as const,
+    records: [
+      {
+        version: 1 as const,
+        kind: "pasted-text" as const,
+        contextId: ComposerContextId.make("foreign_paste"),
+        label: "Pasted text",
+        text: "x".repeat(100_000) + "\nlast line",
+      },
+    ],
+  };
+  const text = "Read [Pasted text](t3-context://v1/pasted-text/foreign_paste)";
+
+  beforeEach(() => {
+    useComposerDraftStore.setState({ draftsByThreadKey: {}, draftThreadsByThreadKey: {} });
+  });
+
+  it("restores a foreign chip and sends its edited contents inline", () => {
+    const restored = restoreQueuedMessagePastedTexts({ text, context });
+    const store = useComposerDraftStore.getState();
+    store.setPastedTexts(editTarget, restored.pastedTexts);
+    store.setPrompt(editTarget, restored.prompt);
+    store.updatePastedText(editTarget, restored.pastedTexts[0]!.id, "edited tail");
+    const draft = store.getComposerDraft(editTarget)!;
+    const outgoing = buildMessageContext(draft);
+    expect(
+      projectComposerContextForProvider({ text: draft.prompt, records: outgoing?.records ?? [] }),
+    ).toContain("edited tail");
+    expect(draft.prompt).toContain("pasted-text_foreign_paste");
+  });
+
+  it("keeps a paste-only edit when another client advances the queue", () => {
+    const store = useComposerDraftStore.getState();
+    const restored = restoreQueuedMessagePastedTexts({ text, context });
+    store.setPastedTexts(editTarget, restored.pastedTexts);
+    store.setPrompt(editTarget, restored.prompt);
+    const edited = context.records[0]!.text + " changed";
+    store.updatePastedText(editTarget, restored.pastedTexts[0]!.id, edited);
+    expect(
+      recoverQueuedMessageEdit({
+        editTarget,
+        threadTarget,
+        originalText: text,
+        originalContext: context,
+      }),
+    ).toBe("kept");
+    const recovered = store.getComposerDraft(threadTarget)!;
+    expect(recovered.prompt).toBe(restored.prompt);
+    expect(recovered.pastedTexts[0]?.text).toBe(edited);
+    expect(store.getComposerDraft(editTarget)).toBeNull();
+  });
+
+  it("does not recover an unchanged chip as a new draft", () => {
+    const store = useComposerDraftStore.getState();
+    const restored = restoreQueuedMessagePastedTexts({ text, context });
+    store.setPastedTexts(editTarget, restored.pastedTexts);
+    store.setPrompt(editTarget, restored.prompt);
+    expect(
+      recoverQueuedMessageEdit({
+        editTarget,
+        threadTarget,
+        originalText: text,
+        originalContext: context,
+      }),
+    ).toBe("clean");
+    expect(store.getComposerDraft(threadTarget)).toBeNull();
   });
 });

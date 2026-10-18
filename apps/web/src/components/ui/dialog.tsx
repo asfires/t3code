@@ -61,12 +61,14 @@ function DialogPopup({
   children,
   showCloseButton = true,
   bottomStickOnMobile = true,
+  size = "default",
   variant = "default",
   ...props
 }: DialogPrimitive.Popup.Props & {
   showCloseButton?: boolean;
   bottomStickOnMobile?: boolean;
   variant?: "default" | "media";
+  size?: "default" | "wide";
 }) {
   return (
     <DialogPortal>
@@ -83,7 +85,8 @@ function DialogPopup({
           className={cn(
             variant === "media" ? DIALOG_MEDIA_POPUP_CLASS : DIALOG_POPUP_CLASS,
             "row-start-2 text-popover-foreground",
-            variant === "default" && "max-h-full max-w-lg",
+            variant === "default" && "max-h-full",
+            variant === "default" && (size === "wide" ? "max-w-3xl" : "max-w-lg"),
             bottomStickOnMobile && DIALOG_MOBILE_SHEET_CLASS,
             className,
           )}

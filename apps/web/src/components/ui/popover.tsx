@@ -21,6 +21,7 @@ const popoverPopupWidthClassName = {
   sm: "w-64",
   md: "w-80",
   lg: "w-96",
+  xl: "w-[min(40rem,calc(100vw-2rem))]",
 } as const;
 
 const popoverViewportPaddingClassName = {
