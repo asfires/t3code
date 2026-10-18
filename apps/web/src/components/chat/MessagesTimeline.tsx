@@ -5506,13 +5506,21 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
           !toolIconAcceptsTint(entryToolIcon) ? (
             <XIcon aria-hidden className={cn("size-3 shrink-0", failedToolIconClassName)} />
           ) : null}
+          <TimelineRowTimestamp
+            createdAt={workEntry.createdAt}
+            timestampFormat={timestampFormat}
+            // The timestamp takes up space only while the row is hovered, so it
+            // sits before the copy button, which would otherwise shift under the
+            // pointer. The copy menu's backdrop takes hover away from the row, so
+            // an open popup keeps the timestamp in place too.
+            className="group-has-[[data-popup-open]]/timeline-row:pointer-events-auto group-has-[[data-popup-open]]/timeline-row:static group-has-[[data-popup-open]]/timeline-row:opacity-100"
+          />
           {workEntry.projectedItem ? (
             <ToolRowCopyButton
               projectedItem={workEntry.projectedItem}
               environmentId={ctx.activeThreadEnvironmentId}
             />
           ) : null}
-          <TimelineRowTimestamp createdAt={workEntry.createdAt} timestampFormat={timestampFormat} />
           <span
             className={cn(
               "flex size-4 shrink-0 items-center justify-center",
