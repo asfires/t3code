@@ -24,6 +24,7 @@ export function planPastedText(input: {
   draft: PastedTextDraft;
   records: ReadonlyArray<ComposerContextRecord>;
   supportsRecords: boolean;
+  richTextEnabled?: boolean;
   bypassAutoAttachment: boolean;
 }) {
   const initialDisposition = pastedTextDisposition({
@@ -38,7 +39,7 @@ export function planPastedText(input: {
         pastedTextContextReference(input.draft),
       ])
     : { ...input.selection, text: input.draft.text };
-  if (asRecord) {
+  if (asRecord && input.richTextEnabled) {
     // Rich code blocks accept only text. Close and reopen the fence so the pasted reference
     // remains an editable chip while the surrounding code stays literal.
     const before = fenceAtOffset(input.prompt, edit.start);

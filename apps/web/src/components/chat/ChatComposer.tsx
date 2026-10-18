@@ -4183,7 +4183,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       entries: buildComposerPromptHistoryEntries(promptHistoryMessagesRef.current),
       position,
       currentPrompt: promptRef.current,
-      currentPastedTexts: composerPastedTexts,
+      currentPastedTexts:
+        useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.pastedTexts ?? [],
     });
     if (!step) return false;
     promptHistoryPositionRef.current = step.position
@@ -5662,6 +5663,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           threadContexts: composerThreadContexts,
         })?.records ?? [],
       supportsRecords: !questionAttachmentTarget && pendingUserInputs.length === 0,
+      richTextEnabled: settings.composerRichTextEnabled,
       bypassAutoAttachment,
     });
     if (disposition === "inline") {

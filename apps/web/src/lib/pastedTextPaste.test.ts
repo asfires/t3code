@@ -107,6 +107,7 @@ it.each(["```ts", "~~~~json"])("keeps a folded paste editable inside a %s fence"
   const start = prompt.indexOf("selected");
   const plan = planPastedText({
     ...base,
+    richTextEnabled: true,
     prompt,
     selection: { start, end: start + "selected".length },
     draft: draft("code-paste", "x".repeat(1_000)),
@@ -128,6 +129,7 @@ it.each(["```ts", "~~~~json"])("keeps a folded paste editable inside a %s fence"
   ]);
   const inline = planPastedText({
     ...base,
+    richTextEnabled: true,
     prompt,
     selection: { start, end: start + "selected".length },
     draft: draft("code-paste", "x".repeat(1_000)),
@@ -135,4 +137,26 @@ it.each(["```ts", "~~~~json"])("keeps a folded paste editable inside a %s fence"
   });
   expect(inline.disposition).toBe("inline");
   expect(inline.edit.text).toBe("x".repeat(1_000));
+});
+
+it("does not add fences when rich text is disabled", () => {
+  const prompt = "```ts\nbefore selected after\n```";
+  const start = prompt.indexOf("selected");
+  const pasted = draft("plain-paste", "x".repeat(1_000));
+  const plan = planPastedText({
+    ...base,
+    prompt,
+    selection: { start, end: start + "selected".length },
+    draft: pasted,
+    richTextEnabled: false,
+  });
+  expect(plan.disposition).toBe("record");
+  const next = replaceTextSelection({
+    value: prompt,
+    selection: plan.edit,
+    text: plan.edit.text,
+  }).value;
+  expect(next).toBe(
+    `\`\`\`ts\nbefore ${formatInlineContextReference(pastedTextContextReference(pasted))} after\n\`\`\``,
+  );
 });
