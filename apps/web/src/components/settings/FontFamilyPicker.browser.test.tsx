@@ -20,9 +20,19 @@ const families = vi.hoisted(() => {
 
 vi.mock("../../appearanceFonts", () => ({
   isMonospaceFamily: () => true,
-  queryInstalledFontFamilies: async () => ({ status: "granted", families }),
+  isFontFamilyAvailable: (family: string) => family === "Custom Font",
+  queryInstalledFontFamilies: vi.fn(async () => ({ status: "granted", families })),
 }));
 
+vi.mock("../../hostFonts", () => ({
+  canUseHostFontEnumeration: () => false,
+  queryHostFontFamilies: vi.fn(async (): Promise<readonly string[] | null> => null),
+  loadHostFontFamily: vi.fn(async () => true),
+}));
+
+import { queryHostFontFamilies } from "../../hostFonts";
+import { queryInstalledFontFamilies } from "../../appearanceFonts";
+import { userEvent } from "vite-plus/test/browser";
 import { discoverInstalledFonts, FontFamilyPicker } from "./FontFamilyPicker";
 
 let root: Root;
@@ -33,7 +43,9 @@ beforeEach(async () => {
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
-  await act(async () => discoverInstalledFonts());
+  vi.mocked(queryHostFontFamilies).mockResolvedValue(null);
+  vi.mocked(queryInstalledFontFamilies).mockResolvedValue({ status: "granted", families });
+  await act(async () => discoverInstalledFonts({ refresh: true }));
 });
 
 afterEach(async () => {
@@ -72,7 +84,9 @@ describe("FontFamilyPicker", () => {
       ),
     );
 
-    const input = document.querySelector<HTMLInputElement>('input[placeholder="Search fonts…"]');
+    const input = document.querySelector<HTMLInputElement>(
+      'input[placeholder="Search or enter a font…"]',
+    );
     expect(input).not.toBeNull();
     const press = (key: string) =>
       act(async () => {
@@ -89,4 +103,63 @@ describe("FontFamilyPicker", () => {
     await press("Enter");
     expect(onSelect).toHaveBeenCalledWith("Fira Code");
   });
+});
+
+describe("font discovery in the picker", () => {
+  it("refreshes host fonts on every open", async () => {
+    vi.mocked(queryHostFontFamilies).mockResolvedValue(["Inter"]);
+    await act(async () =>
+      root.render(
+        <FontFamilyPicker
+          ariaLabel="Interface font"
+          defaultFamily="Arial"
+          selectedFamily=""
+          onSelect={() => {}}
+        />,
+      ),
+    );
+    const trigger = document.querySelector<HTMLButtonElement>('[aria-label="Interface font"]')!;
+    await userEvent.click(trigger);
+    await vi.waitFor(() =>
+      expect(
+        [...document.querySelectorAll('[role="option"]')].map((el) => el.textContent),
+      ).toContain("Inter"),
+    );
+    await userEvent.keyboard("{Escape}");
+    vi.mocked(queryHostFontFamilies).mockResolvedValue(["Inter", "Newly Installed"]);
+    await userEvent.click(trigger);
+    await vi.waitFor(() =>
+      expect(
+        [...document.querySelectorAll('[role="option"]')].map((el) => el.textContent),
+      ).toContain("Newly Installed"),
+    );
+  });
+
+  it.each(["denied", "unsupported"] as const)(
+    "selects an exact family when enumeration is %s",
+    async (status) => {
+      vi.mocked(queryInstalledFontFamilies).mockResolvedValue({ status, families: [] });
+      const onSelect = vi.fn();
+      await act(async () =>
+        root.render(
+          <FontFamilyPicker
+            ariaLabel="Interface font"
+            defaultFamily="Arial"
+            selectedFamily=""
+            initialOpen
+            onSelect={onSelect}
+          />,
+        ),
+      );
+      const input = document.querySelector<HTMLInputElement>(
+        'input[placeholder="Search or enter a font…"]',
+      )!;
+      await typeQuery(input, "Custom Font");
+      await vi.waitFor(() => expect(highlightedOptions()).toEqual(["Custom Fontuse exact name"]));
+      await act(async () =>
+        input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })),
+      );
+      expect(onSelect).toHaveBeenCalledWith("Custom Font");
+    },
+  );
 });

@@ -303,8 +303,11 @@ let installedFamiliesCache: InstalledFontFamiliesResult | null = null;
  * Call from a user gesture: the first call raises the browser's local-fonts
  * permission prompt.
  */
-export async function queryInstalledFontFamilies(): Promise<InstalledFontFamiliesResult> {
-  if (installedFamiliesCache !== null) return installedFamiliesCache;
+export async function queryInstalledFontFamilies(options?: {
+  readonly refresh?: boolean;
+}): Promise<InstalledFontFamiliesResult> {
+  if (options?.refresh) installedFamiliesCache = null;
+  if (!options?.refresh && installedFamiliesCache !== null) return installedFamiliesCache;
   const query = (
     window as Window & {
       queryLocalFonts?: () => Promise<ReadonlyArray<{ readonly family: string }>>;

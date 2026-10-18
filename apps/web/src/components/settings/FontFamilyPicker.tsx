@@ -1,7 +1,16 @@
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import { CheckIcon } from "lucide-react";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { isMonospaceFamily, queryInstalledFontFamilies } from "../../appearanceFonts";
+import {
+  isFontFamilyAvailable,
+  isMonospaceFamily,
+  queryInstalledFontFamilies,
+} from "../../appearanceFonts";
+import {
+  canUseHostFontEnumeration,
+  loadHostFontFamily,
+  queryHostFontFamilies,
+} from "../../hostFonts";
 import {
   Combobox,
   ComboboxEmpty,
@@ -12,7 +21,6 @@ import {
   ComboboxTrigger,
 } from "../ui/combobox";
 import { SelectButton } from "../ui/select";
-import { stackedThreadToast, toastManager } from "../ui/toast";
 
 const DEFAULT_FONT_VALUE = "__default__";
 
@@ -24,13 +32,20 @@ function supportsFontEnumeration(): boolean {
 }
 
 type FontEnumerationState =
-  | { readonly status: "unknown" }
-  | { readonly status: "granted"; readonly families: readonly string[] }
-  | { readonly status: "unavailable" };
+  | { readonly status: "unknown"; readonly isLoading: boolean }
+  | {
+      readonly status: "granted";
+      readonly families: readonly string[];
+      readonly isLoading: boolean;
+    }
+  | { readonly status: "denied" | "unsupported"; readonly isLoading: boolean };
 
-let enumerationState: FontEnumerationState = supportsFontEnumeration()
-  ? { status: "unknown" }
-  : { status: "unavailable" };
+// Shared across every row: once one picker learns the fonts (or learns the
+// permission is blocked), the others follow without re-querying.
+let enumerationState: FontEnumerationState =
+  supportsFontEnumeration() || canUseHostFontEnumeration()
+    ? { status: "unknown", isLoading: false }
+    : { status: "unsupported", isLoading: false };
 const enumerationListeners = new Set<() => void>();
 
 function subscribeToEnumeration(listener: () => void): () => void {
@@ -44,40 +59,79 @@ function readEnumerationState(): FontEnumerationState {
 
 let enumerationLoad: Promise<void> | null = null;
 
-/** Query installed fonts; call from a user gesture (the permission prompt needs one). */
-export function discoverInstalledFonts(): void {
-  if (enumerationState.status !== "unknown" || enumerationLoad !== null) return;
-  enumerationLoad = queryInstalledFontFamilies().then((result) => {
-    enumerationState =
-      result.status === "granted"
-        ? { status: "granted", families: result.families }
-        : { status: "unavailable" };
+function publishEnumerationState(state: FontEnumerationState): void {
+  enumerationState = state;
+  for (const listener of enumerationListeners) listener();
+}
+
+/** Query live host fonts locally, falling back to browser enumeration remotely. */
+export function discoverInstalledFonts(options?: {
+  readonly refresh?: boolean;
+  readonly hostOnly?: boolean;
+}): Promise<void> {
+  const refresh = options?.refresh === true;
+  if (enumerationLoad !== null) return enumerationLoad;
+  if (!refresh && enumerationState.status !== "unknown") return Promise.resolve();
+
+  publishEnumerationState({ ...enumerationState, isLoading: true });
+  const load = (async () => {
+    const hostFamilies = await queryHostFontFamilies();
+    if (hostFamilies !== null) {
+      return { families: hostFamilies, status: "granted" } as const;
+    }
+    if (options?.hostOnly) return null;
+    return queryInstalledFontFamilies({ refresh });
+  })().then((result) => {
     enumerationLoad = null;
-    for (const listener of enumerationListeners) listener();
+    if (result === null) {
+      publishEnumerationState({ status: "unknown", isLoading: false });
+      return;
+    }
+    publishEnumerationState(
+      result.status === "granted"
+        ? { status: "granted", families: result.families, isLoading: false }
+        : { status: result.status, isLoading: false },
+    );
   });
+  enumerationLoad = load;
+  return load;
 }
 
 let grantedProbeStarted = false;
 
 /**
- * Electron's default permission handler approves silently (it has no prompt
- * UI), and a browser that granted once reports "granted" on later visits — in
- * both, no user gesture is needed.
+ * Discover host fonts eagerly for a local T3 instance. Remote web clients use
+ * browser-local enumeration instead, and query eagerly only when that browser
+ * permission was already granted.
  */
 function probeAlreadyGrantedPermission(): void {
   if (grantedProbeStarted || enumerationState.status !== "unknown") return;
   grantedProbeStarted = true;
+  if (canUseHostFontEnumeration()) {
+    void discoverInstalledFonts({ refresh: true, hostOnly: true });
+    return;
+  }
   const permissions = typeof navigator !== "undefined" ? navigator.permissions : undefined;
   if (typeof permissions?.query !== "function") return;
   permissions.query({ name: "local-fonts" as PermissionName }).then(
     (status) => {
-      if (status.state === "granted") discoverInstalledFonts();
+      if (status.state === "granted") void discoverInstalledFonts();
     },
-    () => {},
+    () => {
+      // The engine does not recognize the permission name; keep the
+      // focus-driven flow.
+    },
   );
 }
 
-export function useFontEnumeration(): FontEnumerationState {
+/**
+ * Whether the engine can list installed fonts (Local Font Access API —
+ * Chromium and Electron). "unknown" until discovery resolves the permission.
+ * The picker remains usable for exact-name entry in denied and unsupported
+ * environments; only browsing the complete installed list depends on this
+ * state. Where permission is already granted, discovery starts at mount.
+ */
+function useFontEnumeration(): FontEnumerationState {
   useEffect(probeAlreadyGrantedPermission, []);
   return useSyncExternalStore(subscribeToEnumeration, readEnumerationState);
 }
@@ -105,23 +159,49 @@ export function FontFamilyPicker({
   // and the popup lingers on screen forever.
   const [openAfterMount] = useState(initialOpen);
   useEffect(() => {
-    // oxlint-disable-next-line react/set-state-in-effect -- Base UI needs one closed commit first to record the popup's entrance style.
-    if (openAfterMount) setOpen(true);
+    if (openAfterMount) {
+      // oxlint-disable-next-line react/set-state-in-effect -- Base UI needs one closed commit first to record the popup's entrance style.
+      setOpen(true);
+      void discoverInstalledFonts({ refresh: true });
+    }
   }, [openAfterMount]);
   const listRef = useRef<LegendListRef | null>(null);
   const enumeration = useFontEnumeration();
 
   const handleOpenChange = (nextOpen: boolean) => {
     setOpen(nextOpen);
-    if (nextOpen) setQuery("");
+    if (nextOpen) {
+      setQuery("");
+      void discoverInstalledFonts({ refresh: true });
+    }
   };
 
-  const families = enumeration.status === "granted" ? enumeration.families : [];
+  const families =
+    enumeration.status !== "granted"
+      ? []
+      : requireMonospace
+        ? enumeration.families.filter(isMonospaceFamily)
+        : enumeration.families;
+
+  const manualFamily = (() => {
+    const candidate = query.trim();
+    if (candidate.length === 0) return null;
+    if (
+      families.some(
+        (family) => family.localeCompare(candidate, undefined, { sensitivity: "accent" }) === 0,
+      )
+    )
+      return null;
+    if (!isFontFamilyAvailable(candidate)) return null;
+    if (requireMonospace && !isMonospaceFamily(candidate)) return null;
+    return candidate;
+  })();
 
   const items = (() => {
     const trimmedQuery = query.trim().toLowerCase();
     const result: string[] = [];
     if (trimmedQuery.length === 0) result.push(DEFAULT_FONT_VALUE);
+    if (manualFamily !== null) result.push(manualFamily);
     result.push(
       ...families.filter(
         (family) => trimmedQuery.length === 0 || family.toLowerCase().includes(trimmedQuery),
@@ -134,21 +214,13 @@ export function FontFamilyPicker({
 
   const handlePick = (value: string) => {
     setOpen(false);
-    if (value !== DEFAULT_FONT_VALUE && requireMonospace && !isMonospaceFamily(value)) {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: `"${value}" isn't monospace`,
-          description: "Code and terminal need a fixed-width font, so the current font was kept.",
-        }),
-      );
-      return;
-    }
+    if (value !== DEFAULT_FONT_VALUE) void loadHostFontFamily(value);
     onSelect(value === DEFAULT_FONT_VALUE ? "" : value);
   };
 
   const renderItem = (item: string, index: number) => {
     const isDefault = item === DEFAULT_FONT_VALUE;
+    const isManual = item === manualFamily;
     const family = isDefault ? defaultFamily : item;
     return (
       <ComboboxItem hideIndicator index={index} key={item} value={item}>
@@ -158,6 +230,9 @@ export function FontFamilyPicker({
           </span>
           <span className="flex shrink-0 items-center gap-1.5">
             {isDefault ? <span className="text-3xs text-muted-foreground/60">default</span> : null}
+            {isManual ? (
+              <span className="text-3xs text-muted-foreground/60">use exact name</span>
+            ) : null}
             {item === selectedValue ? (
               <CheckIcon className="size-3.5 text-muted-foreground" />
             ) : null}
@@ -189,10 +264,21 @@ export function FontFamilyPicker({
       </ComboboxTrigger>
       <ComboboxPopup align="end" className="flex w-72 flex-col">
         <ComboboxSearchInput
-          placeholder="Search fonts…"
+          placeholder="Search or enter a font…"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
         />
+        {enumeration.status !== "granted" ? (
+          <p className="px-3 pt-1.5 text-3xs leading-snug text-muted-foreground/70">
+            {enumeration.status === "denied"
+              ? "Installed font list access is blocked. Enter an exact family name or update the browser permission."
+              : enumeration.status === "unsupported"
+                ? "This browser cannot list installed fonts. Enter an exact family name."
+                : enumeration.isLoading
+                  ? "Loading installed fonts…"
+                  : "Open the picker to load installed fonts, or enter an exact family name."}
+          </p>
+        ) : null}
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           <ComboboxEmpty>No fonts found.</ComboboxEmpty>
           <div className="relative min-h-0 max-h-72 w-full flex-1 overflow-hidden">
