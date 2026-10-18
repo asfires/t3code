@@ -43,6 +43,7 @@ import {
   resolveTimelineMinimapNavigationInteractive,
   resolveTimelineMinimapTopPercent,
   resolveTimelineMinimapWheelIndex,
+  timelineMinimapWheelTargetsHitStrip,
   resolveWorkGroupScrollIndex,
   shouldFollowWorkGroupAppend,
   threadReadLabelPrefix,
@@ -77,6 +78,29 @@ describe("resolveTimelineMinimapWheelIndex", () => {
     { currentIndex: 2, itemCount: 5, deltaY: NaN },
   ])("ignores invalid vertical navigation: %j", (input) => {
     expect(resolveTimelineMinimapWheelIndex(input)).toBeNull();
+  });
+});
+
+describe("timelineMinimapWheelTargetsHitStrip", () => {
+  it.each([12, 24, 52])("accepts a pointer at %s within the bars", (pointerX) => {
+    expect(
+      timelineMinimapWheelTargetsHitStrip({ pointerX, hitStripLeft: 12, hitStripWidth: 40 }),
+    ).toBe(true);
+  });
+
+  it.each([11, 53, 100, NaN, Infinity])("rejects a pointer at %s outside the bars", (pointerX) => {
+    expect(
+      timelineMinimapWheelTargetsHitStrip({ pointerX, hitStripLeft: 12, hitStripWidth: 40 }),
+    ).toBe(false);
+  });
+
+  it("rejects an unavailable strip", () => {
+    expect(
+      timelineMinimapWheelTargetsHitStrip({ pointerX: 12, hitStripLeft: 12, hitStripWidth: 0 }),
+    ).toBe(false);
+    expect(
+      timelineMinimapWheelTargetsHitStrip({ pointerX: 12, hitStripLeft: NaN, hitStripWidth: 40 }),
+    ).toBe(false);
   });
 });
 

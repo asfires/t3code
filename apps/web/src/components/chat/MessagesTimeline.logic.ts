@@ -387,6 +387,26 @@ export function resolveTimelineMinimapWheelIndex(input: {
   return Math.max(0, Math.min(input.itemCount - 1, currentIndex + direction));
 }
 
+export function timelineMinimapWheelTargetsHitStrip(input: {
+  readonly pointerX: number;
+  readonly hitStripLeft: number;
+  readonly hitStripWidth: number;
+}): boolean {
+  if (
+    !Number.isFinite(input.pointerX) ||
+    !Number.isFinite(input.hitStripLeft) ||
+    !Number.isFinite(input.hitStripWidth) ||
+    input.hitStripWidth <= 0
+  ) {
+    return false;
+  }
+
+  return (
+    input.pointerX >= input.hitStripLeft &&
+    input.pointerX <= input.hitStripLeft + input.hitStripWidth
+  );
+}
+
 export function resolveTimelineMinimapCurrentIndex(input: {
   readonly scrollTop: number;
   readonly scrollBottom: number;

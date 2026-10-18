@@ -1216,6 +1216,35 @@ describe("MessagesTimeline minimap wheel", () => {
     expect(props.onManualNavigation).toHaveBeenCalledTimes(6);
     expect(forwarded).toHaveLength(0);
   });
+
+  it.each(["preview", "preview overlap", "expanded gap", "navigation button"])(
+    "forwards the wheel over the %s to the chat without selecting a message",
+    async (area) => {
+      const { props, strip, viewport, point, forwarded } = await setup();
+      const preview = container.querySelector<HTMLElement>("[data-minimap-preview]")!;
+      const previewRect = preview.getBoundingClientRect();
+      const target =
+        area === "navigation button"
+          ? button("Previous turn")
+          : area === "expanded gap"
+            ? strip
+            : preview.firstElementChild!;
+      const targetRect = target.getBoundingClientRect();
+      const clientX =
+        area === "preview overlap"
+          ? previewRect.left + 1
+          : area === "expanded gap"
+            ? strip.getBoundingClientRect().right - 1
+            : targetRect.left + targetRect.width / 2;
+      const initialOffset = viewport.scrollTop;
+      await wheel(target, { ...point, clientX, deltaY: -120 });
+      expect(forwarded).toHaveLength(1);
+      expect(forwarded[0]?.deltaY).toBe(-120);
+      await vi.waitFor(() => expect(viewport.scrollTop).toBeLessThan(initialOffset));
+      expect(strip.getAttribute("aria-label")).toBe("Jump to message: Prompt 2");
+      expect(props.onManualNavigation).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("MessagesTimeline scroll position", () => {

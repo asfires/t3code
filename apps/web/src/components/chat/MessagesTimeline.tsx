@@ -212,6 +212,7 @@ import {
   resolveTimelineMinimapNavigationInteractive,
   resolveTimelineMinimapTopPercent,
   resolveTimelineMinimapWheelIndex,
+  timelineMinimapWheelTargetsHitStrip,
   resolveWorkGroupScrollIndex,
   shouldCollapseUserMessage,
   shouldFollowWorkGroupAppend,
@@ -1549,7 +1550,7 @@ function resolveTimelineRowHeight(state: TimelinePositionState, rowIndex: number
   return typeof height === "number" && Number.isFinite(height) ? height : null;
 }
 
-function timelineMinimapEventTargetsPreview(target: EventTarget): boolean {
+function timelineMinimapEventTargetsPreview(target: EventTarget | null): boolean {
   return target instanceof Element && target.closest("[data-minimap-preview]") !== null;
 }
 
@@ -1635,9 +1636,19 @@ function TimelineMinimap({
   const stripWheelTargetRef = (button: HTMLButtonElement | null) => {
     if (!button) return;
     const navigateFromWheel = (event: WheelEvent) => {
-      if (event.deltaY === 0) return;
+      if (event.deltaY === 0 || timelineMinimapEventTargetsPreview(event.target)) return;
 
       const rect = button.getBoundingClientRect();
+      if (
+        !timelineMinimapWheelTargetsHitStrip({
+          pointerX: event.clientX,
+          hitStripLeft: rect.left,
+          hitStripWidth,
+        })
+      ) {
+        return;
+      }
+
       const pointerIndex = resolveTimelineMinimapIndexFromPointer({
         itemCount: items.length,
         railTop: rect.top,
