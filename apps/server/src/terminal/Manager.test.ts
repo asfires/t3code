@@ -611,6 +611,37 @@ it.layer(
     }
   });
 
+  const assertPythonVenvActivationTarget = Effect.fn("test.assertPythonVenvActivationTarget")(
+    function* (spawnInput: PtyAdapter.PtySpawnInput, process: FakePtyProcess, venvPath: string) {
+      const path = yield* Path.Path;
+      if ((yield* HostProcess.Platform) === "win32") {
+        expect(process.writes[0]).toContain(venvPath);
+        return;
+      }
+
+      expect(process.writes).toEqual(["\r"]);
+      if (/(^|[/\\])bash$/i.test(spawnInput.shell)) {
+        const rcfileIndex = spawnInput.args?.indexOf("--rcfile") ?? -1;
+        expect(rcfileIndex).toBeGreaterThanOrEqual(0);
+        const rcfile = spawnInput.args?.[rcfileIndex + 1];
+        expect(rcfile).toBeDefined();
+        if (!rcfile) return;
+        const wrapperBashrc = yield* readFileString(rcfile);
+        expect(wrapperBashrc).toContain(`. '${venvPath}/bin/activate'`);
+        expect(wrapperBashrc).toContain('if [ -r "$HOME/.bashrc" ]');
+        expect(wrapperBashrc).toContain("IFS= read -r __t3code_venv_trigger");
+        return;
+      }
+
+      const wrapperZdotdir = spawnInput.env.ZDOTDIR;
+      expect(wrapperZdotdir).toBeDefined();
+      if (!wrapperZdotdir) return;
+      const wrapperZshrc = yield* readFileString(path.join(wrapperZdotdir, ".zshrc"));
+      expect(wrapperZshrc).toContain(`. '${venvPath}/bin/activate'`);
+      expect(wrapperZshrc).toContain("IFS= read -r __t3code_venv_trigger");
+    },
+  );
+
   const nextTerminalOutput = Effect.fn("test.nextTerminalOutput")(function* (
     manager: TerminalManager.TerminalManager["Service"],
   ) {
@@ -2674,6 +2705,7 @@ it.layer(
       const { manager, ptyAdapter, baseDir } = yield* createManager(5, {
         shellResolver: () => (platform === "win32" ? "pwsh.exe" : "/bin/zsh"),
         env: {
+          HOME: "/home/test-user",
           PATH: platform === "win32" ? "C:\\Windows\\System32" : "/usr/local/bin:/usr/bin:/bin",
           PYTHONHOME: "/inherited/python",
         },
@@ -2693,8 +2725,7 @@ it.layer(
       expect(process).toBeDefined();
       if (!process) return;
       expect(process.writes).toHaveLength(1);
-      expect(process.writes[0]).toContain(venvPath);
-      expect(process.writes[0]).not.toMatch(/clear/i);
+      yield* assertPythonVenvActivationTarget(spawnInput, process, venvPath);
 
       const outputReady = yield* nextTerminalOutput(manager);
       const marker = `\x1eT3_VENV_${process.pid}:0\x1f`;
@@ -2702,6 +2733,111 @@ it.layer(
       process.emitData(`${marker.slice(8)}(venv) prompt `);
       const output = yield* Deferred.await(outputReady);
       expect(output).toBe("(venv) prompt ");
+    }),
+  );
+
+  it.effect("activates Bash without submitting an activation command to history", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const platform = yield* HostProcess.Platform;
+      if (platform === "win32") return;
+
+      const { manager, ptyAdapter, baseDir } = yield* createManager(5, {
+        shellResolver: () => "/bin/bash",
+        env: {
+          HOME: "/home/test-user",
+          PATH: "/usr/local/bin:/usr/bin:/bin",
+        },
+      });
+      const cwd = path.join(baseDir, "python-project");
+      const venvPath = path.join(cwd, "venv");
+      yield* makePythonVenv(venvPath);
+
+      yield* manager.open(openInput({ cwd }));
+
+      const spawnInput = ptyAdapter.spawnInputs[0];
+      const process = ptyAdapter.processes[0];
+      expect(spawnInput).toBeDefined();
+      expect(process).toBeDefined();
+      if (!spawnInput || !process) return;
+      yield* assertPythonVenvActivationTarget(spawnInput, process, venvPath);
+    }),
+  );
+
+  it.effect.each(["bash", "zsh"] as const)(
+    "activates in real %s startup while preserving user configuration and history",
+    (shell) =>
+      Effect.gen(function* () {
+        if ((yield* HostProcess.Platform) === "win32") return;
+        const shellPath = `/bin/${shell}`;
+        if (!(yield* pathExists(shellPath))) return;
+        const path = yield* Path.Path;
+        const fs = yield* FileSystem.FileSystem;
+        const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-venv-shell-" });
+        const { manager, ptyAdapter, baseDir } = yield* createManager(5, {
+          shellResolver: () => shellPath,
+          env: { HOME: home, PATH: "/usr/bin:/bin", PYTHONHOME: "/inherited/python" },
+        });
+        const cwd = path.join(baseDir, "Python project's checkout");
+        const venvPath = path.join(cwd, ".venv");
+        yield* makePythonVenv(venvPath);
+        yield* writeFileString(
+          path.join(venvPath, "bin", "activate"),
+          'export VIRTUAL_ENV="$PWD/.venv"\nunset PYTHONHOME\n',
+        );
+        yield* writeFileString(
+          path.join(home, `.${shell}rc`),
+          'export USER_STARTUP=loaded\nHISTFILE="$HOME/history"\nHISTSIZE=100\nSAVEHIST=100\n',
+        );
+        yield* manager.open(openInput({ cwd }));
+        const spawnInput = ptyAdapter.spawnInputs[0];
+        expect(spawnInput).toBeDefined();
+        if (!spawnInput) return;
+
+        const runner = yield* ProcessRunner.ProcessRunner;
+        const result = yield* runner.run({
+          command: spawnInput.shell,
+          args: [...(spawnInput.args ?? []), "-i"],
+          cwd,
+          env: spawnInput.env,
+          stdin:
+            '\nprintf "ACTIVE=%s STARTUP=%s PYTHONHOME=%s\\n" "$VIRTUAL_ENV" "$USER_STARTUP" "${PYTHONHOME-unset}"\nexit\n',
+        });
+        expect(result.code).toBe(0);
+        expect(result.stdout).toContain("\x1eT3_VENV_");
+        expect(result.stdout).toContain(":0\x1f");
+        expect(result.stdout).toContain(`ACTIVE=${venvPath} STARTUP=loaded PYTHONHOME=unset`);
+        const history = yield* readFileString(path.join(home, "history"));
+        expect(history).toContain("printf");
+        expect(history).not.toContain("bin/activate");
+        expect(history).not.toContain("__t3code");
+        expect(history).not.toContain("T3_VENV_");
+      }),
+  );
+
+  it.effect("publishes startup before the warning and exit when activation cannot complete", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const ptyAdapter = new FakePtyAdapter();
+      ptyAdapter.exitOnSubscribe = { exitCode: 1, signal: null };
+      const { manager, baseDir, getEvents } = yield* createManager(5, { ptyAdapter });
+      const cwd = path.join(baseDir, "python-project");
+      const venvPath = path.join(cwd, ".venv");
+      yield* makePythonVenv(venvPath);
+      const exited = yield* Deferred.make<void>();
+      const unsubscribe = yield* manager.subscribe((event) =>
+        event.type === "exited" ? Deferred.succeed(exited, undefined) : Effect.void,
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+
+      yield* manager.open(openInput({ cwd }));
+      yield* Deferred.await(exited);
+
+      const events = yield* getEvents;
+      expect(events.map((event) => event.type)).toEqual(["started", "output", "exited"]);
+      expect(events.find((event) => event.type === "output")?.data).toBe(
+        `\r\nAutomatic Python virtual environment activation did not complete: ${venvPath}\r\n`,
+      );
     }),
   );
 
@@ -2753,7 +2889,10 @@ it.layer(
       const platform = yield* HostProcess.Platform;
       const { manager, ptyAdapter, baseDir } = yield* createManager(5, {
         shellResolver: () => (platform === "win32" ? "pwsh.exe" : "/bin/zsh"),
-        env: { PATH: platform === "win32" ? "C:\\Windows\\System32" : "/usr/bin:/bin" },
+        env: {
+          HOME: "/home/test-user",
+          PATH: platform === "win32" ? "C:\\Windows\\System32" : "/usr/bin:/bin",
+        },
       });
       const projectRoot = path.join(baseDir, "python-project");
       const worktreePath = path.join(baseDir, "worktree");
@@ -2774,7 +2913,10 @@ it.layer(
       const spawnInput = ptyAdapter.spawnInputs[0];
       expect(spawnInput).toBeDefined();
       if (!spawnInput) return;
-      expect(ptyAdapter.processes[0]?.writes[0]).toContain(dotVenvPath);
+      const process = ptyAdapter.processes[0];
+      expect(process).toBeDefined();
+      if (!process) return;
+      yield* assertPythonVenvActivationTarget(spawnInput, process, dotVenvPath);
     }),
   );
 
@@ -2790,7 +2932,12 @@ it.layer(
 
       yield* manager.open(openInput({ cwd }));
 
-      expect(ptyAdapter.processes[0]?.writes[0]).toContain(venvPath);
+      const spawnInput = ptyAdapter.spawnInputs[0];
+      const process = ptyAdapter.processes[0];
+      expect(spawnInput).toBeDefined();
+      expect(process).toBeDefined();
+      if (!spawnInput || !process) return;
+      yield* assertPythonVenvActivationTarget(spawnInput, process, venvPath);
     }),
   );
 
