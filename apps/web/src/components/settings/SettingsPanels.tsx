@@ -1455,26 +1455,30 @@ function InterfaceFontRow({ preview }: { preview?: ReactNode }) {
   return (
     <FontFamilySettingsRow
       {...searchableSetting("interface-font")}
-      description="Everything outside code blocks and the terminal."
+      description="Interface text and response prose."
       defaultFamily={defaults.sans}
       defaultValue={DEFAULT_UNIFIED_SETTINGS.fontFamilySans}
       value={settings.fontFamilySans}
       onValueChange={(fontFamilySans) => updateSettings({ fontFamilySans })}
-      onReset={() =>
-        updateSettings({
-          fontFamilySans: DEFAULT_UNIFIED_SETTINGS.fontFamilySans,
-          fontSizeInterface: DEFAULT_UNIFIED_SETTINGS.fontSizeInterface,
-        })
-      }
-      size={{
-        label: "Interface font size",
-        min: MIN_INTERFACE_FONT_SIZE,
-        max: MAX_INTERFACE_FONT_SIZE,
-        value: settings.fontSizeInterface,
-        defaultValue: DEFAULT_UNIFIED_SETTINGS.fontSizeInterface,
-        onChange: (fontSizeInterface) => updateSettings({ fontSizeInterface }),
-      }}
+      onReset={() => updateSettings({ fontFamilySans: DEFAULT_UNIFIED_SETTINGS.fontFamilySans })}
       {...(preview !== undefined ? { preview } : {})}
+    />
+  );
+}
+
+function InterfaceFontSizeRow() {
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+  return (
+    <FontSizeSettingsRow
+      {...searchableSetting("interface-size")}
+      description="Scales interface text and model responses, including response code blocks."
+      label="Interface and response size"
+      min={MIN_INTERFACE_FONT_SIZE}
+      max={MAX_INTERFACE_FONT_SIZE}
+      value={settings.fontSizeInterface}
+      defaultValue={DEFAULT_UNIFIED_SETTINGS.fontSizeInterface}
+      onChange={(fontSizeInterface) => updateSettings({ fontSizeInterface })}
     />
   );
 }
@@ -1486,36 +1490,40 @@ function PromptFontRow() {
   return (
     <FontFamilySettingsRow
       {...searchableSetting("prompt-font")}
-      description="Only the box you write prompts in. Mono works well here."
+      description="The box you write prompts in. Mono works well here."
       defaultFamily={defaults.interfaceFamily}
       defaultValue={DEFAULT_UNIFIED_SETTINGS.fontFamilyComposer}
       value={settings.fontFamilyComposer}
       onValueChange={(fontFamilyComposer) => updateSettings({ fontFamilyComposer })}
       onReset={() =>
-        updateSettings({
-          fontFamilyComposer: DEFAULT_UNIFIED_SETTINGS.fontFamilyComposer,
-          fontSizePrompt: DEFAULT_UNIFIED_SETTINGS.fontSizePrompt,
-        })
+        updateSettings({ fontFamilyComposer: DEFAULT_UNIFIED_SETTINGS.fontFamilyComposer })
       }
-      size={{
-        label: "Prompt font size",
-        min: MIN_PROMPT_FONT_SIZE,
-        max: MAX_PROMPT_FONT_SIZE,
-        value: settings.fontSizePrompt,
-        defaultValue: DEFAULT_UNIFIED_SETTINGS.fontSizePrompt,
-        onChange: (fontSizePrompt) => updateSettings({ fontSizePrompt }),
-      }}
       preview={<PromptFontPreview />}
     />
   );
 }
 
+function PromptFontSizeRow() {
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+  return (
+    <FontSizeSettingsRow
+      {...searchableSetting("prompt-size")}
+      description="Text in the box where you write prompts."
+      label="Prompt size"
+      min={MIN_PROMPT_FONT_SIZE}
+      max={MAX_PROMPT_FONT_SIZE}
+      value={settings.fontSizePrompt}
+      defaultValue={DEFAULT_UNIFIED_SETTINGS.fontSizePrompt}
+      onChange={(fontSizePrompt) => updateSettings({ fontSizePrompt })}
+    />
+  );
+}
+
 function CodeFontRow({
-  title,
-  description = "Code blocks, diffs, and file previews.",
+  description = "Response code, diffs, and file previews.",
   preview,
 }: {
-  title?: string;
   description?: string;
   preview?: ReactNode;
 }) {
@@ -1525,28 +1533,35 @@ function CodeFontRow({
   return (
     <FontFamilySettingsRow
       {...searchableSetting("code-font")}
-      {...(title !== undefined ? { title } : {})}
       description={description}
       defaultFamily={defaults.code}
       defaultValue={DEFAULT_UNIFIED_SETTINGS.fontFamilyCode}
       value={settings.fontFamilyCode}
       onValueChange={(fontFamilyCode) => updateSettings({ fontFamilyCode })}
-      onReset={() =>
-        updateSettings({
-          fontFamilyCode: DEFAULT_UNIFIED_SETTINGS.fontFamilyCode,
-          fontSizeCode: DEFAULT_UNIFIED_SETTINGS.fontSizeCode,
-        })
-      }
+      onReset={() => updateSettings({ fontFamilyCode: DEFAULT_UNIFIED_SETTINGS.fontFamilyCode })}
       requireMonospace
-      size={{
-        label: "Code font size",
-        min: MIN_CODE_FONT_SIZE,
-        max: MAX_CODE_FONT_SIZE,
-        value: settings.fontSizeCode,
-        defaultValue: DEFAULT_UNIFIED_SETTINGS.fontSizeCode,
-        onChange: (fontSizeCode) => updateSettings({ fontSizeCode }),
-      }}
       preview={preview ?? <CodeFontPreview />}
+    />
+  );
+}
+
+function CodeFontSizeRow({ includeTerminal = false }: { includeTerminal?: boolean }) {
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+  return (
+    <FontSizeSettingsRow
+      {...searchableSetting("code-size")}
+      description={
+        includeTerminal
+          ? "Code text in editor-like surfaces and the terminal. Response code follows response size."
+          : "Code text in editor-like surfaces. Response code follows response size."
+      }
+      label={includeTerminal ? "Diff, file, and terminal size" : "Diff and file size"}
+      min={MIN_CODE_FONT_SIZE}
+      max={MAX_CODE_FONT_SIZE}
+      value={settings.fontSizeCode}
+      defaultValue={DEFAULT_UNIFIED_SETTINGS.fontSizeCode}
+      onChange={(fontSizeCode) => updateSettings({ fontSizeCode })}
     />
   );
 }
@@ -1558,26 +1573,15 @@ function TerminalFontRow() {
   return (
     <FontFamilySettingsRow
       {...searchableSetting("terminal-font")}
-      description="Terminal output, independent from code blocks and diffs."
+      description="Terminal text, independent from response code, diffs, and file previews."
       defaultFamily={defaults.code}
       defaultValue={DEFAULT_UNIFIED_SETTINGS.fontFamilyTerminal}
       value={settings.fontFamilyTerminal}
       onValueChange={(fontFamilyTerminal) => updateSettings({ fontFamilyTerminal })}
       onReset={() =>
-        updateSettings({
-          fontFamilyTerminal: DEFAULT_UNIFIED_SETTINGS.fontFamilyTerminal,
-          fontSizeTerminal: DEFAULT_UNIFIED_SETTINGS.fontSizeTerminal,
-        })
+        updateSettings({ fontFamilyTerminal: DEFAULT_UNIFIED_SETTINGS.fontFamilyTerminal })
       }
       requireMonospace
-      size={{
-        label: "Terminal font size",
-        min: MIN_TERMINAL_FONT_SIZE,
-        max: MAX_TERMINAL_FONT_SIZE,
-        value: settings.fontSizeTerminal,
-        defaultValue: DEFAULT_UNIFIED_SETTINGS.fontSizeTerminal,
-        onChange: (fontSizeTerminal) => updateSettings({ fontSizeTerminal }),
-      }}
       preview={
         <TerminalFontPreview
           family={resolveTerminalFontPreference({
@@ -1592,7 +1596,24 @@ function TerminalFontRow() {
   );
 }
 
-function ToolOutputFontRow() {
+function TerminalFontSizeRow() {
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+  return (
+    <FontSizeSettingsRow
+      {...searchableSetting("terminal-size")}
+      description="Text in the terminal drawer."
+      label="Terminal size"
+      min={MIN_TERMINAL_FONT_SIZE}
+      max={MAX_TERMINAL_FONT_SIZE}
+      value={settings.fontSizeTerminal}
+      defaultValue={DEFAULT_UNIFIED_SETTINGS.fontSizeTerminal}
+      onChange={(fontSizeTerminal) => updateSettings({ fontSizeTerminal })}
+    />
+  );
+}
+
+function ToolOutputFontSizeRow() {
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
   return (
@@ -1613,7 +1634,7 @@ function ToolOutputFontRow() {
       }
       control={
         <FontSizeSelect
-          label="Tool output font size"
+          label="Tool output size"
           min={MIN_TOOL_OUTPUT_FONT_SIZE}
           max={MAX_TOOL_OUTPUT_FONT_SIZE}
           value={settings.fontSizeToolOutput}
@@ -1679,27 +1700,28 @@ function WordWrapRow() {
   );
 }
 
-function FontSettingsGroup() {
+function AdvancedTypefaceRows() {
   return (
     <>
       <InterfaceFontRow />
       <PromptFontRow />
       <CodeFontRow />
-      <ToolOutputFontRow />
       <TerminalFontRow />
-      <FontSmoothingRow />
     </>
   );
 }
 
-function SimpleFontRows() {
+/**
+ * The two-typeface view: one sans, one monospace. The previews under each row
+ * show the surfaces reached by the currently visible family controls.
+ */
+function SimpleTypefaceRows() {
   const settings = useScopedSettings();
   return (
     <>
       <InterfaceFontRow preview={<PromptFontPreview />} />
       <CodeFontRow
-        title="Monospace font"
-        description="Code blocks, diffs, file previews, and the terminal."
+        description="Response code, diffs, file previews, and the terminal."
         preview={
           <>
             <CodeFontPreview />
@@ -1718,8 +1740,40 @@ function SimpleFontRows() {
           </>
         }
       />
-      <ToolOutputFontRow />
     </>
+  );
+}
+
+function AdvancedSizeRows() {
+  return (
+    <>
+      <InterfaceFontSizeRow />
+      <PromptFontSizeRow />
+      <CodeFontSizeRow />
+      <ToolOutputFontSizeRow />
+      <TerminalFontSizeRow />
+    </>
+  );
+}
+
+function SimpleSizeRows() {
+  return (
+    <>
+      <InterfaceFontSizeRow />
+      <CodeFontSizeRow includeTerminal />
+      <ToolOutputFontSizeRow />
+    </>
+  );
+}
+
+function TypographySubsection({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div className="space-y-1 pt-2 first:pt-0">
+      <h3 className="px-3 pt-2 text-xs font-semibold tracking-wide text-muted-foreground sm:px-4">
+        {title}
+      </h3>
+      {children}
+    </div>
   );
 }
 
@@ -1727,12 +1781,21 @@ function SimpleFontRows() {
 // must not flip the section - the target would never mount to be scrolled to.
 const ADVANCED_TYPOGRAPHY_TARGET_IDS: ReadonlySet<string> = new Set([
   "prompt-font",
+  "prompt-size",
   "terminal-font",
+  "terminal-size",
   ...(typeof navigator !== "undefined" && isMacPlatform(navigator.platform)
     ? ["font-smoothing"]
     : []),
 ]);
 
+/**
+ * Families and sizes are separate concepts even when they share an underlying
+ * setting record. The default view shows the two typefaces and the three
+ * useful size scopes; Advanced adds prompt and terminal overrides to both.
+ * A settings-search jump to an override row flips Advanced on so the target
+ * exists to scroll to.
+ */
 function TypographySection() {
   const [advanced, setAdvanced] = useLocalStorage(
     TYPOGRAPHY_ADVANCED_STORAGE_KEY,
@@ -1740,6 +1803,9 @@ function TypographySection() {
     Schema.Boolean,
   );
   const searchTargetId = useSettingsSearchTargetId();
+  // Flip Advanced on once per search jump so the hidden target can mount and
+  // scroll; tracking the handled id lets the user turn it back off without
+  // the still-set target immediately re-expanding the section.
   const lastExpandedTargetRef = useRef<string | null>(null);
   useEffect(() => {
     if (searchTargetId === null || !ADVANCED_TYPOGRAPHY_TARGET_IDS.has(searchTargetId)) return;
@@ -1762,8 +1828,16 @@ function TypographySection() {
         </label>
       }
     >
-      {advanced ? <FontSettingsGroup /> : <SimpleFontRows />}
-      <WordWrapRow />
+      <TypographySubsection title="Typefaces">
+        {advanced ? <AdvancedTypefaceRows /> : <SimpleTypefaceRows />}
+      </TypographySubsection>
+      <TypographySubsection title="Sizes">
+        {advanced ? <AdvancedSizeRows /> : <SimpleSizeRows />}
+      </TypographySubsection>
+      <TypographySubsection title="Options">
+        {advanced ? <FontSmoothingRow /> : null}
+        <WordWrapRow />
+      </TypographySubsection>
     </SettingsSection>
   );
 }
@@ -1817,7 +1891,6 @@ function FontFamilySettingsRow({
   onValueChange,
   onReset,
   requireMonospace = false,
-  size,
 }: {
   id?: string;
   title: string;
@@ -1829,14 +1902,6 @@ function FontFamilySettingsRow({
   onValueChange: (value: string) => void;
   onReset: () => void;
   requireMonospace?: boolean;
-  size: {
-    label: string;
-    min: number;
-    max: number;
-    value: number;
-    defaultValue: number;
-    onChange: (v: number) => void;
-  };
 }) {
   const trimmed = value.trim();
   const [draft, setDraft] = useState(value);
@@ -1885,7 +1950,7 @@ function FontFamilySettingsRow({
     onReset();
   };
   const resetAction =
-    value !== defaultValue || size.value !== size.defaultValue ? (
+    value !== defaultValue ? (
       <SettingResetButton label={title.toLowerCase()} onClick={resetToDefault} />
     ) : null;
   const fontEnumeration = useFontEnumeration();
@@ -1949,28 +2014,54 @@ function FontFamilySettingsRow({
         value={draft}
       />
     );
-  const control = (
-    <div className="flex w-full items-center gap-2 sm:w-auto">
-      <div className="min-w-0 flex-1 sm:w-44 sm:flex-none">{familyControl}</div>
-      <FontSizeSelect
-        label={size.label}
-        min={size.min}
-        max={size.max}
-        value={size.value}
-        onChange={size.onChange}
-      />
-    </div>
-  );
   return (
     <SettingsRow
       {...(id !== undefined ? { id } : {})}
       title={title}
       description={description}
       resetAction={resetAction}
-      control={control}
+      control={<div className="w-full sm:w-44">{familyControl}</div>}
     >
       {preview}
     </SettingsRow>
+  );
+}
+
+function FontSizeSettingsRow({
+  id,
+  title,
+  description,
+  label,
+  min,
+  max,
+  value,
+  defaultValue,
+  onChange,
+}: {
+  id?: string;
+  title: string;
+  description: string;
+  label: string;
+  min: number;
+  max: number;
+  value: number;
+  defaultValue: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <SettingsRow
+      {...(id !== undefined ? { id } : {})}
+      title={title}
+      description={description}
+      resetAction={
+        value !== defaultValue ? (
+          <SettingResetButton label={label.toLowerCase()} onClick={() => onChange(defaultValue)} />
+        ) : null
+      }
+      control={
+        <FontSizeSelect label={label} min={min} max={max} value={value} onChange={onChange} />
+      }
+    />
   );
 }
 
