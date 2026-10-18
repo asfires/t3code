@@ -1909,6 +1909,18 @@ code {
   color: var(--contrast-muted-foreground);
 }
 
+/* Markdown rules take their color from the surrounding text instead of
+   --border. --border is tuned against the canvas, and the user bubble sits at
+   the same lightness step, so a --border hr vanishes inside it. currentColor is
+   already contrast-solved against whichever surface the markdown is on. */
+.chat-markdown hr {
+  border-top-color: color-mix(in srgb, currentcolor 18%, transparent);
+}
+
+.chat-markdown blockquote {
+  border-left-color: color-mix(in srgb, currentcolor 18%, transparent);
+}
+
 /* A quote in the composer is text the user is still writing; muting it reads
    as disabled in an input, so the border alone carries the quote. */
 .composer-tiptap blockquote {
@@ -1929,7 +1941,7 @@ code {
 
 .chat-markdown section[data-footnotes] {
   margin-top: 1.25rem;
-  border-top: 1px solid var(--contrast-border);
+  border-top: 1px solid color-mix(in srgb, currentcolor 18%, transparent);
   padding-top: 0.75rem;
   color: var(--contrast-muted-foreground);
   font-size: 0.75rem;
