@@ -26,6 +26,21 @@ const command = {
 describe("tool row copy targets", () => {
   it("offers only the command when a completed command has no output", () => {
     expect(toolRowCopyTargets(command)).toEqual({ command: "printf 'hello'", output: false });
+    expect(toolRowCopyTargets({ ...command, output: " \n" }).output).toBe(false);
+  });
+
+  it("offers both command and output when output is present", () => {
+    expect(toolRowCopyTargets({ ...command, output: "hello" })).toEqual({
+      command: "printf 'hello'",
+      output: true,
+    });
+  });
+
+  it("offers no copy targets without a copyable command, even when output exists", () => {
+    expect(toolRowCopyTargets({ ...command, input: " \n", output: "hello" })).toEqual({
+      command: null,
+      output: false,
+    });
   });
 
   it("offers output when it is omitted from the timeline or still streaming", () => {
@@ -33,7 +48,7 @@ describe("tool row copy targets", () => {
     expect(toolRowCopyTargets({ ...command, status: "running" }).output).toBe(true);
   });
 
-  it("offers output alone for non-command tools", () => {
+  it("offers no copy targets for non-command tools", () => {
     expect(
       toolRowCopyTargets({
         ...command,
@@ -42,26 +57,35 @@ describe("tool row copy targets", () => {
         input: {},
         outputOmitted: true,
       }),
-    ).toEqual({ command: null, output: true });
+    ).toEqual({ command: null, output: false });
+    expect(
+      toolRowCopyTargets({
+        ...command,
+        type: "dynamic_tool",
+        toolName: "Read",
+        input: {},
+        output: "file contents",
+      }),
+    ).toEqual({ command: null, output: false });
   });
 });
 
 describe("search tool copy targets", () => {
-  it("offers search results as output", () => {
+  it("offers no copy targets for search results", () => {
     expect(
       toolRowCopyTargets({
         ...command,
         type: "file_search",
         results: [{ fileName: "src/main.ts", line: 3, preview: "match" }],
-      }).output,
-    ).toBe(true);
+      }),
+    ).toEqual({ command: null, output: false });
     expect(
       toolRowCopyTargets({
         ...command,
         type: "web_search",
         results: [{ title: "Result", url: "https://example.com" }],
-      }).output,
-    ).toBe(true);
+      }),
+    ).toEqual({ command: null, output: false });
   });
 });
 

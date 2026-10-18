@@ -35,7 +35,7 @@ export function ToolRowCopyButton(props: {
     onError: reportCopyError,
   });
   const { command, output } = toolRowCopyTargets(props.projectedItem.item);
-  if (!command && !output) return null;
+  if (!command) return null;
 
   const copyOutput = async () => {
     setLoading(true);
@@ -85,40 +85,30 @@ export function ToolRowCopyButton(props: {
       setLoading(false);
     }
   };
-  const label = isCopied
-    ? "Copied"
-    : command && output
-      ? "Copy command or output"
-      : command
-        ? "Copy command"
-        : "Copy output";
+  const label = isCopied ? "Copied" : output ? "Copy command or output" : "Copy command";
   const button = (
     <Button variant="ghost-muted" size="icon-xs" aria-label={label} disabled={loading} />
   );
   const icon = isCopied ? <CheckIcon className="size-3" /> : <CopyIcon className="size-3" />;
-  const control =
-    command && output ? (
-      <Menu>
-        <Tooltip>
-          <TooltipTrigger render={<MenuTrigger render={button} />}>{icon}</TooltipTrigger>
-          <TooltipPopup side="top">{label}</TooltipPopup>
-        </Tooltip>
-        <MenuPopup align="end">
-          <MenuItem onClick={() => copyToClipboard(command, undefined)}>Copy command</MenuItem>
-          <MenuItem onClick={() => void copyOutput()}>Copy output</MenuItem>
-        </MenuPopup>
-      </Menu>
-    ) : (
+  const control = output ? (
+    <Menu>
       <Tooltip>
-        <TooltipTrigger
-          render={button}
-          onClick={() => (command ? copyToClipboard(command, undefined) : void copyOutput())}
-        >
-          {icon}
-        </TooltipTrigger>
+        <TooltipTrigger render={<MenuTrigger render={button} />}>{icon}</TooltipTrigger>
         <TooltipPopup side="top">{label}</TooltipPopup>
       </Tooltip>
-    );
+      <MenuPopup align="end">
+        <MenuItem onClick={() => copyToClipboard(command, undefined)}>Copy command</MenuItem>
+        <MenuItem onClick={() => void copyOutput()}>Copy output</MenuItem>
+      </MenuPopup>
+    </Menu>
+  ) : (
+    <Tooltip>
+      <TooltipTrigger render={button} onClick={() => copyToClipboard(command, undefined)}>
+        {icon}
+      </TooltipTrigger>
+      <TooltipPopup side="top">{label}</TooltipPopup>
+    </Tooltip>
+  );
   return (
     <span
       className="shrink-0 opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover/timeline-row:opacity-100 has-[[data-popup-open]]:opacity-100"

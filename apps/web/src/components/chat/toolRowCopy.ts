@@ -3,10 +3,11 @@ import { turnItemOutputText } from "@t3tools/client-runtime/work-log/item-detail
 
 export function toolRowCopyTargets(item: OrchestrationV2TurnItem) {
   const command = item.type === "command_execution" ? item.input.trim() : null;
+  if (!command || item.type !== "command_execution") return { command: null, output: false };
   const output =
     Boolean(turnItemOutputText(item)?.trim()) ||
-    ((item.type === "command_execution" || item.type === "dynamic_tool") &&
-      (item.outputOmitted === true || isOrchestrationV2WorkActive(item.status)));
+    item.outputOmitted === true ||
+    isOrchestrationV2WorkActive(item.status);
   return { command, output };
 }
 

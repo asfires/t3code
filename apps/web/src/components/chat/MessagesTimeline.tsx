@@ -5558,6 +5558,7 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
           {workEntry.projectedItem && plainOutput === undefined ? (
             <V2ItemInspector
               projectedItem={workEntry.projectedItem}
+              plainCommand
               environmentId={ctx.activeThreadEnvironmentId}
               cwd={ctx.markdownCwd}
               workspaceRoot={workspaceRoot}
