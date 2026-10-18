@@ -1,19 +1,16 @@
 import { appAtomRegistry } from "./rpc/atomRegistry";
 import { environmentServerConfigsAtom } from "./state/server";
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { type EnvironmentId, type ServerSettings, type ServerConfig } from "@t3tools/contracts";
+import { type EnvironmentId, type ServerConfig } from "@t3tools/contracts";
 import { useEffect, useRef } from "react";
 import { DraftId, type DraftSessionState, useComposerDraftStore } from "./composerDraftStore";
 import {
   resolveNewThreadConfiguredState,
   resolveProjectSettings,
-  resolveProviderNewThreadDefaults,
 } from "@t3tools/shared/projectSettings";
-import { composerDraftHasUserContent } from "./composerDraftStore";
 import { readProject, readThreadShell, useServerConfigs } from "./state/entities";
 
 export interface DraftDefaultsInputSnapshot {
-  readonly previousSettings: ReadonlyMap<EnvironmentId, ServerSettings>;
   readonly settingsByEnvironment: ReadonlyMap<EnvironmentId, string>;
 }
 
@@ -21,14 +18,12 @@ export function captureDraftDefaultsInputSnapshot(
   serverConfigs: ReadonlyMap<EnvironmentId, Pick<ServerConfig, "settings">>,
 ): DraftDefaultsInputSnapshot {
   return {
-    previousSettings: new Map(Array.from(serverConfigs, ([id, config]) => [id, config.settings])),
     settingsByEnvironment: new Map(
       Array.from(serverConfigs, ([environmentId, config]) => [
         environmentId,
         JSON.stringify({
           defaultModelSelection: config.settings.defaultModelSelection,
           defaultRuntimeMode: config.settings.defaultRuntimeMode,
-          projectSettingsOverrides: config.settings.projectSettingsOverrides,
           providerNewThreadDefaults: config.settings.providerNewThreadDefaults,
         }),
       ]),
@@ -78,15 +73,6 @@ export function syncDraftDefaultsForChangedInputs(input: {
     if (!inputsChanged || !isUnstartedDraft(session)) {
       continue;
     }
-    const composer = currentStore.getComposerDraft(DraftId.make(draftKey));
-    if (
-      composerDraftHasUserContent(composer) ||
-      (composer?.prompt.length ?? 0) > 0 ||
-      composer?.modelSelectionExplicit ||
-      composer?.runtimeMode != null
-    ) {
-      continue;
-    }
     if (input.hasStartedSession?.(session.environmentId, session.threadId) === true) {
       continue;
     }
@@ -107,51 +93,13 @@ export function syncDraftDefaultsForChangedInputs(input: {
       session.projectId,
       project,
     );
-    const previousSettings = input.previous.previousSettings.get(session.environmentId)!;
-    const previousProjectSettings = resolveProjectSettings(
-      previousSettings,
-      session.projectId,
-      project,
-    );
-    const modelDefaultChanged =
-      JSON.stringify(previousProjectSettings.settings.defaultModelSelection) !==
-      JSON.stringify(projectSettings.settings.defaultModelSelection);
-    const currentSelection = composer?.activeProvider
-      ? composer.modelSelectionByProvider[composer.activeProvider]
-      : null;
-    if (!modelDefaultChanged && currentSelection) {
-      const previousDefaults = resolveProviderNewThreadDefaults({
-        projectSettings: previousProjectSettings,
-        modelSelection: currentSelection,
-        providers: serverConfig.providers,
-        lastUsedOptions:
-          latestStore.stickyModelSelectionByProvider[currentSelection.instanceId]?.options,
-      });
-      const nextDefaults = resolveProviderNewThreadDefaults({
-        projectSettings,
-        modelSelection: currentSelection,
-        providers: serverConfig.providers,
-        lastUsedOptions:
-          latestStore.stickyModelSelectionByProvider[currentSelection.instanceId]?.options,
-      });
-      if (JSON.stringify(previousDefaults) === JSON.stringify(nextDefaults)) continue;
-    }
-    const resolved =
-      !modelDefaultChanged && currentSelection
-        ? resolveProviderNewThreadDefaults({
-            projectSettings,
-            modelSelection: currentSelection,
-            providers: serverConfig.providers,
-            lastUsedOptions:
-              latestStore.stickyModelSelectionByProvider[currentSelection.instanceId]?.options,
-          })
-        : resolveNewThreadConfiguredState({
-            projectSettings,
-            carryModel: modelDefaultChanged ? null : currentSelection,
-            stickyModel: stickySelection,
-            stickySelections: latestStore.stickyModelSelectionByProvider,
-            providers: serverConfig.providers,
-          });
+    const resolved = resolveNewThreadConfiguredState({
+      projectSettings,
+      carryModel: null,
+      stickyModel: stickySelection,
+      stickySelections: latestStore.stickyModelSelectionByProvider,
+      providers: serverConfig.providers,
+    });
     const draftId = DraftId.make(draftKey);
     latestStore.setDraftThreadContext(draftId, { runtimeMode: resolved.runtimeMode });
     if (
@@ -167,6 +115,7 @@ export function syncDraftDefaultsForChangedInputs(input: {
     if (resolved.modelSelection) {
       latestStore.setModelSelection(draftId, resolved.modelSelection, { replaceOptions: true });
     }
+    latestStore.setRuntimeMode(draftId, resolved.runtimeMode);
     reseededCount += 1;
   }
 

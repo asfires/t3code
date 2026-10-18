@@ -57,7 +57,7 @@ const provider: ServerProvider = {
 function makeConfig(input: {
   model: "old-model" | "new-model" | null;
   effort: "low" | "high";
-  runtimeMode: "approval-required" | "full-access";
+  runtimeMode: "approval-required" | "auto";
 }) {
   return {
     providers: [provider],
@@ -84,10 +84,10 @@ function resetStore() {
   });
 }
 
-function createDraftWithModel(name: string) {
+function createDraftWithModel(name: string, ref = projectRef) {
   const draftId = DraftId.make(name);
   const store = useComposerDraftStore.getState();
-  store.setLogicalProjectDraftThreadId(scopedProjectKey(projectRef), projectRef, draftId, {
+  store.setLogicalProjectDraftThreadId(scopedProjectKey(ref), ref, draftId, {
     threadId: ThreadId.make(`${name}-thread`),
   });
   store.setModelSelection(
@@ -116,7 +116,7 @@ function syncAfterConfigChange(
 const previousConfig = makeConfig({
   model: "old-model",
   effort: "low",
-  runtimeMode: "full-access",
+  runtimeMode: "auto",
 });
 const currentConfig = makeConfig({
   model: "new-model",
@@ -147,6 +147,7 @@ describe("draft defaults sync", () => {
     );
     expect(useComposerDraftStore.getState().getComposerDraft(draftId)).toMatchObject({
       activeProvider: instanceId,
+      runtimeMode: "approval-required",
       modelSelectionByProvider: {
         [instanceId]: {
           instanceId,
@@ -157,15 +158,16 @@ describe("draft defaults sync", () => {
     });
   });
 
-  it("preserves a draft with a typed prompt", () => {
+  it("re-seeds a draft with a typed prompt without changing its content", () => {
     const draftId = createDraftWithModel("prompt-draft");
     useComposerDraftStore.getState().setPrompt(draftId, "keep this prompt");
 
-    expect(syncAfterConfigChange(previousConfig, currentConfig)).toBe(0);
+    expect(syncAfterConfigChange(previousConfig, currentConfig)).toBe(1);
     expect(useComposerDraftStore.getState().getComposerDraft(draftId)).toMatchObject({
       prompt: "keep this prompt",
+      runtimeMode: "approval-required",
       modelSelectionByProvider: {
-        [instanceId]: { model: "old-model" },
+        [instanceId]: { model: "new-model" },
       },
     });
   });
@@ -216,24 +218,40 @@ describe("draft defaults sync", () => {
   });
 });
 
-it("preserves explicit model and permission choices", () => {
-  for (const choice of ["model", "permission"] as const) {
-    resetStore();
-    const draftId = createDraftWithModel(choice);
-    const store = useComposerDraftStore.getState();
-    if (choice === "model")
-      store.setModelSelection(draftId, createModelSelection(instanceId, "old-model"), {
-        explicit: true,
-      });
-    else store.setRuntimeMode(draftId, "auto-accept-edits");
-    expect(syncAfterConfigChange(previousConfig, currentConfig)).toBe(0);
+it.each(["model", "traits", "permission"] as const)("re-seeds explicit %s choices", (choice) => {
+  resetStore();
+  const draftId = createDraftWithModel(choice);
+  const store = useComposerDraftStore.getState();
+  if (choice === "model") {
+    store.setModelSelection(draftId, createModelSelection(instanceId, "old-model"), {
+      explicit: true,
+    });
+  } else if (choice === "traits") {
+    store.setProviderModelOptions(draftId, provider.driver, [
+      { id: "reasoningEffort", value: "low" },
+    ]);
+  } else {
+    store.setRuntimeMode(draftId, "auto-accept-edits");
   }
+  expect(syncAfterConfigChange(previousConfig, currentConfig)).toBe(1);
+  expect(useComposerDraftStore.getState().getComposerDraft(draftId)).toMatchObject({
+    runtimeMode: "approval-required",
+    modelSelectionByProvider: {
+      [instanceId]: {
+        model: "new-model",
+        options: [{ id: "reasoningEffort", value: "high" }],
+      },
+    },
+  });
 });
 
-it("keeps the draft's provider model when only traits change", () => {
+it("re-seeds the model as well when only traits change", () => {
   resetStore();
   const draftId = createDraftWithModel("traits-only");
-  const next = makeConfig({ model: "old-model", effort: "high", runtimeMode: "approval-required" });
+  useComposerDraftStore
+    .getState()
+    .setModelSelection(draftId, createModelSelection(instanceId, "new-model"), { explicit: true });
+  const next = makeConfig({ model: "old-model", effort: "high", runtimeMode: "auto" });
   expect(syncAfterConfigChange(previousConfig, next)).toBe(1);
   expect(
     useComposerDraftStore.getState().getComposerDraft(draftId)?.modelSelectionByProvider[
@@ -242,7 +260,7 @@ it("keeps the draft's provider model when only traits change", () => {
   ).toMatchObject({ model: "old-model", options: [{ id: "reasoningEffort", value: "high" }] });
 });
 
-it("preserves attachments and their draft choices", () => {
+it("re-seeds a draft without changing its attachments", () => {
   resetStore();
   const draftId = createDraftWithModel("attachment");
   useComposerDraftStore.getState().addImage(draftId, {
@@ -254,11 +272,18 @@ it("preserves attachments and their draft choices", () => {
     previewUrl: "blob:test-image",
     file: new File(["a"], "image.png", { type: "image/png" }),
   });
-  expect(syncAfterConfigChange(previousConfig, currentConfig)).toBe(0);
-  expect(useComposerDraftStore.getState().getComposerDraft(draftId)?.images).toHaveLength(1);
+  const images = useComposerDraftStore.getState().getComposerDraft(draftId)?.images;
+  expect(syncAfterConfigChange(previousConfig, currentConfig)).toBe(1);
+  expect(useComposerDraftStore.getState().getComposerDraft(draftId)).toMatchObject({
+    images,
+    runtimeMode: "approval-required",
+    modelSelectionByProvider: {
+      [instanceId]: { model: "new-model" },
+    },
+  });
 });
 
-it("ignores another provider's defaults", () => {
+it("re-seeds even when only another provider's defaults change", () => {
   resetStore();
   const draftId = createDraftWithModel("other-provider");
   const next = {
@@ -271,7 +296,7 @@ it("ignores another provider's defaults", () => {
       },
     },
   };
-  expect(syncAfterConfigChange(previousConfig, next)).toBe(0);
+  expect(syncAfterConfigChange(previousConfig, next)).toBe(1);
   expect(
     useComposerDraftStore.getState().getComposerDraft(draftId)?.modelSelectionByProvider[instanceId]
       ?.model,
@@ -313,11 +338,110 @@ it("returns to the last-used model when the fixed model is reset", () => {
   expect(
     syncAfterConfigChange(
       previousConfig,
-      makeConfig({ model: null, effort: "high", runtimeMode: "full-access" }),
+      makeConfig({ model: null, effort: "high", runtimeMode: "auto" }),
     ),
   ).toBe(1);
   expect(
     useComposerDraftStore.getState().getComposerDraft(draftId)?.modelSelectionByProvider[instanceId]
       ?.model,
   ).toBe("new-model");
+});
+
+it("re-seeds when only the global model changes", () => {
+  resetStore();
+  const draftId = createDraftWithModel("global-model");
+  const next = {
+    ...previousConfig,
+    settings: {
+      ...previousConfig.settings,
+      defaultModelSelection: createModelSelection(instanceId, "new-model"),
+    },
+  };
+  expect(syncAfterConfigChange(previousConfig, next)).toBe(1);
+  expect(
+    useComposerDraftStore.getState().getComposerDraft(draftId)?.modelSelectionByProvider[instanceId]
+      ?.model,
+  ).toBe("new-model");
+});
+
+it("follows successive global runtime changes and falls back to last-used traits", () => {
+  resetStore();
+  const draftId = createDraftWithModel("global-runtime");
+  const options = [{ id: "reasoningEffort", value: "high" }];
+  useComposerDraftStore
+    .getState()
+    .setStickyModelSelection(createModelSelection(instanceId, "old-model", options));
+  const previous = {
+    ...previousConfig,
+    settings: {
+      ...previousConfig.settings,
+      providerNewThreadDefaults: {},
+      defaultRuntimeMode: "auto" as const,
+    },
+  };
+  const next = {
+    ...previous,
+    settings: { ...previous.settings, defaultRuntimeMode: "approval-required" as const },
+  };
+
+  expect(syncAfterConfigChange(previous, next)).toBe(1);
+  expect(useComposerDraftStore.getState().getComposerDraft(draftId)).toMatchObject({
+    runtimeMode: "approval-required",
+    modelSelectionByProvider: { [instanceId]: { options } },
+  });
+  expect(syncAfterConfigChange(next, previous)).toBe(1);
+  expect(useComposerDraftStore.getState().getComposerDraft(draftId)?.runtimeMode).toBe("auto");
+  expect(useComposerDraftStore.getState().getDraftSession(draftId)?.runtimeMode).toBe("auto");
+});
+
+it("replaces stale draft traits when resolved defaults have no options", () => {
+  resetStore();
+  const draftId = createDraftWithModel("clear-traits");
+  const next = {
+    ...currentConfig,
+    settings: { ...currentConfig.settings, providerNewThreadDefaults: {} },
+  };
+  expect(syncAfterConfigChange(previousConfig, next)).toBe(1);
+  expect(
+    useComposerDraftStore.getState().getComposerDraft(draftId)?.modelSelectionByProvider[
+      instanceId
+    ],
+  ).toEqual(createModelSelection(instanceId, "new-model"));
+});
+
+it("re-seeds every unsent draft only in the changed environment", () => {
+  resetStore();
+  const first = createDraftWithModel("first");
+  useComposerDraftStore.getState().setPrompt(first, "keep this draft");
+  const second = createDraftWithModel("second");
+  const otherEnvironmentId = EnvironmentId.make("other-environment");
+  const other = createDraftWithModel("other", scopeProjectRef(otherEnvironmentId, projectId));
+  const previous = new Map([
+    [environmentId, previousConfig],
+    [otherEnvironmentId, previousConfig],
+  ]);
+  const current = new Map([
+    [environmentId, currentConfig],
+    [otherEnvironmentId, previousConfig],
+  ]);
+  expect(
+    syncDraftDefaultsForChangedInputs({
+      previous: captureDraftDefaultsInputSnapshot(previous),
+      current: captureDraftDefaultsInputSnapshot(current),
+      serverConfigs: current,
+    }),
+  ).toBe(2);
+  for (const draftId of [first, second]) {
+    expect(useComposerDraftStore.getState().getComposerDraft(draftId)).toMatchObject({
+      runtimeMode: "approval-required",
+      modelSelectionByProvider: { [instanceId]: { model: "new-model" } },
+    });
+    expect(useComposerDraftStore.getState().getDraftSession(draftId)?.runtimeMode).toBe(
+      "approval-required",
+    );
+  }
+  expect(
+    useComposerDraftStore.getState().getComposerDraft(other)?.modelSelectionByProvider[instanceId]
+      ?.model,
+  ).toBe("old-model");
 });
