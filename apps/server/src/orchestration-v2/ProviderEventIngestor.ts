@@ -594,6 +594,18 @@ export const layer: Layer.Layer<
                 nodeId: input.event.providerTurn.nodeId,
               }),
             ];
+          case "prompt_suggestion.updated": {
+            const suggestedPrompt = input.event.suggestedPrompt.trim();
+            if (!suggestedPrompt) return [];
+            return [
+              yield* makeDomainEvent(input, {
+                type: "run.prompt-suggestion-updated",
+                threadId: input.event.threadId,
+                runId: input.event.runId,
+                payload: { runId: input.event.runId, suggestedPrompt },
+              }),
+            ];
+          }
           case "node.updated":
             // Adapters send an unchanged node again with each text delta. Compare with the
             // stored node, not the last one sent, because the server also writes nodes.

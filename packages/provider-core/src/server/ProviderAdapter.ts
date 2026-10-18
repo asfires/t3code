@@ -100,6 +100,14 @@ export const ProviderAdapterV2Event = Schema.Union([
     providerTurn: OrchestrationV2ProviderTurn,
   }),
   Schema.Struct({
+    type: Schema.Literal("prompt_suggestion.updated"),
+    driver: ProviderDriverKind,
+    threadId: ThreadId,
+    runId: RunId,
+    providerTurnId: ProviderTurnId,
+    suggestedPrompt: Schema.String,
+  }),
+  Schema.Struct({
     type: Schema.Literal("node.updated"),
     driver: ProviderDriverKind,
     node: OrchestrationV2ExecutionNode,

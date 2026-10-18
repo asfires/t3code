@@ -649,6 +649,15 @@ export const ClaudeSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    promptSuggestions: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(true)),
+      Schema.annotateKey({
+        title: "Prompt suggestions",
+        description:
+          "Let Claude suggest a likely follow-up after each turn. Press Tab in the composer to use it.",
+        providerSettingsForm: { control: "switch" },
+      }),
+    ),
     autoCompactWindow: TrimmedString.check(
       Schema.isPattern(CLAUDE_AUTO_COMPACT_WINDOW_PATTERN),
     ).pipe(
@@ -665,7 +674,7 @@ export const ClaudeSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["binaryPath", "homePath", "autoCompactWindow", "launchArgs"],
+    order: ["binaryPath", "homePath", "autoCompactWindow", "launchArgs", "promptSuggestions"],
   },
 );
 export type ClaudeSettings = typeof ClaudeSettings.Type;

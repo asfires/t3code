@@ -1952,11 +1952,12 @@ export const layerWithOptions = (
               ),
               Effect.andThen(
                 Effect.gen(function* () {
-                  // Some providers can block before a run subscriber exists
-                  // (project trust, login, or session-switch hooks). Persist
-                  // their runless request artifacts directly so the normal T3
-                  // request UI can answer them and unblock session setup.
-                  const threadId = sessionScopedRuntimeRequestThreadId(event);
+                  // Session requests can precede a run subscription; prompt suggestions
+                  // can follow it. Persist both here so neither depends on a run subscriber.
+                  const threadId =
+                    event.type === "prompt_suggestion.updated"
+                      ? event.threadId
+                      : sessionScopedRuntimeRequestThreadId(event);
                   if (threadId !== undefined) {
                     yield* Effect.gen(function* () {
                       const current = (yield* Ref.get(sessions)).get(

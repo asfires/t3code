@@ -26,6 +26,20 @@ export function formatAssistantCitationForComposer(citation: AssistantCitation, 
   return `${serializeAssistantCitation(withAssistantCitationComment(citation, comment))} `;
 }
 
+export function shouldAcceptPromptSuggestionOnTab(input: {
+  key: string;
+  shiftKey: boolean;
+  prompt: string;
+  suggestedPrompt: string | null;
+}): boolean {
+  return (
+    input.key === "Tab" &&
+    !input.shiftKey &&
+    input.prompt.length === 0 &&
+    input.suggestedPrompt !== null
+  );
+}
+
 function composerRequiresModifier(
   sendShortcut: ClientSettings["sendShortcut"] | undefined,
   prompt: string,

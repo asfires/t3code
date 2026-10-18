@@ -9,6 +9,26 @@ import {
 } from "./ProviderSettingsForm";
 
 describe("ProviderSettingsForm helpers", () => {
+  it("shows Claude prompt suggestions last as an on-by-default switch", () => {
+    const claude = providerClients.get(ProviderDriverKind.make("claudeAgent"));
+    expect(claude).toBeDefined();
+    const fields = deriveProviderSettingsFields(claude!);
+    expect(fields.map((field) => field.key)).toEqual([
+      "binaryPath",
+      "homePath",
+      "autoCompactWindow",
+      "launchArgs",
+      "promptSuggestions",
+    ]);
+    expect(fields.at(-1)).toMatchObject({
+      label: "Prompt suggestions",
+      description:
+        "Let Claude suggest a likely follow-up after each turn. Press Tab in the composer to use it.",
+      control: "switch",
+      defaultBooleanValue: true,
+    });
+  });
+
   it("derives visible provider config fields from the client definition schema", () => {
     const codex = providerClients.get(ProviderDriverKind.make("codex"));
 
@@ -117,6 +137,7 @@ describe("ProviderSettingsForm helpers", () => {
       "homePath",
       "autoCompactWindow",
       "launchArgs",
+      "promptSuggestions",
     ]);
   });
 
