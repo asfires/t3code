@@ -25,6 +25,10 @@ const DEFINITIONS = [
     capabilities: { details: "popover", expanded: "none", defaultDraftView: "compact" },
   },
   {
+    kind: "pasted-text",
+    capabilities: { details: "popover", expanded: "none", defaultDraftView: "compact" },
+  },
+  {
     kind: "element",
     capabilities: { details: "popover", expanded: "none", defaultDraftView: "compact" },
   },
