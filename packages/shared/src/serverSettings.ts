@@ -509,6 +509,9 @@ export function applyServerSettingsPatch(
     ...(backgroundActivity === undefined && backgroundActivityPatch !== undefined
       ? { backgroundActivity: backgroundActivityPatch }
       : {}),
+    ...(patch.providerNewThreadDefaults !== undefined
+      ? { providerNewThreadDefaults: patch.providerNewThreadDefaults }
+      : {}),
     ...(patch.providerInstances !== undefined
       ? { providerInstances: patch.providerInstances }
       : {}),

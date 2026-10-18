@@ -113,6 +113,11 @@ vi.mock("@t3tools/contracts", () => ({
   DEFAULT_SERVER_SETTINGS: {},
 }));
 vi.mock("@t3tools/shared/projectSettings", () => ({
+  resolveNewThreadConfiguredState: ({
+    projectSettings,
+  }: {
+    projectSettings: { settings: { defaultRuntimeMode: RuntimeMode } };
+  }) => ({ modelSelection: null, runtimeMode: projectSettings.settings.defaultRuntimeMode }),
   resolveProjectSettings: (
     settings: Record<string, unknown>,
     _projectId: unknown,

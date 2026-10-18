@@ -585,3 +585,12 @@ describe("settings sidebar scope", () => {
     expect(isSettingsOverviewVisible({ project: "project", checkout: "checkout" })).toBe(true);
   });
 });
+
+it.each(["provider new thread defaults", "traits effort", "permission runtime"])(
+  "finds provider defaults for %s",
+  (query) => {
+    expect(searchSettings(query)).toContainEqual(
+      expect.objectContaining({ id: "provider-new-thread-defaults" }),
+    );
+  },
+);

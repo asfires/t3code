@@ -1203,3 +1203,50 @@ describe("server model preferences", () => {
     });
   });
 });
+
+describe("ServerSettings new-thread defaults", () => {
+  it("decodes legacy settings with last-used model and no provider defaults", () => {
+    const decoded = decodeServerSettings({});
+
+    expect(decoded.defaultModelSelection).toBeNull();
+    expect(decoded.providerNewThreadDefaults).toEqual({});
+  });
+
+  it("round-trips configured model, options, and runtime mode through patches", () => {
+    const patch = decodeServerSettingsPatch({
+      defaultModelSelection: { instanceId: "codex_personal", model: "gpt-5.6-sol" },
+      providerNewThreadDefaults: {
+        codex_personal: {
+          modelOptions: [
+            { id: "reasoningEffort", value: "high" },
+            { id: "fastMode", value: true },
+          ],
+          runtimeMode: "auto-accept-edits",
+        },
+      },
+    });
+
+    expect(patch).toEqual({
+      defaultModelSelection: { instanceId: "codex_personal", model: "gpt-5.6-sol" },
+      providerNewThreadDefaults: {
+        codex_personal: {
+          modelOptions: [
+            { id: "reasoningEffort", value: "high" },
+            { id: "fastMode", value: true },
+          ],
+          runtimeMode: "auto-accept-edits",
+        },
+      },
+    });
+    const decoded = decodeServerSettings({
+      defaultModelSelection: patch.defaultModelSelection,
+      providerNewThreadDefaults: patch.providerNewThreadDefaults,
+    });
+    expect(encodeServerSettings(decoded).defaultModelSelection).toEqual(
+      patch.defaultModelSelection,
+    );
+    expect(encodeServerSettings(decoded).providerNewThreadDefaults).toEqual(
+      patch.providerNewThreadDefaults,
+    );
+  });
+});

@@ -1,3 +1,4 @@
+import { resolveProviderNewThreadDefaults } from "@t3tools/shared/projectSettings";
 import * as Dialog from "../../components/ui/Dialog";
 import { resolveFilesystemReadAccess } from "@t3tools/client-runtime/state/filesystem";
 import { useEnvironmentPresentation } from "../../state/presentation";
@@ -530,11 +531,6 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   const draftStartFromOrigin = selectedProjectDraft.workspaceSelection?.startFromOrigin;
   const startFromOrigin =
     draftStartFromOrigin ?? projectSettings.settings.newWorktreesStartFromOrigin;
-  const defaultRuntimeMode = editingPendingTask
-    ? (editingPendingTask.runtimeMode ?? DEFAULT_RUNTIME_MODE)
-    : projectSettings.settings.defaultRuntimeMode;
-  const runtimeMode = selectedProjectDraft.runtimeMode ?? defaultRuntimeMode;
-
   // Antigravity keeps unavailable selections so sign-out or a catalog change
   // cannot switch the user's model.
   const draftModelSelection = resolveSelectableModelSelection(
@@ -575,7 +571,19 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     projectDefaultSelection: projectDefaultModelSelection,
     stickySelection: stickyModelSelection,
     modelOptions,
+    projectSettings,
+    providers: selectedEnvironmentServerConfig?.providers ?? [],
   });
+  const defaultRuntimeMode = editingPendingTask
+    ? (editingPendingTask.runtimeMode ?? DEFAULT_RUNTIME_MODE)
+    : selectedModel
+      ? resolveProviderNewThreadDefaults({
+          projectSettings,
+          modelSelection: selectedModel,
+          providers: selectedEnvironmentServerConfig?.providers ?? [],
+        }).runtimeMode
+      : projectSettings.settings.defaultRuntimeMode;
+  const runtimeMode = selectedProjectDraft.runtimeMode ?? defaultRuntimeMode;
   const selectedModelKey = selectedModel
     ? `${selectedModel.instanceId}:${selectedModel.model}`
     : null;
@@ -610,21 +618,44 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       if (!option) {
         return;
       }
-      const selection = withRememberedModelOptions(
-        options ? { ...option.selection, options } : option.selection,
-      );
+      const remembered = withRememberedModelOptions(option.selection);
+      const defaults = resolveProviderNewThreadDefaults({
+        projectSettings,
+        modelSelection: option.selection,
+        providers: selectedEnvironmentServerConfig?.providers ?? [],
+        lastUsedOptions: remembered.options,
+      });
+      const existingOptions =
+        options ??
+        (selectedProjectDraft.modelSelection?.instanceId === option.selection.instanceId
+          ? selectedProjectDraft.modelSelection.options
+          : undefined);
+      const selection =
+        existingOptions !== undefined
+          ? { ...option.selection, options: existingOptions }
+          : defaults.modelSelection;
       const provider = selectedEnvironmentServerConfig?.providers.find(
         (candidate) => candidate.instanceId === selection.instanceId,
       );
       updateComposerDraftSettings(selectedProjectDraftKey, {
         modelSelection: selection,
+        runtimeMode:
+          selectedModel?.instanceId === selection.instanceId ? runtimeMode : defaults.runtimeMode,
         ...(provider?.showInteractionModeToggle === false
           ? { interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE }
           : {}),
       });
       setStickyComposerModelSelection(selection);
     },
-    [modelOptions, selectedEnvironmentServerConfig, selectedProjectDraftKey],
+    [
+      modelOptions,
+      selectedEnvironmentServerConfig,
+      selectedProjectDraftKey,
+      projectSettings,
+      selectedProjectDraft.modelSelection,
+      selectedModel?.instanceId,
+      runtimeMode,
+    ],
   );
   const setSelectedModelOptions = useCallback(
     (options: ReadonlyArray<ProviderOptionSelection> | undefined) => {
@@ -640,30 +671,51 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
           };
       updateComposerDraftSettings(selectedProjectDraftKey, {
         modelSelection: nextSelection,
+        runtimeMode,
       });
       setStickyComposerModelSelection(nextSelection);
     },
-    [selectedModel, selectedProjectDraftKey],
+    [selectedModel, selectedProjectDraftKey, runtimeMode],
   );
 
   const providerGroups = useMemo(() => groupByProvider(modelOptions), [modelOptions]);
+  const preserveDraftChoices = useCallback(() => {
+    if (
+      !selectedProjectDraftKey ||
+      !selectedModel ||
+      (selectedProjectDraft.modelSelection && selectedProjectDraft.runtimeMode !== undefined)
+    )
+      return;
+    updateComposerDraftSettings(selectedProjectDraftKey, {
+      modelSelection: selectedModel,
+      runtimeMode,
+    });
+  }, [
+    selectedProjectDraftKey,
+    selectedModel,
+    runtimeMode,
+    selectedProjectDraft.modelSelection,
+    selectedProjectDraft.runtimeMode,
+  ]);
   const setPrompt = useCallback(
     (value: string) => {
       if (!selectedProjectDraftKey) {
         return;
       }
+      if (value.length > 0) preserveDraftChoices();
       setComposerDraftText(selectedProjectDraftKey, value);
     },
-    [selectedProjectDraftKey],
+    [selectedProjectDraftKey, preserveDraftChoices],
   );
   const replaceAttachments = useCallback(
     (nextAttachments: ReadonlyArray<DraftComposerAttachment>) => {
       if (!selectedProjectDraftKey) {
         return;
       }
+      if (nextAttachments.length > 0) preserveDraftChoices();
       replaceComposerDraftAttachments(selectedProjectDraftKey, nextAttachments);
     },
-    [selectedProjectDraftKey],
+    [selectedProjectDraftKey, preserveDraftChoices],
   );
   const appendAttachments = useCallback(
     (
@@ -673,12 +725,13 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       if (!selectedProjectDraftKey) {
         return 0;
       }
+      if (nextAttachments.length > 0) preserveDraftChoices();
       return appendComposerDraftAttachments(selectedProjectDraftKey, nextAttachments, {
         appendReference: true,
         insertion,
       });
     },
-    [selectedProjectDraftKey],
+    [selectedProjectDraftKey, preserveDraftChoices],
   );
   const removeAttachment = useCallback(
     (imageId: string) => {
@@ -1000,10 +1053,13 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   const setRuntimeMode = useCallback(
     (value: RuntimeMode) => {
       if (selectedProjectDraftKey) {
-        updateComposerDraftSettings(selectedProjectDraftKey, { runtimeMode: value });
+        updateComposerDraftSettings(selectedProjectDraftKey, {
+          runtimeMode: value,
+          ...(selectedModel ? { modelSelection: selectedModel } : {}),
+        });
       }
     },
-    [selectedProjectDraftKey],
+    [selectedProjectDraftKey, selectedModel],
   );
   const setInteractionMode = useCallback(
     (value: ProviderInteractionMode) => {

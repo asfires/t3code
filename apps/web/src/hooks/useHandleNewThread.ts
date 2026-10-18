@@ -20,7 +20,11 @@ import {
   getProjectOrderKey,
   selectProjectGroupingSettings,
 } from "../logicalProject";
-import { resolveNewThreadEnvMode, resolveProjectSettings } from "@t3tools/shared/projectSettings";
+import {
+  resolveNewThreadConfiguredState,
+  resolveNewThreadEnvMode,
+  resolveProjectSettings,
+} from "@t3tools/shared/projectSettings";
 import {
   readProject,
   readProjects,
@@ -29,11 +33,7 @@ import {
   useProjects,
   useThreadShell,
 } from "../state/entities";
-import {
-  hasExplicitComposerModelSelection,
-  resolveNewDraftStartFromOrigin,
-  resolveNewThreadModelSelectionOverride,
-} from "../lib/chatThreadActions";
+import { resolveNewDraftStartFromOrigin } from "../lib/chatThreadActions";
 import { readT3ProjectFile } from "../lib/t3ProjectFileDefaults";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentServerConfigsAtom } from "../state/server";
@@ -87,10 +87,11 @@ export function useNewThreadHandler() {
       getDraftSessionByLogicalProjectKey,
       getDraftSession,
       getDraftThread,
-      applyStickyState,
       setDraftThreadContext,
       setLogicalProjectDraftThreadId,
       setModelSelection,
+      stickyActiveProvider,
+      stickyModelSelectionByProvider,
     } = useComposerDraftStore.getState();
     const requestingRouteHref = router.state.location.href;
     const routeChangedSinceRequest = () => router.state.location.href !== requestingRouteHref;
@@ -128,16 +129,16 @@ export function useNewThreadHandler() {
       project?.id ?? null,
       project,
     );
-    const projectDefaultModelSelection = projectSettings.settings.defaultModelSelection;
-    const defaultRuntimeMode = projectSettings.settings.defaultRuntimeMode;
-    const resolveModelSelectionOverride = (destinationDraftId: DraftId) =>
-      resolveNewThreadModelSelectionOverride({
-        projectDefaultSelection: projectDefaultModelSelection ?? null,
-        carrySelection: carryModelSelection,
-        carrySourceDraftId:
-          currentRouteTarget?.kind === "draft" ? currentRouteTarget.draftId : null,
-        destinationDraftId,
-      });
+    const newThreadState = resolveNewThreadConfiguredState({
+      projectSettings,
+      carryModel: carryModelSelection,
+      stickyModel: stickyActiveProvider
+        ? stickyModelSelectionByProvider[stickyActiveProvider]
+        : null,
+      stickySelections: stickyModelSelectionByProvider,
+      providers: environmentServerConfigs.get(projectRef.environmentId)?.providers ?? [],
+    });
+    const defaultRuntimeMode = newThreadState.runtimeMode;
     const resolveDefaultEnvMode = async (): Promise<DraftThreadEnvMode> => {
       const consultProjectFile =
         project !== undefined && projectSettings.settings.defaultThreadEnvMode === null;
@@ -246,17 +247,15 @@ export function useNewThreadHandler() {
           });
         }
         const storedDraft = getComposerDraft(emptyStoredDraftThread.draftId);
-        const storedDraftHasExplicitModelPick = hasExplicitComposerModelSelection(storedDraft);
-        if (!storedDraftHasExplicitModelPick) {
-          applyStickyState(emptyStoredDraftThread.draftId);
-          const modelSelectionOverride = resolveModelSelectionOverride(
-            emptyStoredDraftThread.draftId,
-          );
-          if (modelSelectionOverride) {
-            setModelSelection(emptyStoredDraftThread.draftId, modelSelectionOverride, {
+        if (!storedDraft?.modelSelectionExplicit && storedDraft?.runtimeMode == null) {
+          if (newThreadState.modelSelection) {
+            setModelSelection(emptyStoredDraftThread.draftId, newThreadState.modelSelection, {
               replaceOptions: true,
             });
           }
+          setDraftThreadContext(emptyStoredDraftThread.draftId, {
+            runtimeMode: defaultRuntimeMode,
+          });
         }
         // The workspace context must also ride along here: when projectRef
         // targets a different physical member of the logical project,
@@ -368,8 +367,7 @@ export function useNewThreadHandler() {
         runtimeMode: defaultRuntimeMode,
         ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
       });
-      applyStickyState(draftId);
-      const modelSelectionOverride = resolveModelSelectionOverride(draftId);
+      const modelSelectionOverride = newThreadState.modelSelection;
       if (modelSelectionOverride) {
         setModelSelection(draftId, modelSelectionOverride, { replaceOptions: true });
       }

@@ -920,3 +920,26 @@ describe("resolveAppModelSelectionState with the opencode plan agent", () => {
     );
   });
 });
+
+it("keeps other providers' thread options when a draft contains only one provider", () => {
+  const codex = ProviderInstanceId.make("codex");
+  const claude = ProviderInstanceId.make("claudeAgent");
+  const state = deriveEffectiveComposerModelState({
+    draft: {
+      activeProvider: codex,
+      modelSelectionByProvider: {
+        [codex]: createModelSelection(codex, "gpt-5.6-sol", [
+          { id: "reasoningEffort", value: "high" },
+        ]),
+      },
+    },
+    providers: [],
+    selectedProvider: ProviderDriverKind.make("claudeAgent"),
+    selectedInstanceId: claude,
+    threadModelSelection: createModelSelection(claude, "claude", [{ id: "effort", value: "low" }]),
+    projectModelSelection: null,
+    settings: DEFAULT_UNIFIED_SETTINGS,
+  });
+  expect(state.modelOptions?.[claude]).toEqual([{ id: "effort", value: "low" }]);
+  expect(state.modelOptions?.[codex]).toEqual([{ id: "reasoningEffort", value: "high" }]);
+});
