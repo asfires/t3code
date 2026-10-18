@@ -71,7 +71,6 @@ import {
   CheckIcon,
   CircleAlertIcon,
   CircleCheckIcon,
-  CircleDashedIcon,
   CircleDotDashedIcon,
   ClockIcon,
   FolderIcon,
@@ -843,6 +842,81 @@ function JumpHintBadge(props: { label: string }) {
     >
       {props.label}
     </span>
+  );
+}
+
+// The two status glyphs share one geometry: both fill the full 24-unit box
+// (the spinner's r=10 ring + 4-unit stroke reaches r=12; the check ring is
+// r=11 + 2-unit stroke = r=12), so at the same rendered size their outer
+// edges coincide and Working ↔ Done reads as the same mark changing state.
+// lucide's CircleCheck (r=10, edge 11) sat visibly inside the spinner.
+//
+// The spinner is Material's transform-only construction (see .working-spinner
+// in index.css): a static track ring, then two half-ring SVGs whose rotation
+// inside clipped halves makes the arc grow and reel in without animating any
+// paint property. Half ring = full circumference dash, offset by half.
+const SPINNER_RING_CIRCUMFERENCE = 2 * Math.PI * 10;
+
+function SpinnerHalfRing() {
+  return (
+    <svg aria-hidden xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+      <circle
+        cx="12"
+        cy="12"
+        r="10"
+        stroke="currentColor"
+        strokeWidth="4"
+        strokeDasharray={SPINNER_RING_CIRCUMFERENCE}
+        strokeDashoffset={SPINNER_RING_CIRCUMFERENCE / 2}
+      />
+    </svg>
+  );
+}
+
+function WorkingSpinnerIcon(props: { className?: string }) {
+  return (
+    <span aria-hidden className={cn("working-spinner", props.className)}>
+      <svg
+        className="working-spinner__track"
+        xmlns="http://www.w3.org/2000/svg"
+        fill="none"
+        viewBox="0 0 24 24"
+      >
+        <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+      </svg>
+      <span className="working-spinner__container">
+        <span className="working-spinner__layer">
+          <span className="working-spinner__clipper working-spinner__clipper--left">
+            <SpinnerHalfRing />
+          </span>
+          <span className="working-spinner__patch">
+            <SpinnerHalfRing />
+          </span>
+          <span className="working-spinner__clipper working-spinner__clipper--right">
+            <SpinnerHalfRing />
+          </span>
+        </span>
+      </span>
+    </span>
+  );
+}
+
+function DoneCircleCheckIcon(props: { className?: string }) {
+  return (
+    <svg
+      aria-hidden
+      xmlns="http://www.w3.org/2000/svg"
+      fill="none"
+      viewBox="0 0 24 24"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={props.className}
+    >
+      <circle cx="12" cy="12" r="11" />
+      <path d="m7.1 12 3.1 3.1L17 8.3" />
+    </svg>
   );
 }
 
@@ -1664,7 +1738,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       ? {
           label: thread.goal?.status === "active" ? "Goal" : "Working",
           icon: "working" as const,
-          className: "text-info",
+          className: "text-sky-600 dark:text-sky-400",
         }
       : status === "waiting"
         ? {
@@ -1882,9 +1956,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           : shouldRecede
             ? "text-sidebar-muted-foreground/75 hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
             : "bg-transparent text-sidebar-foreground hover:bg-sidebar-row-hover",
-    shouldRecede &&
-      status === "working" &&
-      "opacity-70 transition-opacity hover:opacity-100 focus-within:opacity-100 motion-reduce:transition-none",
     isFileDragOver && "ring-1 ring-inset ring-primary/70",
     isFileDragOver && !props.isActive && !isSelected && "bg-sidebar-row-hover",
     props.sortable?.isDragging &&
@@ -1948,17 +2019,26 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         aria-hidden
         className={cn(
           "min-w-0 flex-1 text-sm transition-opacity motion-reduce:transition-none",
-          shouldRecede ? "font-normal" : "font-medium",
+          // Card titles keep their weight as status changes; color alone marks receding.
+          variant === "card"
+            ? props.isActive
+              ? "font-sidebar-active"
+              : "font-medium"
+            : shouldRecede
+              ? "font-normal"
+              : "font-medium",
           variant === "card"
             ? cn(
                 "truncate",
-                shouldRecede
-                  ? "text-secondary-label"
-                  : isUnread || isWoke || status === "input"
-                    ? "text-foreground"
-                    : status === "failed"
-                      ? "text-foreground/95"
-                      : "text-foreground/90",
+                props.isActive || isUnread || isWoke
+                  ? "text-foreground"
+                  : shouldRecede
+                    ? "text-foreground/[0.67]"
+                    : status === "input"
+                      ? "text-foreground"
+                      : status === "failed"
+                        ? "text-foreground/95"
+                        : "text-foreground/90",
               )
             : cn(
                 "truncate group-focus-within/sidebar-row:text-foreground group-hover/sidebar-row:text-foreground",
@@ -2223,7 +2303,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       {...sortableRootProps}
       {...(fileDropHandlers ?? {})}
       className={cn(
-        "list-none py-0.5 [content-visibility:auto] [contain-intrinsic-size:auto_78px]",
+        "list-none py-0.5 [content-visibility:auto] [contain-intrinsic-size:auto_80px]",
         sortable?.isDragging && "relative z-20",
       )}
     >
@@ -2247,7 +2327,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           }
         >
           {accessibleTitle}
-          <div className="relative z-10 h-[4.875rem] px-(--sidebar-row-content-inset) py-(--sidebar-content-inset)">
+          <div className="relative z-10 h-20 px-(--sidebar-row-content-inset) py-(--sidebar-content-inset)">
             <div className="flex h-5 min-w-0 items-center gap-1.5">
               {draftIndicator}
               {props.project ? (
@@ -2313,7 +2393,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                           )}
                         >
                           {topStatus.icon === "working" ? (
-                            <CircleDashedIcon aria-hidden className="size-4 shrink-0" />
+                            <WorkingSpinnerIcon className="size-3 shrink-0" />
                           ) : topStatus.icon === "waiting" ? (
                             <CircleDotDashedIcon aria-hidden className="size-4 shrink-0" />
                           ) : topStatus.icon === "input" ? (
@@ -2323,7 +2403,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                           ) : topStatus.icon === "failed" ? (
                             <CircleAlertIcon aria-hidden className="size-4 shrink-0" />
                           ) : topStatus.icon === "done" ? (
-                            <CircleCheckIcon aria-hidden className="size-4 shrink-0" />
+                            <DoneCircleCheckIcon className="size-3 shrink-0" />
                           ) : null}
                           {/* The label alone is the live region: a role="status"
                             wrapper around the ticking duration would make
@@ -2414,12 +2494,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 </span>
               ) : null}
             </div>
-            <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-secondary-label text-xs">
+            <div className="mt-1 flex min-w-0 items-center gap-1.5 text-secondary-label text-xs">
               {thread.branch ? (
                 <>
                   <ThreadWorktreeIndicator thread={thread} />
-                  <span className="flex min-w-0 flex-1 text-muted-foreground/40">
-                    <MiddleTruncate value={thread.branch} showTitle={false} />
+                  <span className="min-w-0 flex-1 truncate whitespace-nowrap font-mono text-2xs text-secondary-label/70">
+                    {thread.branch}
                   </span>
                 </>
               ) : showsScratchMachine ? (
