@@ -77,7 +77,8 @@ const isSpecialPurposeIpv4Address = (parts: readonly number[]): boolean =>
 
 export const isLocalLoopbackHost = (host: string): boolean => {
   const normalized = normalizeHostname(host);
-  if (normalized === "localhost" || normalized === "::1") return true;
+  if (normalized === "localhost" || normalized.endsWith(".localhost") || normalized === "::1")
+    return true;
   return parseIpv4Address(normalized)?.[0] === 127;
 };
 
