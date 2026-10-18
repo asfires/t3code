@@ -2172,7 +2172,16 @@ function claudeNativeToolOutputText(output: ClaudeNativeToolOutput): string {
   return typeof value === "string" ? value : value === undefined ? "" : jsonStringifyForTool(value);
 }
 
-function claudeCommandOutputText(output: ClaudeNativeToolOutput): string {
+// Claude substitutes these sentinels for empty command results; errors must stay verbatim.
+const EMPTY_COMMAND_OUTPUT_SENTINEL =
+  /^\((?:[^()\n]+ )?completed with no output\)$|^\(no (?:output|content)\)$/i;
+
+function claudeCommandOutputText(output: ClaudeNativeToolOutput, isError: boolean): string {
+  const text = claudeCommandOutputValue(output);
+  return !isError && EMPTY_COMMAND_OUTPUT_SENTINEL.test(text.trim()) ? "" : text;
+}
+
+function claudeCommandOutputValue(output: ClaudeNativeToolOutput): string {
   const value = claudeNativeToolOutputValue(output);
   if (typeof value === "object" && value !== null) {
     const stdout = Reflect.get(value, "stdout");
@@ -2189,7 +2198,7 @@ function claudeCommandOutputText(output: ClaudeNativeToolOutput): string {
         : "";
     }
   }
-  return claudeNativeToolOutputText(output);
+  return claudeSubagentResultText(output);
 }
 
 function claudeSubagentResultText(output: ClaudeNativeToolOutput): string {
@@ -4254,7 +4263,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           const outputValue = claudeNativeToolOutputValue(input.output);
           const outputText =
             itemType === "command_execution"
-              ? claudeCommandOutputText(input.output)
+              ? claudeCommandOutputText(input.output, input.status === "failed")
               : claudeNativeToolOutputText(input.output);
           const turnItem: OrchestrationV2TurnItem =
             itemType === "command_execution"
