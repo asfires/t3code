@@ -42,6 +42,7 @@ import {
   resolveTimelineMinimapInteractiveWidth,
   resolveTimelineMinimapNavigationInteractive,
   resolveTimelineMinimapTopPercent,
+  resolveTimelineMinimapWheelIndex,
   resolveWorkGroupScrollIndex,
   shouldFollowWorkGroupAppend,
   threadReadLabelPrefix,
@@ -54,6 +55,30 @@ import {
   workEntryIsVisibleInGroup,
 } from "./MessagesTimeline.logic";
 import type { WorkLogEntry } from "../../session-logic";
+
+describe("resolveTimelineMinimapWheelIndex", () => {
+  it.each([0.1, 1, 120, 1200])("steps once for a wheel delta of %s", (deltaY) => {
+    expect(resolveTimelineMinimapWheelIndex({ currentIndex: 2, itemCount: 5, deltaY })).toBe(3);
+    expect(
+      resolveTimelineMinimapWheelIndex({ currentIndex: 2, itemCount: 5, deltaY: -deltaY }),
+    ).toBe(1);
+  });
+
+  it("clamps at the first and last message", () => {
+    expect(resolveTimelineMinimapWheelIndex({ currentIndex: 0, itemCount: 5, deltaY: -1 })).toBe(0);
+    expect(resolveTimelineMinimapWheelIndex({ currentIndex: 4, itemCount: 5, deltaY: 1 })).toBe(4);
+  });
+
+  it.each([
+    { currentIndex: 2, itemCount: 5, deltaY: 0 },
+    { currentIndex: 2, itemCount: 0, deltaY: 1 },
+    { currentIndex: NaN, itemCount: 5, deltaY: 1 },
+    { currentIndex: 2, itemCount: 5, deltaY: Infinity },
+    { currentIndex: 2, itemCount: 5, deltaY: NaN },
+  ])("ignores invalid vertical navigation: %j", (input) => {
+    expect(resolveTimelineMinimapWheelIndex(input)).toBeNull();
+  });
+});
 
 describe("expanded tool group scrolling", () => {
   const entries = [{ id: "first" }, { id: "second" }];

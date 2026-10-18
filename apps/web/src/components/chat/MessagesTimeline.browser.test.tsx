@@ -1148,6 +1148,76 @@ describe("timeline tooltip scroll dismissal", () => {
   });
 });
 
+describe("MessagesTimeline minimap wheel", () => {
+  async function setup() {
+    const props = { ...baseProps(), liveFollowEnabled: false, onManualNavigation: vi.fn() };
+    await renderTimeline(
+      Array.from({ length: 5 }, (_, index) => [
+        message(`Prompt ${index}`, {}, `prompt-${index}`),
+        message("Long response. ".repeat(160), { role: "assistant" }, `reply-${index}`),
+      ]).flat(),
+      props,
+    );
+    container.style.height = "500px";
+    const strip = button(/^Jump to message:/);
+    await vi.waitFor(() => {
+      expect(strip.getBoundingClientRect().width).toBeGreaterThan(0);
+      const viewport = props.listRef.current?.getScrollableNode();
+      expect(viewport?.scrollHeight ?? 0).toBeGreaterThan(viewport?.clientHeight ?? 0);
+    });
+    const viewport = props.listRef.current!.getScrollableNode()!;
+    const rect = strip.getBoundingClientRect();
+    const point = { clientX: rect.left + 4, clientY: rect.top + rect.height / 2 };
+    await act(async () => {
+      strip.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, ...point }));
+    });
+    expect(strip.getAttribute("aria-label")).toBe("Jump to message: Prompt 2");
+    const forwarded: WheelEvent[] = [];
+    viewport.addEventListener("wheel", (event) => forwarded.push(event));
+    return { props, strip, viewport, point, forwarded };
+  }
+
+  async function wheel(target: Element, init: WheelEventInit) {
+    const event = new WheelEvent("wheel", { bubbles: true, cancelable: true, ...init });
+    await act(async () => target.dispatchEvent(event));
+    return event;
+  }
+
+  it("steps through messages for tiny and large deltas and stops at both ends", async () => {
+    const { props, strip, viewport, point, forwarded } = await setup();
+    const initialOffset = viewport.scrollTop;
+    expect((await wheel(strip, { ...point, deltaY: -0.1 })).defaultPrevented).toBe(true);
+    expect(strip.getAttribute("aria-label")).toBe("Jump to message: Prompt 1");
+    await vi.waitFor(() => expect(viewport.scrollTop).toBeLessThan(initialOffset));
+
+    await wheel(strip, { ...point, deltaY: -120 });
+    expect(strip.getAttribute("aria-label")).toBe("Jump to message: Prompt 0");
+    expect(props.onManualNavigation).toHaveBeenCalledTimes(2);
+    await wheel(strip, { ...point, deltaY: -120 });
+    expect(strip.getAttribute("aria-label")).toBe("Jump to message: Prompt 0");
+    expect(props.onManualNavigation).toHaveBeenCalledTimes(2);
+
+    // Trackpads can deliver several deltas before React commits the next preview.
+    await act(async () => {
+      strip.dispatchEvent(
+        new WheelEvent("wheel", { bubbles: true, cancelable: true, ...point, deltaY: 0.1 }),
+      );
+      strip.dispatchEvent(
+        new WheelEvent("wheel", { bubbles: true, cancelable: true, ...point, deltaY: 0.1 }),
+      );
+    });
+    expect(strip.getAttribute("aria-label")).toBe("Jump to message: Prompt 2");
+    await wheel(strip, { ...point, deltaY: 3, deltaMode: WheelEvent.DOM_DELTA_LINE });
+    expect(strip.getAttribute("aria-label")).toBe("Jump to message: Prompt 3");
+    await wheel(strip, { ...point, deltaY: 1, deltaMode: WheelEvent.DOM_DELTA_PAGE });
+    expect(strip.getAttribute("aria-label")).toBe("Jump to message: Prompt 4");
+    await wheel(strip, { ...point, deltaY: 1200 });
+    expect(strip.getAttribute("aria-label")).toBe("Jump to message: Prompt 4");
+    expect(props.onManualNavigation).toHaveBeenCalledTimes(6);
+    expect(forwarded).toHaveLength(0);
+  });
+});
+
 describe("MessagesTimeline scroll position", () => {
   const tall = (index: number) =>
     message(
