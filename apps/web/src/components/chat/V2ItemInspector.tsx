@@ -69,7 +69,7 @@ function SyntaxTokens({
 }
 
 const monoClassName =
-  "font-mono text-(length:--font-size-code,var(--text-2xs)) leading-relaxed whitespace-pre-wrap break-words select-text";
+  "font-mono text-(length:--font-size-tool-output,0.6875rem) leading-relaxed whitespace-pre-wrap break-words select-text";
 
 function isJsonText(text: string): boolean {
   if (!text) return false;

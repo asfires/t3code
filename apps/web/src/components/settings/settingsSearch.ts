@@ -269,6 +269,11 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["typography family size monospace code blocks diffs file previews"],
   },
   {
+    id: "tool-output-font",
+    title: "Tool output",
+    to: "/settings/appearance",
+  },
+  {
     id: "terminal-font",
     title: "Terminal font",
     to: "/settings/appearance",

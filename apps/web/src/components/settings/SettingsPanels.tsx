@@ -35,6 +35,7 @@ import {
   MAX_INTERFACE_FONT_SIZE,
   MAX_PANEL_ANIMATION_DURATION_MS,
   MAX_PROMPT_FONT_SIZE,
+  MAX_TOOL_OUTPUT_FONT_SIZE,
   MAX_SIDEBAR_AUTO_SETTLE_AFTER_DAYS,
   MAX_TERMINAL_FONT_SIZE,
   MIN_CODE_FONT_SIZE,
@@ -43,6 +44,7 @@ import {
   MIN_INTERFACE_FONT_SIZE,
   MIN_PANEL_ANIMATION_DURATION_MS,
   MIN_PROMPT_FONT_SIZE,
+  MIN_TOOL_OUTPUT_FONT_SIZE,
   MIN_SIDEBAR_AUTO_SETTLE_AFTER_DAYS,
   type ResponseStreamingMode,
   MIN_TERMINAL_FONT_SIZE,
@@ -765,6 +767,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       fontSizeInterface: DEFAULT_UNIFIED_SETTINGS.fontSizeInterface,
       fontSizePrompt: DEFAULT_UNIFIED_SETTINGS.fontSizePrompt,
       fontSizeCode: DEFAULT_UNIFIED_SETTINGS.fontSizeCode,
+      fontSizeToolOutput: DEFAULT_UNIFIED_SETTINGS.fontSizeToolOutput,
       fontSizeTerminal: DEFAULT_UNIFIED_SETTINGS.fontSizeTerminal,
       browserDefaultViewport: DEFAULT_UNIFIED_SETTINGS.browserDefaultViewport,
       browserDefaultZoomFactor: DEFAULT_UNIFIED_SETTINGS.browserDefaultZoomFactor,
@@ -1589,6 +1592,38 @@ function TerminalFontRow() {
   );
 }
 
+function ToolOutputFontRow() {
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+  return (
+    <SettingsRow
+      {...searchableSetting("tool-output-font")}
+      description="Agent command and tool call output in the work log."
+      resetAction={
+        settings.fontSizeToolOutput !== DEFAULT_UNIFIED_SETTINGS.fontSizeToolOutput ? (
+          <SettingResetButton
+            label="tool output font size"
+            onClick={() =>
+              updateSettings({
+                fontSizeToolOutput: DEFAULT_UNIFIED_SETTINGS.fontSizeToolOutput,
+              })
+            }
+          />
+        ) : null
+      }
+      control={
+        <FontSizeSelect
+          label="Tool output font size"
+          min={MIN_TOOL_OUTPUT_FONT_SIZE}
+          max={MAX_TOOL_OUTPUT_FONT_SIZE}
+          value={settings.fontSizeToolOutput}
+          onChange={(fontSizeToolOutput) => updateSettings({ fontSizeToolOutput })}
+        />
+      }
+    />
+  );
+}
+
 function FontSmoothingRow() {
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
@@ -1650,6 +1685,7 @@ function FontSettingsGroup() {
       <InterfaceFontRow />
       <PromptFontRow />
       <CodeFontRow />
+      <ToolOutputFontRow />
       <TerminalFontRow />
       <FontSmoothingRow />
     </>
@@ -1682,6 +1718,7 @@ function SimpleFontRows() {
           </>
         }
       />
+      <ToolOutputFontRow />
     </>
   );
 }
@@ -1728,6 +1765,44 @@ function TypographySection() {
       {advanced ? <FontSettingsGroup /> : <SimpleFontRows />}
       <WordWrapRow />
     </SettingsSection>
+  );
+}
+
+function FontSizeSelect({
+  label,
+  min,
+  max,
+  value,
+  onChange,
+}: {
+  label: string;
+  min: number;
+  max: number;
+  value: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <Select
+      value={String(value)}
+      onValueChange={(next) => {
+        if (typeof next !== "string") return;
+        const parsed = Number(next);
+        if (Number.isInteger(parsed) && parsed >= min && parsed <= max) {
+          onChange(parsed);
+        }
+      }}
+    >
+      <SelectTrigger size="sm" className="w-22 shrink-0" aria-label={label}>
+        <SelectValue>{value} px</SelectValue>
+      </SelectTrigger>
+      <SelectPopup align="end" alignItemWithTrigger={false}>
+        {Array.from({ length: max - min + 1 }, (_, index) => min + index).map((px) => (
+          <SelectItem hideIndicator key={px} value={String(px)}>
+            {px} px
+          </SelectItem>
+        ))}
+      </SelectPopup>
+    </Select>
   );
 }
 
@@ -1877,29 +1952,13 @@ function FontFamilySettingsRow({
   const control = (
     <div className="flex w-full items-center gap-2 sm:w-auto">
       <div className="min-w-0 flex-1 sm:w-44 sm:flex-none">{familyControl}</div>
-      <Select
-        value={String(size.value)}
-        onValueChange={(next) => {
-          if (typeof next !== "string") return;
-          const parsed = Number(next);
-          if (Number.isInteger(parsed) && parsed >= size.min && parsed <= size.max) {
-            size.onChange(parsed);
-          }
-        }}
-      >
-        <SelectTrigger size="sm" className="w-22 shrink-0" aria-label={size.label}>
-          <SelectValue>{size.value} px</SelectValue>
-        </SelectTrigger>
-        <SelectPopup align="end" alignItemWithTrigger={false}>
-          {Array.from({ length: size.max - size.min + 1 }, (_, index) => size.min + index).map(
-            (px) => (
-              <SelectItem hideIndicator key={px} value={String(px)}>
-                {px} px
-              </SelectItem>
-            ),
-          )}
-        </SelectPopup>
-      </Select>
+      <FontSizeSelect
+        label={size.label}
+        min={size.min}
+        max={size.max}
+        value={size.value}
+        onChange={size.onChange}
+      />
     </div>
   );
   return (
