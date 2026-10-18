@@ -2,6 +2,7 @@ import {
   type EnvironmentId,
   type ServerConfig,
   type ServerConfigStreamEvent,
+  type ServerLifecycleReadyPayload,
   type ServerLifecycleWelcomePayload,
   type ServerLifecycleStreamReadyEvent,
   type ServerSelfUpdateProgressEvent,
@@ -468,6 +469,23 @@ function serverConfigStateChanges(
       ),
     ),
   );
+}
+
+export function projectServerReady(
+  current: Option.Option<ServerLifecycleReadyPayload>,
+  event: {
+    readonly type: "welcome" | "ready" | "legacyThreadMigration";
+    readonly payload: unknown;
+  },
+): readonly [
+  Option.Option<ServerLifecycleReadyPayload>,
+  ReadonlyArray<ServerLifecycleReadyPayload>,
+] {
+  if (event.type !== "ready") {
+    return [current, []];
+  }
+  const ready = event.payload as ServerLifecycleReadyPayload;
+  return [Option.some(ready), [ready]];
 }
 
 export function applyServerWelcomeEvent(
@@ -1129,6 +1147,12 @@ export function createServerEnvironmentAtoms<R, E>(
     }),
     configProjection,
     welcome,
+    ready: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:server:ready",
+      tag: WS_METHODS.subscribeServerLifecycle,
+      transform: (stream) =>
+        stream.pipe(Stream.mapAccum(Option.none<ServerLifecycleReadyPayload>, projectServerReady)),
+    }),
     legacyThreadMigration: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:legacy-thread-migration",
       tag: WS_METHODS.subscribeServerLifecycle,
