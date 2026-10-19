@@ -281,6 +281,7 @@ import {
   formatUpcomingTimestamp,
 } from "../../timestampFormat";
 import { FetchedToolOutput, V2ItemInspector } from "./V2ItemInspector";
+import { ToolRowCopyButton } from "./ToolRowCopyButton";
 import { useV2ItemSupport } from "../../state/v2ItemSupport";
 import { Collapsible, CollapsibleTrigger, CollapsiblePanel } from "../ui/collapsible";
 import {
@@ -5505,7 +5506,21 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
           !toolIconAcceptsTint(entryToolIcon) ? (
             <XIcon aria-hidden className={cn("size-3 shrink-0", failedToolIconClassName)} />
           ) : null}
-          <TimelineRowTimestamp createdAt={workEntry.createdAt} timestampFormat={timestampFormat} />
+          <TimelineRowTimestamp
+            createdAt={workEntry.createdAt}
+            timestampFormat={timestampFormat}
+            // The timestamp takes up space only while the row is hovered, so it
+            // sits before the copy button, which would otherwise shift under the
+            // pointer. The copy menu's backdrop takes hover away from the row, so
+            // an open popup keeps the timestamp in place too.
+            className="group-has-[[data-popup-open]]/timeline-row:pointer-events-auto group-has-[[data-popup-open]]/timeline-row:static group-has-[[data-popup-open]]/timeline-row:opacity-100"
+          />
+          {workEntry.projectedItem ? (
+            <ToolRowCopyButton
+              projectedItem={workEntry.projectedItem}
+              environmentId={ctx.activeThreadEnvironmentId}
+            />
+          ) : null}
           <span
             className={cn(
               "flex size-4 shrink-0 items-center justify-center",
@@ -5551,6 +5566,7 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
           {workEntry.projectedItem && plainOutput === undefined ? (
             <V2ItemInspector
               projectedItem={workEntry.projectedItem}
+              plainCommand
               environmentId={ctx.activeThreadEnvironmentId}
               cwd={ctx.markdownCwd}
               workspaceRoot={workspaceRoot}

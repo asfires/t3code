@@ -234,6 +234,37 @@ describe("MessagesTimeline work rows", () => {
     expect(header().getAttribute("aria-expanded")).toBe("false");
   });
 
+  it("keeps the copy button in place when hovering shows the row's timestamp", async () => {
+    const item = {
+      id: "command-with-output",
+      type: "command_execution",
+      input: "pnpm lint",
+      output: "All files pass.",
+    };
+    await renderTimeline([
+      work(item.id, {
+        toolCallId: "call-with-output",
+        label: "Run lint",
+        tone: "tool",
+        itemType: item.type,
+        command: item.input,
+        toolLifecycleStatus: "completed",
+        projectedItem: v2Item(item.type, item),
+      }),
+    ]);
+    const row = container.querySelector<HTMLElement>("[aria-expanded]")!;
+    const copyButton = button("Copy command or output");
+    // Hovering can scroll the row into view, so measure from the row's own edge.
+    const distanceFromRowEnd = () =>
+      row.getBoundingClientRect().right - copyButton.getBoundingClientRect().right;
+    const restingDistance = distanceFromRowEnd();
+
+    await userEvent.hover(row);
+    await vi.waitFor(() => expect(row.matches(":hover")).toBe(true));
+
+    expect(distanceFromRowEnd()).toBe(restingDistance);
+  });
+
   it("leads an unanswered question row with the question text", async () => {
     await renderTimeline([
       work("question-work", {
