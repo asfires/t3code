@@ -33,6 +33,7 @@ import * as ServerConfig from "../config.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
@@ -144,6 +145,9 @@ function startWithMissingWorktree(
         } as never),
         layerWorktreeLocation(),
         Layer.mock(GitWorkflow.GitWorkflowService)({ pruneWorktrees, createWorktree }),
+        Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({
+          runForThread: () => Effect.succeed({ status: "no-script" }),
+        }),
         Layer.mock(ProjectService.ProjectService)({
           getById: () =>
             Effect.succeed(
@@ -606,6 +610,9 @@ function makeLocalCommandHarness(input: {
       Effect.succeed({ cwd: thread.worktreePath ?? "/tmp/native-account-command" } as never),
   );
   const createWorktree = vi.fn(() => Effect.succeed({} as never));
+  const runSetupScript = vi.fn<
+    ProjectSetupScriptRunner.ProjectSetupScriptRunner["Service"]["runForThread"]
+  >(() => Effect.succeed({ status: "no-script" }));
   const getThreadRecords = vi.fn<ProjectionStore.ProjectionStoreV2Shape["getThreadRecords"]>(() =>
     Effect.succeed(projection),
   );
@@ -634,6 +641,9 @@ function makeLocalCommandHarness(input: {
         Layer.mock(GitWorkflow.GitWorkflowService)({
           pruneWorktrees: () => Effect.void,
           createWorktree,
+        }),
+        Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({
+          runForThread: runSetupScript,
         }),
         Layer.mock(ProjectService.ProjectService)({
           getById: () =>
@@ -669,6 +679,8 @@ function makeLocalCommandHarness(input: {
     ),
   );
   return {
+    layer,
+    runSetupScript,
     getThreadRecords,
     getTurnStartContext,
     setProjection: (next: OrchestrationV2ThreadProjection) => {
@@ -697,6 +709,100 @@ function makeLocalCommandHarness(input: {
     }).pipe(Effect.provide(layer)),
   };
 }
+
+effectIt.effect.each(["started", "failed"] as const)(
+  "recreates a missing worktree and releases the startup lease for setup (%s)",
+  (setupResult) =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const worktreesDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-setup-" });
+      const worktreePath = path.join(worktreesDir, "project", "worktree");
+      const setupStarted = yield* Deferred.make<void>();
+      const releaseSetup = yield* Deferred.make<void>();
+      const setupFinished = yield* Deferred.make<void>();
+      const harness = makeLocalCommandHarness({
+        text: "Continue",
+        worktreePath,
+        worktreesDir,
+        fileSystem,
+        failReadsAfterRunning: true,
+      });
+      harness.createWorktree.mockImplementation(() =>
+        fileSystem
+          .makeDirectory(worktreePath, { recursive: true })
+          .pipe(Effect.as({} as never), Effect.orDie),
+      );
+      // TerminalManager.open takes this same lease; a mock without it misses the deadlock.
+      harness.runSetupScript.mockImplementation((input) =>
+        withWorkspaceLease(
+          path.resolve(input.worktreePath),
+          Effect.gen(function* () {
+            expect(yield* fileSystem.exists(input.worktreePath).pipe(Effect.orDie)).toBe(true);
+            yield* Deferred.succeed(setupStarted, undefined);
+            yield* Deferred.await(releaseSetup);
+            if (setupResult === "failed") {
+              return yield* new ProjectSetupScriptRunner.ProjectSetupScriptOperationError({
+                threadId: input.threadId,
+                worktreePath: input.worktreePath,
+                operation: "openTerminal",
+                cause: "simulated setup terminal failure",
+              });
+            }
+            return { status: "no-script" as const };
+          }),
+        ).pipe(Effect.ensuring(Deferred.succeed(setupFinished, undefined))),
+      );
+      yield* Effect.gen(function* () {
+        const service = yield* ProviderTurnStart.ProviderTurnStartServiceV2;
+        const threadId = harness.projection().thread.id;
+        const runId = harness.projection().runs[0]!.id;
+        yield* service.start({ threadId, runId });
+        yield* Deferred.await(setupStarted);
+        expect(harness.createWorktree).toHaveBeenCalledExactlyOnceWith({
+          cwd: "/tmp/native-account-project",
+          refName: "feature/restore",
+          path: worktreePath,
+        });
+        expect(harness.runSetupScript).toHaveBeenCalledExactlyOnceWith({
+          threadId,
+          projectId: harness.projection().thread.projectId,
+          projectCwd: "/tmp/native-account-project",
+          worktreePath,
+        });
+        expect(harness.open).toHaveBeenCalledOnce();
+        expect(harness.startRootRun).toHaveBeenCalledOnce();
+        expect(harness.projection().runs[0]?.status).toBe("running");
+        yield* Deferred.succeed(releaseSetup, undefined);
+        yield* Deferred.await(setupFinished);
+      }).pipe(Effect.provide(harness.layer));
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+effectIt.effect.each(["existing", "creation-failed"] as const)(
+  "does not run recovery setup for a worktree that is %s",
+  (state) =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const worktreesDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-setup-" });
+      const worktreePath = path.join(worktreesDir, "project", "worktree");
+      if (state === "existing") {
+        yield* fileSystem.makeDirectory(worktreePath, { recursive: true });
+      }
+      const harness = makeLocalCommandHarness({
+        text: "Continue",
+        worktreePath,
+        worktreesDir,
+        fileSystem,
+        failReadsAfterRunning: true,
+      });
+      harness.createWorktree.mockImplementation(() => Effect.die("simulated Git failure"));
+      yield* harness.start;
+      expect(harness.createWorktree).toHaveBeenCalledTimes(state === "existing" ? 0 : 1);
+      expect(harness.runSetupScript).not.toHaveBeenCalled();
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
 
 effectIt.effect.each(["cleanup-first", "startup-first"])(
   "coordinates provider startup with %s",
