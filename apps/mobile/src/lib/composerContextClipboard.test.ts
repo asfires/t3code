@@ -149,3 +149,32 @@ describe("mobile context clipboard imports", () => {
     expect(mocks.download).not.toHaveBeenCalled();
   });
 });
+
+it("imports a pasted-text chip from web without downloading or uploading a file", async () => {
+  const pasted = {
+    version: 1 as const,
+    kind: "pasted-text" as const,
+    contextId: ComposerContextId.make("web-paste"),
+    label: "Pasted text",
+    text: "x".repeat(100_000) + "\n tail",
+  };
+  const result = await importComposerContextClipboard(
+    {
+      text: "[Pasted text](t3-context://v1/pasted-text/web-paste)",
+      fragment: encodeComposerContextFragment({
+        version: 1,
+        source: { environmentId: EnvironmentId.make("source") },
+        records: [pasted],
+      })!,
+      html: "",
+    },
+    0,
+    new AbortController().signal,
+  );
+  expect(result?.attachments).toEqual([]);
+  expect(result?.failures).toEqual([]);
+  expect(result?.context.records[0]).toMatchObject({ kind: "pasted-text", text: pasted.text });
+  expect(result?.text).toContain("t3-context://v1/pasted-text/import-1");
+  expect(mocks.download).not.toHaveBeenCalled();
+  expect(mocks.execute).not.toHaveBeenCalled();
+});

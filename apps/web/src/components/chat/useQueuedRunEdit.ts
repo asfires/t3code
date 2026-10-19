@@ -31,6 +31,7 @@ import {
 } from "../../lib/attachmentUploadQueue";
 import { buildMessageContext } from "../../lib/composerContextRecords";
 import { readFileAsDataUrl } from "../../lib/imageCompression";
+import type { PastedTextDraft } from "../../lib/pastedTextContext";
 import type { TerminalContextDraft } from "../../lib/terminalContext";
 import type { ReviewCommentContext } from "../../reviewCommentContext";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
@@ -40,7 +41,11 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import type { ChatComposerHandle } from "./ChatComposer";
 import { fileAttachmentCapabilityBlockReason } from "./composerAttachmentFiles";
-import { prepareQueuedEditAttachments, recoverQueuedMessageEdit } from "./queuedMessageEdit";
+import {
+  prepareQueuedEditAttachments,
+  recoverQueuedMessageEdit,
+  restoreQueuedMessagePastedTexts,
+} from "./queuedMessageEdit";
 import type { EditQueuedRunRequest } from "./QueuedRunsControl";
 
 interface EditingQueuedRun {
@@ -58,6 +63,7 @@ export interface QueuedRunEditContent {
   readonly images: ReadonlyArray<ComposerImageAttachment>;
   readonly files: ReadonlyArray<ComposerFileAttachment>;
   readonly terminalContexts: ReadonlyArray<TerminalContextDraft>;
+  readonly pastedTexts: ReadonlyArray<PastedTextDraft>;
   readonly reviewComments: ReadonlyArray<ReviewCommentContext>;
   readonly previewAnnotations: ReadonlyArray<PreviewAnnotationPayload>;
   readonly threadContexts: ReadonlyArray<ThreadContextRecord>;
@@ -110,14 +116,16 @@ async function submitQueuedRunEdit(input: {
     // Kept records for removed attachments would point at nothing.
     const keptRecords = (editing.context?.records ?? []).filter(
       (record) =>
-        !("attachmentId" in record) ||
-        editing.existingAttachments.some((attachment) => attachment.id === record.attachmentId),
+        record.kind !== "pasted-text" &&
+        (!("attachmentId" in record) ||
+          editing.existingAttachments.some((attachment) => attachment.id === record.attachmentId)),
     );
     const newRecords =
       buildMessageContext({
         terminalContexts: content.terminalContexts.filter(
           (context) => context.text.trim().length > 0,
         ),
+        pastedTexts: content.pastedTexts,
         reviewComments: content.reviewComments,
         previewAnnotations: content.previewAnnotations,
         threadContexts: content.threadContexts,
@@ -223,15 +231,19 @@ export function useQueuedRunEdit(input: {
     const target = queuedEditDraftTarget(routeThreadRef, request.runId);
     const store = useComposerDraftStore.getState();
     store.clearComposerContent(target);
-    store.setPrompt(target, request.text);
+    const context = serverProjection?.messages.find(
+      (message) => message.id === request.messageId,
+    )?.context;
+    const restored = restoreQueuedMessagePastedTexts({ text: request.text, context });
+    store.setPastedTexts(target, restored.pastedTexts);
+    store.setPrompt(target, restored.prompt);
     setEditing({
       threadId: activeThreadId,
       runId: request.runId,
       messageId: request.messageId,
       originalText: request.text,
       existingAttachments: request.attachments,
-      context: serverProjection?.messages.find((message) => message.id === request.messageId)
-        ?.context,
+      context,
     });
     focusComposerSoon();
   });
@@ -266,6 +278,7 @@ export function useQueuedRunEdit(input: {
       editTarget: queuedEditDraftTarget(routeThreadRef, editing.runId),
       threadTarget: threadDraftTarget,
       originalText: editing.originalText,
+      originalContext: editing.context,
     });
     if (recovery !== "clean") {
       toastManager.add(
@@ -311,6 +324,7 @@ export function useQueuedRunEdit(input: {
     ) {
       return;
     }
+    if (composerRef.current?.validateProviderInput(content.prompt) === false) return;
     saveInFlightRef.current = true;
     setIsSaving(true);
     const error = await submitQueuedRunEdit({

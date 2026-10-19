@@ -1,3 +1,7 @@
+import { useComposerDraftStore, DraftId } from "../composerDraftStore";
+import { buildMessageContext, pastedTextContextReference } from "../lib/composerContextRecords";
+import { formatInlineContextReference } from "../lib/composerContextReferences";
+import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 import {
   findRecordedWorktreeSetup,
   isThreadWokeUnseen,
@@ -2259,5 +2263,47 @@ describe("isThreadWokeUnseen", () => {
   it("hides settled threads and unparseable wake times", () => {
     expect(isThreadWokeUnseen({ ...base, settled: true })).toBe(false);
     expect(isThreadWokeUnseen({ ...base, wokeAt: "not a date" })).toBe(false);
+  });
+});
+
+describe("restorePlanFollowUpComposer pasted text", () => {
+  it("restores a failed follow-up so its complete pasted text can be sent again", () => {
+    const target = DraftId.make("failed-follow-up-paste");
+    const store = useComposerDraftStore.getState();
+    const paste = {
+      id: "follow-up",
+      text: "x".repeat(100_000) + "\n  tail\n",
+      createdAt: "2026-09-17T12:00:00.000Z",
+    };
+    const snapshot = {
+      prompt: `Change this ${formatInlineContextReference(pastedTextContextReference(paste))}`,
+      terminalContexts: [],
+      pastedTexts: [paste],
+      reviewComments: [],
+      previewAnnotations: [],
+      threadContexts: [],
+    };
+    store.clearComposerContent(target);
+    restorePlanFollowUpComposer({
+      snapshot,
+      writePrompt: (prompt) => store.setPrompt(target, prompt),
+      writeTerminalContexts: (contexts) => store.setTerminalContexts(target, [...contexts]),
+      writePastedTexts: (pastes) => store.setPastedTexts(target, pastes),
+      writeReviewComments: (comments) => store.setReviewComments(target, [...comments]),
+      writePreviewAnnotations: (annotations) =>
+        store.setPreviewAnnotations(target, [...annotations]),
+      writeThreadContexts: (records) => store.setThreadContexts(target, records),
+      resetCursor: () => {},
+    });
+    const restored = store.getComposerDraft(target)!;
+    expect(restored.prompt).toBe(snapshot.prompt);
+    expect(restored.pastedTexts).toEqual([paste]);
+    expect(
+      projectComposerContextForProvider({
+        text: restored.prompt,
+        records: buildMessageContext(restored)?.records ?? [],
+      }),
+    ).toContain(paste.text);
+    store.clearComposerContent(target);
   });
 });

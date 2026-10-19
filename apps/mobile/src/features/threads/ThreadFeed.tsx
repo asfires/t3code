@@ -1,3 +1,4 @@
+import { upgradeLegacyContextMessage } from "@t3tools/shared/composerContextLegacy";
 import * as Dialog from "../../components/ui/Dialog";
 import { useOpenPullRequest } from "../../native/useOpenPullRequest";
 import { ThreadMarkdownVideo, ThreadMediaVisibleContext } from "./ThreadMarkdownVideo";
@@ -1128,7 +1129,19 @@ function renderFeedEntry(
   }
 
   if (entry.type === "message") {
-    const { message } = entry;
+    const legacy =
+      entry.message.role === "user" &&
+      !entry.message.context &&
+      entry.message.text.includes("\uE000t3-pasted-text:")
+        ? upgradeLegacyContextMessage(entry.message.text)
+        : null;
+    const message = legacy
+      ? {
+          ...entry.message,
+          text: legacy.text,
+          context: { version: 1 as const, records: legacy.records },
+        }
+      : entry.message;
     const isUser = message.role === "user";
     const presentation = resolveUserMessagePresentation(message);
     const renderedText = renderAssistantCitationsAsText(presentation.text);

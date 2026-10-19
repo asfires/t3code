@@ -65,6 +65,30 @@ const annotation = {
 };
 
 describe("mobile composer context", () => {
+  it("preserves a pasted-text chip through native editor tokens and both server protocols", () => {
+    const pasted = {
+      version: 1 as const,
+      kind: "pasted-text" as const,
+      contextId: ComposerContextId.make("paste"),
+      label: "Pasted text",
+      text: "  first\n" + "x".repeat(100_000) + "\nlast",
+    };
+    const text = `Read ${formatComposerContextReference(pasted)}`;
+    const context = { version: 1 as const, records: [pasted] };
+    expect(composerContextSendBlockReason(context)).toBeNull();
+    expect(composerContextEditorTokens(text, collectComposerInlineTokens(text))).toHaveLength(1);
+    const canonical = serializeComposerMessageForServer(text, context, true);
+    expect(canonical.context?.records).toEqual([pasted]);
+    expect(
+      projectComposerContextForProvider({
+        text: canonical.text,
+        records: canonical.context?.records ?? [],
+      }),
+    ).toContain(pasted.text);
+    const legacy = serializeComposerMessageForServer(text, context, false);
+    expect(legacy).toEqual({ text: `Read ${pasted.text}` });
+  });
+
   it("rejects a malformed record instead of allowing the wire decoder to drop its payload", () => {
     expect(
       composerContextSendBlockReason({

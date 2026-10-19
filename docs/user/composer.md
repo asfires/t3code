@@ -6,11 +6,16 @@ include a skill when the task needs more context.
 Messages can contain up to 120,000 characters. Longer drafts stay in the composer
 so you can shorten them or split them into several messages.
 
-Pasting 32 KiB or more of text adds that fragment as a text-file attachment so
-the agent can inspect it without filling the model context. A smaller paste also
-becomes an attachment when inserting it would exceed the message limit. On a
-hardware keyboard, use `Cmd+Shift+V` on Apple devices or `Ctrl+Shift+V` elsewhere
-to keep a large paste editable in the composer instead.
+On web and desktop, pasting 1,000 characters or 20 lines or more folds that text
+into a **Pasted text** chip so it does not fill the composer. The chip is numbered
+by its position in the message. The full text is included in the agent's input.
+Select the chip to read or edit the text before sending; delete the
+chip to drop the paste. Select the chip in a sent message to read what was sent.
+A paste too large for a chip, or one that would exceed the message limit,
+becomes a text-file attachment instead. On mobile, pasting 32 KiB or more of
+text becomes a text-file attachment. On a hardware keyboard, use `Cmd+Shift+V`
+on Apple devices or `Ctrl+Shift+V` elsewhere to paste as plain editable text
+instead.
 
 ## Formatting
 
@@ -139,7 +144,8 @@ navigate to their sources.
 Press `ArrowUp` in an empty composer to bring back the last prompt you sent in this thread. Press
 `ArrowUp` again to go further back, and `ArrowDown` to come forward. Moving forward past the newest
 prompt clears the composer. Recall walks the prompts loaded in the thread. Attachments, terminal
-context, and other extras from the original message are not restored, only the text you typed. A
+context, and other extras from the original message are not restored. Typed text and pasted-text
+chips are restored, including each chip's editable contents. A
 composer that holds an attachment or a picked element does not count as empty.
 
 When the composer has text, the arrow keys move the caret as usual. Recall takes over only while
@@ -156,7 +162,7 @@ File restore is only offered for threads running in a worktree, and it is
 refused when another thread or agent session also uses that directory, a folder
 inside it, or a folder that contains it, since
 restoring would erase their changes. A thread that works in the project directory
-rewinds the conversation only. The selected prompt and its attachments return to the composer for editing and
+rewinds the conversation only. The selected prompt, its pasted-text chips, and its attachments return to the composer for editing and
 resending. Any unsent draft stays above the restored prompt.
 
 This removes the selected message and later conversation from the active thread

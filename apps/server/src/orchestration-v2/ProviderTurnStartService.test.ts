@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it, vi } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
 import {
+  ComposerContextId,
   CheckpointScopeId,
   MessageId,
   NodeId,
@@ -1260,3 +1261,38 @@ for (const previousMessages of [[], ["/compact", " /COMPACT "]]) {
       }),
   );
 }
+
+effectIt.effect(
+  "delivers pasted text inline to the provider without a file attachment or truncation",
+  () =>
+    Effect.gen(function* () {
+      const harness = makeLocalCommandHarness({
+        text: "Read [Pasted text](t3-context://v1/pasted-text/paste)",
+        failReadsAfterRunning: true,
+      });
+      const text = "  indented\n" + "x".repeat(100_000) + "\nlast line\n";
+      const projection = harness.projection();
+      harness.setProjection({
+        ...projection,
+        messages: projection.messages.map((message) => ({
+          ...message,
+          context: {
+            version: 1,
+            records: [
+              {
+                version: 1,
+                contextId: ComposerContextId.make("paste"),
+                kind: "pasted-text",
+                label: "Pasted text",
+                text,
+              },
+            ],
+          },
+        })),
+      });
+      yield* harness.start;
+      const sent = harness.startRootRun.mock.calls[0]?.[0].message;
+      expect(sent?.text).toContain(`<context kind="pasted-text" id="paste">\n${text}\n</context>`);
+      expect(sent?.attachments).toEqual([]);
+    }),
+);

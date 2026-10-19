@@ -1,3 +1,5 @@
+import { PastedTextInlineChip } from "./PastedTextInlineChip";
+import { formatPastedTextLabel, pastedTextOrdinals } from "../../lib/pastedTextContext";
 import { ThreadFindTimelineContext } from "./ThreadFindProvider";
 import { shallow } from "zustand/vanilla/shallow";
 import { shouldPreserveAssistantLineBreaks } from "@t3tools/shared/markdownPipeline";
@@ -2139,6 +2141,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
   );
   const userMessage = resolveUserMessagePresentation(row.message);
   const resolvedContext = resolveUserMessageContext(row.message);
+  const messagePastedTextOrdinals = pastedTextOrdinals(resolvedContext.text);
   const previewImages = userImages.filter((image) => image.name.startsWith("preview-annotation-"));
   const revertTurnCount = row.revertTurnCount;
   const chippedAttachmentIds = new Set(
@@ -2224,6 +2227,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
       <span data-thread-find-ignore>
         <UserMessageContextReferenceChip
           reference={reference}
+          pastedTextOrdinal={messagePastedTextOrdinals.get(reference.contextId)}
           record={record}
           annotationImage={annotationImage}
           attachment={attachment}
@@ -4284,6 +4288,7 @@ function UserMessageElementDetails({
 
 interface UserMessageContextRenderContext {
   reference: ChatMarkdownContextReference;
+  pastedTextOrdinal: number | undefined;
   annotationImage: ChatImageAttachment | null;
   attachment: ChatImageAttachment | ChatFileAttachment | null;
   resolvedTheme: "light" | "dark";
@@ -4427,6 +4432,22 @@ const userMessageContextPresentationRegistry = createContextPresentationRegistry
         ),
     },
     {
+      kind: "pasted-text",
+      canRender: (record) => record.kind === "pasted-text",
+      render: (record, context, definition) =>
+        record.kind === "pasted-text" ? (
+          // Copies as the text itself: a paste is the user's content, not a pointer to it.
+          <PastedTextInlineChip
+            label={formatPastedTextLabel(context.pastedTextOrdinal)}
+            text={record.text}
+            detailsMode={definition.capabilities.details}
+            copyMarkdown={record.text}
+          />
+        ) : (
+          <UnavailableUserMessageContextChip {...context} />
+        ),
+    },
+    {
       kind: "element",
       canRender: (record) => record.kind === "element",
       render: (record, context) =>
@@ -4517,6 +4538,7 @@ const userMessageContextPresentationRegistry = createContextPresentationRegistry
 
 function UserMessageContextReferenceChip(props: {
   reference: ChatMarkdownContextReference;
+  pastedTextOrdinal: number | undefined;
   record: KnownComposerContextRecord | undefined;
   annotationImage: ChatImageAttachment | null;
   attachment: ChatImageAttachment | ChatFileAttachment | null;
@@ -4532,6 +4554,7 @@ function UserMessageContextReferenceChip(props: {
   });
   return userMessageContextPresentationRegistry.render(props.reference.kind, props.record, {
     reference: props.reference,
+    pastedTextOrdinal: props.pastedTextOrdinal,
     annotationImage: props.annotationImage,
     attachment: props.attachment,
     resolvedTheme,

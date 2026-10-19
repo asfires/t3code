@@ -1,3 +1,5 @@
+import { formatInlineContextReference } from "./lib/composerContextReferences";
+import { pastedTextContextReference } from "./lib/composerContextRecords";
 import {
   scopedProjectKey,
   scopedThreadKey,
@@ -821,6 +823,97 @@ describe("composerDraftStore syncPersistedAttachments", () => {
 
     expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.persistedAttachments).toEqual([]);
     expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.nonPersistedImageIds).toEqual([image.id]);
+  });
+});
+
+describe("composerDraftStore pasted texts", () => {
+  const threadId = ThreadId.make("thread-pasted");
+  const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+  const pasted = (id: string, text = "line one\nline two") => ({
+    id,
+    createdAt: "2026-09-16T12:00:00.000Z",
+    text,
+  });
+  const referenceFor = (id: string) =>
+    formatInlineContextReference(pastedTextContextReference(pasted(id)));
+
+  beforeEach(() => {
+    resetComposerDraftStore();
+  });
+
+  it("appends a chip for a paste and drops it again on remove", () => {
+    const store = useComposerDraftStore.getState();
+    store.setPrompt(threadRef, "Look at this");
+    store.addPastedText(threadRef, pasted("paste-1"));
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.prompt).toBe(
+      `Look at this ${referenceFor("paste-1")} `,
+    );
+    store.removePastedText(threadRef, "paste-1");
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.prompt).toBe("Look at this");
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.pastedTexts).toEqual([]);
+  });
+
+  it("leaves the prompt alone when the caller already placed the chip", () => {
+    const store = useComposerDraftStore.getState();
+    store.setPrompt(threadRef, `before ${referenceFor("paste-1")} after`);
+    store.addPastedText(threadRef, pasted("paste-1"), { appendReference: false });
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.prompt).toBe(
+      `before ${referenceFor("paste-1")} after`,
+    );
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.pastedTexts).toHaveLength(1);
+  });
+
+  it("rewrites the text behind a chip without moving it", () => {
+    const store = useComposerDraftStore.getState();
+    store.setPrompt(threadRef, "intro");
+    store.addPastedText(threadRef, pasted("paste-1"));
+    const promptBefore = draftFor(threadId, TEST_ENVIRONMENT_ID)?.prompt;
+    store.updatePastedText(threadRef, "paste-1", "edited\r\ntext");
+    const draft = draftFor(threadId, TEST_ENVIRONMENT_ID);
+    expect(draft?.prompt).toBe(promptBefore);
+    expect(draft?.pastedTexts).toEqual([pasted("paste-1", "edited\ntext")]);
+  });
+
+  it("drops empty pastes and repeated ids", () => {
+    const store = useComposerDraftStore.getState();
+    store.addPastedText(threadRef, pasted("paste-1", "   \n"));
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toBeUndefined();
+    store.setPastedTexts(threadRef, [pasted("paste-1"), pasted("paste-1", "other")]);
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.pastedTexts).toEqual([pasted("paste-1")]);
+  });
+
+  it("clearing terminal context leaves pasted text intact", () => {
+    const store = useComposerDraftStore.getState();
+    store.addPastedText(threadRef, pasted("paste-1"));
+    store.addTerminalContexts(threadRef, [makeTerminalContext({ id: "terminal" })]);
+    store.clearTerminalContexts(threadRef);
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.pastedTexts).toEqual([pasted("paste-1")]);
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.prompt).toContain(referenceFor("paste-1"));
+  });
+
+  it.each([10_000, 130_000])("survives persistence with %i characters and its chip", (size) => {
+    const store = useComposerDraftStore.getState();
+    store.setPrompt(threadRef, "Fix");
+    store.addPastedText(threadRef, pasted("paste-1", "x".repeat(size) + "\n tail\n"));
+    const persistApi = useComposerDraftStore.persist as unknown as {
+      getOptions: () => {
+        merge: (
+          persistedState: unknown,
+          currentState: ReturnType<typeof useComposerDraftStore.getState>,
+        ) => ReturnType<typeof useComposerDraftStore.getState>;
+      };
+    };
+    const persisted = partializeComposerDraftStoreState(useComposerDraftStore.getState());
+    const key = threadKeyFor(threadId, TEST_ENVIRONMENT_ID);
+    expect(persisted.draftsByThreadKey[key]?.pastedTexts).toEqual([
+      pasted("paste-1", "x".repeat(size) + "\n tail\n"),
+    ]);
+
+    const hydrated = persistApi.getOptions().merge(persisted, useComposerDraftStore.getState());
+    expect(hydrated.draftsByThreadKey[key]?.pastedTexts).toEqual([
+      pasted("paste-1", "x".repeat(size) + "\n tail\n"),
+    ]);
+    expect(hydrated.draftsByThreadKey[key]?.prompt).toBe(`Fix ${referenceFor("paste-1")} `);
   });
 });
 

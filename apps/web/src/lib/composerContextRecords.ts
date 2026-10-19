@@ -11,6 +11,7 @@ import type {
   KnownComposerContextRecord,
   MessageId,
   OrchestrationMessageContext,
+  PastedTextContextRecord,
   PreviewAnnotationContextRecord,
   PreviewAnnotationPayload,
   ReviewCommentContextRecord,
@@ -34,6 +35,11 @@ import {
 import type { ComposerFileAttachment, ComposerImageAttachment } from "~/composerDraftStore";
 import type { AttachmentUploadState } from "./attachmentUploadState";
 import { normalizeElementContextSelection } from "./elementContext";
+import {
+  PASTED_TEXT_CONTEXT_LABEL,
+  normalizePastedText,
+  type PastedTextDraft,
+} from "./pastedTextContext";
 import {
   formatTerminalContextLabel,
   normalizeTerminalContextText,
@@ -168,6 +174,26 @@ export function threadContextRecord(ref: ScopedThreadRef, title: string): Thread
     environmentId: ref.environmentId,
     threadId: ref.threadId,
     title: label,
+  };
+}
+
+export function pastedTextContextReference(draft: PastedTextDraft): ComposerContextReference {
+  return {
+    kind: "pasted-text",
+    contextId: toKindScopedComposerContextId("pasted-text", draft.id),
+    label: PASTED_TEXT_CONTEXT_LABEL,
+  };
+}
+
+export function pastedTextContextRecord(draft: PastedTextDraft): PastedTextContextRecord {
+  return {
+    version: 1,
+    contextId: toKindScopedComposerContextId("pasted-text", draft.id),
+    kind: "pasted-text",
+    label: PASTED_TEXT_CONTEXT_LABEL,
+    // Never clamped: a paste is the user's content. Over the limit, the send is refused
+    // with the same message as an over-long prompt instead of quietly losing the tail.
+    text: normalizePastedText(draft.text),
   };
 }
 
@@ -308,6 +334,7 @@ export function attachmentContextRecord(
 
 export function buildMessageContext(input: {
   terminalContexts: ReadonlyArray<TerminalContextDraft>;
+  pastedTexts?: ReadonlyArray<PastedTextDraft>;
   reviewComments: ReadonlyArray<ReviewCommentContext>;
   previewAnnotations: ReadonlyArray<PreviewAnnotationPayload>;
   threadContexts?: ReadonlyArray<ThreadContextRecord>;
@@ -320,6 +347,7 @@ export function buildMessageContext(input: {
   );
   const records: ComposerContextRecord[] = [
     ...input.terminalContexts.map(terminalContextRecord),
+    ...(input.pastedTexts ?? []).map(pastedTextContextRecord),
     ...input.reviewComments.map(reviewCommentContextRecord),
     ...(input.threadContexts ?? []),
     ...input.previewAnnotations.map((annotation) =>
@@ -406,6 +434,14 @@ export function terminalContextDraftFromRecord(
     terminalLabel: record.terminalLabel,
     lineStart: record.lineStart,
     lineEnd: record.lineEnd,
+    text: record.text,
+  };
+}
+
+export function pastedTextDraftFromRecord(record: PastedTextContextRecord): PastedTextDraft {
+  return {
+    id: producerIdFromComposerContextId("pasted-text", record.contextId),
+    createdAt: new Date().toISOString(),
     text: record.text,
   };
 }

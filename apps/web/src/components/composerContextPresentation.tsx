@@ -25,9 +25,12 @@ import {
   previewAnnotationContextLabel,
   reviewCommentContextId,
   reviewCommentContextLabel,
+  pastedTextContextReference,
   terminalContextReference,
   uploadedAttachmentContextRecord,
 } from "~/lib/composerContextRecords";
+import { formatPastedTextLabel, type PastedTextDraft } from "~/lib/pastedTextContext";
+import { PastedTextInlineChip } from "./chat/PastedTextInlineChip";
 import type { TerminalContextDraft } from "~/lib/terminalContext";
 import type { ReviewCommentContext } from "~/reviewCommentContext";
 import { ComposerPendingTerminalContextChip } from "./chat/ComposerPendingTerminalContexts";
@@ -50,6 +53,7 @@ import {
 
 export type ComposerDraftContextRecord =
   | { kind: "terminal"; record: TerminalContextDraft }
+  | { kind: "pasted-text"; record: PastedTextDraft }
   | { kind: "review-comment"; record: ReviewCommentContext }
   | {
       kind: "preview-annotation";
@@ -68,6 +72,9 @@ export interface ComposerContextActions {
   openFile: (fileId: string) => void;
   openMention: (path: string) => void;
   openPullRequest: (event: MouseEvent<HTMLElement>, url: string) => void;
+  /** Rewrites a draft paste in place, or removes it when the text is empty; absent when the
+      composer cannot edit records. */
+  editPastedText?: ((pastedTextId: string, text: string) => void) | undefined;
 }
 
 export const ComposerContextActionsContext = createContext<ComposerContextActions>({
@@ -80,6 +87,13 @@ export const ComposerContextActionsContext = createContext<ComposerContextAction
 });
 
 export type ComposerDraftContextRecords = ReadonlyMap<string, ComposerDraftContextRecord>;
+
+const EMPTY_PASTED_TEXT_ORDINALS: ReadonlyMap<string, number> = new Map();
+
+/** "Pasted text #n" by prompt order; see `pastedTextOrdinals`. Provided by the composer. */
+export const ComposerPastedTextOrdinalsContext = createContext<ReadonlyMap<string, number>>(
+  EMPTY_PASTED_TEXT_ORDINALS,
+);
 
 export const EMPTY_COMPOSER_CONTEXT_RECORDS: ComposerDraftContextRecords = new Map();
 
@@ -94,6 +108,7 @@ export const ComposerContextRecordsContext = createContext<ComposerDraftContextR
 
 export function composerContextRecordsFromDraft(input: {
   terminalContexts: ReadonlyArray<TerminalContextDraft>;
+  pastedTexts?: ReadonlyArray<PastedTextDraft>;
   reviewComments?: ReadonlyArray<ReviewCommentContext>;
   previewAnnotations?: ReadonlyArray<PreviewAnnotationPayload>;
   threadContexts?: ReadonlyArray<ThreadContextRecord>;
@@ -118,6 +133,9 @@ export function composerContextRecordsFromDraft(input: {
   }
   for (const record of input.terminalContexts) {
     records.set(terminalContextReference(record).contextId, { kind: "terminal", record });
+  }
+  for (const record of input.pastedTexts ?? []) {
+    records.set(pastedTextContextReference(record).contextId, { kind: "pasted-text", record });
   }
   for (const record of input.reviewComments ?? []) {
     records.set(reviewCommentContextId(record.id), { kind: "review-comment", record });
@@ -334,6 +352,8 @@ function UnresolvedContextChip(props: { label: string }) {
 
 interface ComposerContextRenderContext {
   label: string;
+  pastedTextOrdinal: number | undefined;
+  editPastedText: ComposerContextActions["editPastedText"];
 }
 
 const composerContextPresentationRegistry = createContextPresentationRegistry<
@@ -341,7 +361,15 @@ const composerContextPresentationRegistry = createContextPresentationRegistry<
   ComposerContextRenderContext,
   ReactElement
 >({
-  requiredKinds: ["image", "file", "terminal", "review-comment", "preview-annotation", "thread"],
+  requiredKinds: [
+    "pasted-text",
+    "image",
+    "file",
+    "terminal",
+    "review-comment",
+    "preview-annotation",
+    "thread",
+  ],
   handlers: [
     {
       kind: "terminal",
@@ -355,6 +383,25 @@ const composerContextPresentationRegistry = createContextPresentationRegistry<
         ) : (
           <UnresolvedContextChip label={context.label} />
         ),
+    },
+    {
+      kind: "pasted-text",
+      canRender: (entry) => entry.kind === "pasted-text",
+      render: (entry, context, definition) => {
+        if (entry.kind !== "pasted-text") {
+          return <UnresolvedContextChip label={context.label} />;
+        }
+        const record = entry.record;
+        const edit = context.editPastedText;
+        return (
+          <PastedTextInlineChip
+            label={formatPastedTextLabel(context.pastedTextOrdinal)}
+            text={record.text}
+            detailsMode={definition.capabilities.details}
+            onEdit={edit ? (text) => edit(record.id, text) : undefined}
+          />
+        );
+      },
     },
     {
       kind: "image",
@@ -447,7 +494,11 @@ export function ComposerContextReferenceChip(props: {
   label: string;
 }): ReactElement {
   const records = use(ComposerContextRecordsContext);
+  const ordinals = use(ComposerPastedTextOrdinalsContext);
+  const actions = use(ComposerContextActionsContext);
   return composerContextPresentationRegistry.render(props.kind, records.get(props.contextId), {
     label: props.label,
+    pastedTextOrdinal: ordinals.get(props.contextId),
+    editPastedText: actions.editPastedText,
   });
 }

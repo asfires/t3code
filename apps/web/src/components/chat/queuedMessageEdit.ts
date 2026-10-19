@@ -1,4 +1,11 @@
-import type { ChatAttachment } from "@t3tools/contracts";
+import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
+import { formatInlineContextReference } from "../../lib/composerContextReferences";
+import {
+  pastedTextDraftFromRecord,
+  pastedTextContextReference,
+  resolveUserMessageContext,
+} from "../../lib/composerContextRecords";
+import type { ChatAttachment, OrchestrationMessageContext } from "@t3tools/contracts";
 import {
   composerDraftHasUserContent,
   useComposerDraftStore,
@@ -7,16 +14,54 @@ import {
   type ComposerThreadTarget,
 } from "../../composerDraftStore";
 
+/** Queued edits retain captured context, including records minted by another client. */
+export function restoreQueuedMessagePastedTexts(message: {
+  text: string;
+  context?: OrchestrationMessageContext | undefined;
+}) {
+  const resolved = resolveUserMessageContext(message);
+  const drafts = new Map(
+    resolved.records.flatMap((record) =>
+      record.kind === "pasted-text" && !("payload" in record)
+        ? [[record.contextId, pastedTextDraftFromRecord(record)] as const]
+        : [],
+    ),
+  );
+  return {
+    prompt: replaceComposerContextReferences(resolved.text, (reference) => {
+      const draft = drafts.get(reference.contextId);
+      return draft
+        ? formatInlineContextReference(pastedTextContextReference(draft))
+        : reference.source;
+    }),
+    pastedTexts: [...drafts.values()],
+  };
+}
+
 export function recoverQueuedMessageEdit(input: {
   readonly editTarget: ComposerThreadTarget;
   readonly threadTarget: ComposerThreadTarget;
   readonly originalText: string;
+  readonly originalContext?: OrchestrationMessageContext | undefined;
 }): "kept" | "discarded" | "clean" {
   const store = useComposerDraftStore.getState();
   const draft = store.getComposerDraft(input.editTarget);
+  const original = restoreQueuedMessagePastedTexts({
+    text: input.originalText,
+    context: input.originalContext,
+  });
   const dirty =
     draft !== null &&
-    (draft.prompt !== input.originalText || draft.images.length > 0 || draft.files.length > 0);
+    (draft.prompt !== original.prompt ||
+      draft.images.length > 0 ||
+      draft.files.length > 0 ||
+      draft.pastedTexts.length !== original.pastedTexts.length ||
+      draft.pastedTexts.some(
+        (paste) =>
+          !original.pastedTexts.some(
+            (previous) => previous.id === paste.id && previous.text === paste.text,
+          ),
+      ));
   if (dirty && !composerDraftHasUserContent(store.getComposerDraft(input.threadTarget))) {
     store.moveComposerPromptAndImages(input.editTarget, input.threadTarget);
     return "kept";

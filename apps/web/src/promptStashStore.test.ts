@@ -6,6 +6,9 @@ import {
 } from "@t3tools/shared/assistantCitations";
 
 import { removeLocalStorageItem } from "./hooks/useLocalStorage";
+import { pastedTextContextRecord, pastedTextContextReference } from "./lib/composerContextRecords";
+import { formatInlineContextReference } from "./lib/composerContextReferences";
+import { restoreComposerPrompt } from "./components/chat/composerPromptRecovery";
 
 import {
   MAX_STASH_ENTRIES,
@@ -98,6 +101,34 @@ describe("promptStashStore", () => {
   afterEach(() => {
     resetPromptStashStore();
   });
+
+  it.each([10_000, 130_000])(
+    "restores a %i-character pasted chip after stash persistence",
+    (size) => {
+      const pasted = {
+        id: "paste",
+        text: "x".repeat(size) + "\n  tail\n",
+        createdAt: "2026-09-17T12:00:00.000Z",
+      };
+      const prompt = `Review ${formatInlineContextReference(pastedTextContextReference(pasted))}`;
+      const entry = {
+        ...makeEntry({ id: "paste-stash", prompt }),
+        records: [pastedTextContextRecord(pasted)],
+      };
+      usePromptStashStore.getState().stashEntry(entry);
+      const entries = usePromptStashStore.getState().entries;
+      usePromptStashStore.setState({ entries: [] });
+      writePromptStashStorageForTest(JSON.stringify({ version: 2, state: { entries } }));
+      const saved = usePromptStashStore.getState().takeEntry("paste-stash").entry;
+      const restored = restoreComposerPrompt({
+        text: saved!.prompt,
+        context: { version: 1, records: saved!.records ?? [] },
+      });
+      expect(restored.prompt).toBe(prompt);
+      expect(restored.pastedTexts[0]?.text).toBe(pasted.text);
+      expect(usePromptStashStore.getState().takeEntry("paste-stash").entry).toBeNull();
+    },
+  );
 
   it("prepends entries so the newest stash is first", () => {
     const store = usePromptStashStore.getState();

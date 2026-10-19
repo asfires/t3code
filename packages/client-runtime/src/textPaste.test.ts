@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  exceedsPastedTextRecordThreshold,
   nextPastedTextFileName,
   PASTED_TEXT_ATTACHMENT_THRESHOLD_BYTES,
+  PASTED_TEXT_RECORD_MAX_CHARS,
+  PASTED_TEXT_RECORD_MIN_CHARS,
+  PASTED_TEXT_RECORD_MIN_LINES,
   isPasteAsTextShortcut,
   pastedTextDisposition,
   replaceTextSelection,
@@ -47,6 +51,70 @@ describe("pasted text disposition", () => {
         wouldExceedInputLimit: true,
       }),
     ).toBe("attachment");
+  });
+});
+
+describe("pasted text record disposition", () => {
+  it("folds medium pastes into a record only for callers that support records", () => {
+    const text = "x".repeat(PASTED_TEXT_RECORD_MIN_CHARS);
+    expect(pastedTextDisposition({ text, canAttach: true })).toBe("inline");
+    expect(pastedTextDisposition({ text, canAttach: true, supportsRecords: true })).toBe("record");
+    expect(pastedTextDisposition({ text, canAttach: false, supportsRecords: true })).toBe("record");
+  });
+
+  it("keeps a record past the file threshold and falls back to a file only on overflow", () => {
+    expect(pastedTextDisposition({ text: "short", canAttach: true, supportsRecords: true })).toBe(
+      "inline",
+    );
+    expect(
+      pastedTextDisposition({
+        text: "x".repeat(PASTED_TEXT_ATTACHMENT_THRESHOLD_BYTES),
+        canAttach: true,
+        supportsRecords: true,
+      }),
+    ).toBe("record");
+    expect(
+      pastedTextDisposition({
+        text: "x".repeat(PASTED_TEXT_RECORD_MAX_CHARS + 1),
+        canAttach: true,
+        supportsRecords: true,
+      }),
+    ).toBe("attachment");
+    expect(
+      pastedTextDisposition({
+        text: "x".repeat(PASTED_TEXT_RECORD_MIN_CHARS),
+        canAttach: true,
+        supportsRecords: true,
+        wouldExceedInputLimit: true,
+      }),
+    ).toBe("attachment");
+    expect(
+      pastedTextDisposition({
+        text: "x".repeat(PASTED_TEXT_RECORD_MAX_CHARS + 1),
+        canAttach: false,
+        supportsRecords: true,
+      }),
+    ).toBe("inline");
+    expect(
+      pastedTextDisposition({
+        text: "x".repeat(PASTED_TEXT_ATTACHMENT_THRESHOLD_BYTES),
+        canAttach: true,
+        supportsRecords: true,
+        bypassAutoAttachment: true,
+      }),
+    ).toBe("inline");
+  });
+
+  it("counts lines as well as characters", () => {
+    expect(exceedsPastedTextRecordThreshold("a\n".repeat(PASTED_TEXT_RECORD_MIN_LINES - 2))).toBe(
+      false,
+    );
+    expect(exceedsPastedTextRecordThreshold("a\n".repeat(PASTED_TEXT_RECORD_MIN_LINES - 1))).toBe(
+      true,
+    );
+    expect(exceedsPastedTextRecordThreshold("x".repeat(PASTED_TEXT_RECORD_MIN_CHARS - 1))).toBe(
+      false,
+    );
   });
 });
 

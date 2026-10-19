@@ -333,6 +333,7 @@ import {
   type TerminalContextDraft,
   type TerminalContextSelection,
 } from "../lib/terminalContext";
+import { pastedTextSummary } from "../lib/pastedTextContext";
 import {
   ensureInlineContextReferences,
   removeInlineContextReference,
@@ -555,7 +556,7 @@ import {
 } from "../versionSkew";
 import { useAssetUrls } from "../assets/assetUrls";
 import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT } from "@t3tools/shared/composerContextReferences";
-import { recallableComposerPrompt } from "./chat/composerPromptHistory";
+import { restoreComposerPrompt } from "./chat/composerPromptRecovery";
 import { observeResize } from "~/lib/observeResize";
 
 const EMPTY_PROVIDERS: ServerProvider[] = [];
@@ -809,7 +810,10 @@ async function rewindToMessage(input: {
       },
     );
     const currentPrompt = store.getComposerDraft(draftTarget)?.prompt ?? "";
-    const restoredPrompt = recallableComposerPrompt(message.text);
+    const restored = restoreComposerPrompt(message, randomUUID);
+    for (const pasted of restored.pastedTexts)
+      store.addPastedText(draftTarget, pasted, { appendReference: false });
+    const restoredPrompt = restored.prompt;
     const nextPrompt =
       restoredPrompt.length === 0
         ? currentPrompt
@@ -6150,6 +6154,7 @@ export default function ChatView(props: ChatViewProps) {
       images: sendContextImages,
       files: composerFiles,
       terminalContexts: composerTerminalContexts,
+      pastedTexts: composerPastedTexts,
       previewAnnotations: sendContextPreviewAnnotations,
       reviewComments: composerReviewComments,
       threadContexts: composerThreadContexts,
@@ -6184,6 +6189,7 @@ export default function ChatView(props: ChatViewProps) {
           images: composerImages,
           files: composerFiles,
           terminalContexts: composerTerminalContexts,
+          pastedTexts: composerPastedTexts,
           reviewComments: composerReviewComments,
           previewAnnotations: composerPreviewAnnotations,
           threadContexts: composerThreadContexts,
@@ -6204,7 +6210,8 @@ export default function ChatView(props: ChatViewProps) {
       elementContextCount:
         composerPreviewAnnotations.length +
         composerReviewComments.length +
-        composerThreadContexts.length,
+        composerThreadContexts.length +
+        composerPastedTexts.length,
     });
     const feedbackCommand =
       ctxSelectedProvider === "codex" &&
@@ -6213,6 +6220,7 @@ export default function ChatView(props: ChatViewProps) {
       sendableComposerTerminalContexts.length === 0 &&
       composerPreviewAnnotations.length === 0 &&
       composerReviewComments.length === 0 &&
+      composerPastedTexts.length === 0 &&
       composerThreadContexts.length === 0
         ? parseCodexFeedbackCommand(trimmed)
         : null;
@@ -6286,6 +6294,7 @@ export default function ChatView(props: ChatViewProps) {
       }
       const followUpPromptSnapshot = promptRef.current;
       const followUpTerminalContexts = [...sendableComposerTerminalContexts];
+      const followUpPastedTexts = [...composerPastedTexts];
       const followUpReviewComments = [...composerReviewComments];
       const followUpPreviewAnnotations = [...composerPreviewAnnotations];
       const followUpThreadContexts = [...composerThreadContexts];
@@ -6296,6 +6305,7 @@ export default function ChatView(props: ChatViewProps) {
         text: followUp.text,
         context: buildMessageContext({
           terminalContexts: sendableComposerTerminalContexts,
+          pastedTexts: composerPastedTexts,
           reviewComments: composerReviewComments,
           previewAnnotations: composerPreviewAnnotations,
           threadContexts: composerThreadContexts,
@@ -6309,6 +6319,7 @@ export default function ChatView(props: ChatViewProps) {
           snapshot: {
             prompt: followUpPromptSnapshot,
             terminalContexts: followUpTerminalContexts,
+            pastedTexts: followUpPastedTexts,
             reviewComments: followUpReviewComments,
             previewAnnotations: followUpPreviewAnnotations,
             threadContexts: followUpThreadContexts,
@@ -6316,6 +6327,8 @@ export default function ChatView(props: ChatViewProps) {
           writePrompt: (prompt) => setComposerDraftPrompt(composerDraftTarget, prompt),
           writeTerminalContexts: (contexts) =>
             setComposerDraftTerminalContexts(composerDraftTarget, [...contexts]),
+          writePastedTexts: (pastes) =>
+            useComposerDraftStore.getState().setPastedTexts(composerDraftTarget, [...pastes]),
           writeReviewComments: (comments) =>
             setComposerDraftReviewComments(composerDraftTarget, [...comments]),
           writePreviewAnnotations: (annotations) =>
@@ -6339,6 +6352,7 @@ export default function ChatView(props: ChatViewProps) {
       sendableComposerTerminalContexts.length === 0 &&
       composerPreviewAnnotations.length === 0 &&
       composerReviewComments.length === 0 &&
+      composerPastedTexts.length === 0 &&
       composerThreadContexts.length === 0
         ? parseStandaloneComposerSlashCommand(trimmed)
         : null;
@@ -6395,6 +6409,7 @@ export default function ChatView(props: ChatViewProps) {
     const composerFilesSnapshot = [...composerFiles];
     const composerAttachmentsSnapshot = [...composerImagesSnapshot, ...composerFilesSnapshot];
     const composerTerminalContextsSnapshot = [...sendableComposerTerminalContexts];
+    const composerPastedTextsSnapshot = [...composerPastedTexts];
     const composerPreviewAnnotationsSnapshot = [...composerPreviewAnnotations];
     const composerReviewCommentsSnapshot: ReviewCommentContext[] = [...composerReviewComments];
     const composerThreadContextsSnapshot = [...composerThreadContexts];
@@ -6412,6 +6427,7 @@ export default function ChatView(props: ChatViewProps) {
     const buildOutgoingMessageContext = (attachmentIds: ReadonlyArray<string>) =>
       buildMessageContext({
         terminalContexts: composerTerminalContextsSnapshot,
+        pastedTexts: composerPastedTextsSnapshot,
         reviewComments: composerReviewCommentsSnapshot,
         previewAnnotations: composerPreviewAnnotationsSnapshot,
         threadContexts: composerThreadContextsSnapshot,
@@ -6770,6 +6786,9 @@ export default function ChatView(props: ChatViewProps) {
           );
           addComposerDraftFiles(composerDraftTarget, composerFilesSnapshot);
           setComposerDraftTerminalContexts(composerDraftTarget, composerTerminalContextsSnapshot);
+          useComposerDraftStore
+            .getState()
+            .setPastedTexts(composerDraftTarget, composerPastedTextsSnapshot);
           setComposerDraftPreviewAnnotations(
             composerDraftTarget,
             composerPreviewAnnotationsSnapshot,
@@ -6916,6 +6935,8 @@ export default function ChatView(props: ChatViewProps) {
         titleSeed = `File: ${composerFilesSnapshot[0].name}`;
       } else if (composerTerminalContextsSnapshot.length > 0) {
         titleSeed = formatTerminalContextLabel(composerTerminalContextsSnapshot[0]!);
+      } else if (composerPastedTextsSnapshot.length > 0) {
+        titleSeed = pastedTextSummary(composerPastedTextsSnapshot[0]!.text) || "Pasted text";
       } else if (composerReviewCommentsSnapshot.length > 0) {
         titleSeed = `Review: ${reviewCommentContextLabel(composerReviewCommentsSnapshot[0]!)}`;
       } else if (composerPreviewAnnotationsSnapshot.length > 0) {
@@ -7146,6 +7167,8 @@ export default function ChatView(props: ChatViewProps) {
             composerImagesRef.current.length === 0 &&
             composerFilesRef.current.length === 0 &&
             composerTerminalContextsRef.current.length === 0 &&
+            (useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.pastedTexts
+              .length ?? 0) === 0 &&
             (useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)
               ?.previewAnnotations.length ?? 0) === 0 &&
             (useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.reviewComments
@@ -7170,6 +7193,9 @@ export default function ChatView(props: ChatViewProps) {
         addComposerDraftImages(composerDraftTarget, retryComposerImages);
         addComposerDraftFiles(composerDraftTarget, composerFilesSnapshot);
         setComposerDraftTerminalContexts(composerDraftTarget, composerTerminalContextsSnapshot);
+        useComposerDraftStore
+          .getState()
+          .setPastedTexts(composerDraftTarget, composerPastedTextsSnapshot);
         setComposerDraftPreviewAnnotations(composerDraftTarget, composerPreviewAnnotationsSnapshot);
         setComposerDraftReviewComments(composerDraftTarget, composerReviewCommentsSnapshot);
         setComposerDraftThreadContexts(composerDraftTarget, composerThreadContextsSnapshot);
