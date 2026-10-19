@@ -255,6 +255,21 @@ export function resolveOffset(config: {
   return Effect.succeed({ offset: 0, source: "default ports" });
 }
 
+export function resolveDevHostSlug(directoryPath: string): string {
+  const basename =
+    directoryPath
+      .replace(/[\\/]+$/, "")
+      .split(/[\\/]/)
+      .at(-1) ?? "";
+  const slug = basename
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 63)
+    .replace(/-+$/, "");
+  return slug || "dev";
+}
+
 function resolveBaseDir(baseDir: string | undefined): Effect.Effect<string, never, Path.Path> {
   return Effect.gen(function* () {
     const path = yield* Path.Path;
@@ -280,6 +295,7 @@ interface CreateDevRunnerEnvInput {
   readonly host: string | undefined;
   readonly port: number | undefined;
   readonly devUrl: URL | undefined;
+  readonly devHostSlug?: string | undefined;
 }
 
 export function createDevRunnerEnv({
@@ -294,6 +310,7 @@ export function createDevRunnerEnv({
   host,
   port,
   devUrl,
+  devHostSlug = "dev",
 }: CreateDevRunnerEnvInput): Effect.Effect<NodeJS.ProcessEnv, never, Path.Path> {
   return Effect.gen(function* () {
     const serverPort = port ?? BASE_SERVER_PORT + serverOffset;
@@ -307,7 +324,7 @@ export function createDevRunnerEnv({
       PORT: String(webPort),
       VITE_DEV_SERVER_URL:
         devUrl?.toString() ??
-        `http://${isDesktopMode ? DESKTOP_DEV_LOOPBACK_HOST : "localhost"}:${webPort}`,
+        `http://${isDesktopMode ? DESKTOP_DEV_LOOPBACK_HOST : `${devHostSlug}.localhost`}:${webPort}`,
     };
 
     if (configuredBaseDir !== undefined) {
@@ -606,7 +623,8 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
       return yield* new DevRunnerHostNotProxiableError({ mode: input.mode, host: input.host });
     }
 
-    const worktreePath = yield* resolveGitWorktreePath(yield* HostProcess.WorkingDirectory);
+    const workingDirectory = yield* HostProcess.WorkingDirectory;
+    const worktreePath = yield* resolveGitWorktreePath(workingDirectory);
 
     const { offset, source } = yield* resolveOffset({
       portOffset,
@@ -626,7 +644,7 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
     // A dev server started inside a worktree defaults to that worktree's own
     // (gitignored) `.t3` — see @t3tools/shared/devHome for why this must
     // outrank an ambient T3CODE_HOME. `--home-dir` still wins.
-    const worktreeHome = yield* resolveWorktreeT3Home(yield* HostProcess.WorkingDirectory);
+    const worktreeHome = yield* resolveWorktreeT3Home(workingDirectory);
     // Trim before choosing: `--home-dir ""` is not a selection, and treating it
     // as one would skip the worktree default and land on the shared home —
     // exactly the outcome this precedence exists to prevent.
@@ -646,6 +664,7 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
       host: input.host,
       port: input.port,
       devUrl: input.devUrl,
+      devHostSlug: resolveDevHostSlug(worktreePath ?? workingDirectory),
     });
 
     const selectionSuffix =
@@ -655,7 +674,7 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
     const baseDir = env.T3CODE_HOME ?? (yield* DEFAULT_T3_HOME);
 
     yield* Effect.logInfo(
-      `[dev-runner] mode=${input.mode} source=${source}${selectionSuffix} serverPort=${String(env.T3CODE_PORT)} webPort=${String(env.PORT)} baseDir=${baseDir}`,
+      `[dev-runner] mode=${input.mode} source=${source}${selectionSuffix} serverPort=${String(env.T3CODE_PORT)} webPort=${String(env.PORT)} devUrl=${env.VITE_DEV_SERVER_URL ?? "unset"} baseDir=${baseDir}`,
     );
 
     // Before the share block: --dry-run only resolves and prints. Sharing would

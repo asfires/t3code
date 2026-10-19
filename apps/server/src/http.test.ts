@@ -140,6 +140,38 @@ describe("untraced requests", () => {
 });
 
 describe("browser API CORS", () => {
+  it("allows credentialed requests from the worktree dev origin", async () => {
+    const devOrigin = "http://feature-worktree.localhost:5733";
+    const layerConfig = Layer.effect(
+      ServerConfig.ServerConfig,
+      Effect.map(ServerConfig.ServerConfig, (config) => ({
+        ...config,
+        devUrl: new URL(devOrigin),
+      })),
+    ).pipe(Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "http-dev-cors-test-" })));
+    const layerApp = ServerHttp.layerBrowserApiCors.pipe(
+      Layer.provide(layerConfig),
+      Layer.provide(NodeServices.layer),
+    );
+    const { handler, dispose } = HttpRouter.toWebHandler(layerApp, { disableLogger: true });
+    try {
+      const response = await handler(
+        new Request("http://localhost:13773/api/environment", {
+          method: "OPTIONS",
+          headers: {
+            origin: devOrigin,
+            "access-control-request-method": "GET",
+          },
+        }),
+      );
+      expect(response.status).toBe(204);
+      expect(response.headers.get("access-control-allow-origin")).toBe(devOrigin);
+      expect(response.headers.get("access-control-allow-credentials")).toBe("true");
+    } finally {
+      await dispose();
+    }
+  });
+
   it("accepts protocol negotiation with authenticated browser headers", async () => {
     const layerRoute = Layer.effectDiscard(
       Effect.gen(function* () {
@@ -684,22 +716,26 @@ describe("http dev routing", () => {
     expect(isLoopbackHostname("localhost")).toBe(true);
     expect(isLoopbackHostname("::1")).toBe(true);
     expect(isLoopbackHostname("[::1]")).toBe(true);
+    expect(isLoopbackHostname("feature-worktree.localhost")).toBe(true);
+    expect(isLoopbackHostname("FEATURE-WORKTREE.LOCALHOST")).toBe(true);
   });
 
   it("does not treat LAN addresses as local", () => {
     expect(isLoopbackHostname("192.168.86.35")).toBe(false);
     expect(isLoopbackHostname("10.0.0.24")).toBe(false);
     expect(isLoopbackHostname("example.local")).toBe(false);
+    expect(isLoopbackHostname("localhost.example.com")).toBe(false);
   });
 
-  it("preserves path and query when redirecting to the dev server", () => {
-    const devUrl = new URL("http://127.0.0.1:5173/");
-    const requestUrl = new URL("http://127.0.0.1:3774/pair?token=test-token");
+  it.each(["http://127.0.0.1:5173", "http://feature-worktree.localhost:5173"])(
+    "preserves path and query when redirecting to %s",
+    (origin) => {
+      const devUrl = new URL(origin);
+      const requestUrl = new URL("http://127.0.0.1:3774/pair?token=test-token");
 
-    expect(resolveDevRedirectUrl(devUrl, requestUrl)).toBe(
-      "http://127.0.0.1:5173/pair?token=test-token",
-    );
-  });
+      expect(resolveDevRedirectUrl(devUrl, requestUrl)).toBe(`${origin}/pair?token=test-token`);
+    },
+  );
 });
 
 describe("assetResponseHeaders", () => {

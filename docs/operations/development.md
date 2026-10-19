@@ -35,6 +35,11 @@ Read ports from the `[dev-runner]` output. Worktrees derive stable preferences f
 but occupied ports can shift them. `T3CODE_PORT_OFFSET` or `T3CODE_DEV_INSTANCE` can select a
 different preference when needed.
 
+Browser dev servers default to `http://<slug>.localhost:<port>`, where `<slug>` is the sanitized
+worktree or current-directory basename. Each hostname has its own cookie jar, so dev pairings
+do not accumulate cookies on `localhost` or interfere with the daily driver. The `[dev-runner]`
+line prints the dev URL. Desktop keeps `127.0.0.1`; `--share` uses the tailnet URL instead.
+
 ### Sharing and remote debugging
 
 `vp run dev --share` publishes the web port over the machine's tailnet and prints a pairing URL
@@ -63,8 +68,11 @@ on that hostname. Any service you visit there can receive the reusable admin cre
 including services unrelated to T3 Code. If you run untrusted services on that hostname, keep
 normal per-environment pairing instead.
 
-To use one browser profile across web dev worktrees on the same hostname, generate one fixed
-value once:
+The reusable cookie only spans one hostname. Default per-worktree `.localhost` hosts therefore
+still need separate pairing; this credential does not carry authentication across them. It can
+be reused across ports when servers share a hostname, such as with `--share`.
+
+To use it, generate one fixed value once:
 
 ```sh
 openssl rand -hex 32
