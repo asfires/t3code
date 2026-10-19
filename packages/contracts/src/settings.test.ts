@@ -1219,3 +1219,11 @@ describe("server model preferences", () => {
     });
   });
 });
+
+describe("ClaudeSettings prompt suggestions", () => {
+  it("defaults on and preserves an explicit opt-out", () => {
+    expect(decodeClaudeSettings({}).promptSuggestions).toBe(true);
+    expect(decodeClaudeSettings({ promptSuggestions: true }).promptSuggestions).toBe(true);
+    expect(decodeClaudeSettings({ promptSuggestions: false }).promptSuggestions).toBe(false);
+  });
+});

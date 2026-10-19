@@ -1117,6 +1117,7 @@ export function makeClaudeQueryOptions(input: {
         ? "bypassPermissions"
         : (input.permissionMode ?? "default")),
     includePartialMessages: true,
+    promptSuggestions: input.settings?.promptSuggestions ?? true,
     ...(compiledSelection.effort === undefined
       ? {}
       : {
@@ -6438,6 +6439,26 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           }
 
           const message = input.message;
+          if (message.type === "prompt_suggestion") {
+            // Suggestions follow result, after the active turn has been cleared.
+            const context = settledTurnByNativeThread.get(liveQuery.nativeThreadId);
+            const suggestedPrompt = message.suggestion.trim();
+            if (
+              context !== undefined &&
+              suggestedPrompt &&
+              adapterOptions.settings.promptSuggestions
+            ) {
+              yield* emitProviderEvent({
+                type: "prompt_suggestion.updated",
+                driver: CLAUDE_PROVIDER,
+                threadId: context.input.threadId,
+                runId: context.input.runId,
+                providerTurnId: context.providerTurnId,
+                suggestedPrompt,
+              });
+            }
+            return;
+          }
           // Before any routing: a Monitor started during an idle wake turn
           // reports its task before the drain replays the tool call.
           yield* trackClaudeMonitorCalls(message);

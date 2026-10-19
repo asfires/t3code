@@ -106,6 +106,33 @@ const emptyProjection = {
 } as OrchestrationV2ThreadProjection;
 
 describe("applyOrchestrationV2ProjectionEvent", () => {
+  it("retains a prompt suggestion across a later lifecycle update", () => {
+    const base = { ...emptyProjection, runs: [{ ...run, status: "waiting" as const }] };
+    const suggested = applyOrchestrationV2ProjectionEvent(base, {
+      id: "suggestion" as OrchestrationV2DomainEvent["id"],
+      type: "run.prompt-suggestion-updated",
+      threadId,
+      occurredAt: now,
+      payload: { runId, suggestedPrompt: "run the tests" },
+    });
+    expect(suggested?.runs[0]).toMatchObject({
+      status: "waiting",
+      suggestedPrompt: "run the tests",
+    });
+    const completed = applyOrchestrationV2ProjectionEvent(suggested, {
+      id: "completed" as OrchestrationV2DomainEvent["id"],
+      type: "run.updated",
+      threadId,
+      occurredAt: now,
+      payload: run,
+    });
+    expect(completed?.runs[0]).toMatchObject({
+      status: "completed",
+      suggestedPrompt: "run the tests",
+    });
+    expect(completed?.visibleTurnItems).toEqual([]);
+  });
+
   it("applies a compact PR sync without replacing other links or thread metadata", () => {
     const link = (number: number): ThreadPullRequestLink => ({
       host: "github.com",
