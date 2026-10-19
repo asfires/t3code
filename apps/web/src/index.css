@@ -164,6 +164,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
    the variables and Settings -> Appearance can override them at runtime. The
    default stacks are mirrored in `appearanceFonts.ts`. */
 @theme {
+  --font-weight-sidebar-active: 550;
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --font-mono:
     ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
@@ -493,12 +494,13 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     var(--app-scrollbar-width) 100%;
 }
 
-/* Stage-channel art needs a mask and pseudo-element gradient, so keep the
-   behavior composable without tying it to the global components layer. */
+/* Fade stage-channel art with an overlay rather than a CSS mask. Chromium can
+   mis-composite the masked blueprint SVG while another sidebar layer is
+   animating, leaking fragments of the artwork into unrelated tiles. The
+   overlay reaches the sidebar surface color by 93%, so the mask was visually
+   redundant as well as an extra composited layer. */
 @utility sidebar-stage-backdrop {
   --stage-fade: var(--sidebar-stage-fade, var(--app-chrome-background));
-  mask-image: linear-gradient(to bottom, black 0%, black 55%, transparent 92%);
-  -webkit-mask-image: linear-gradient(to bottom, black 0%, black 55%, transparent 92%);
 
   &::after {
     content: "";
@@ -515,6 +517,149 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
       color-mix(in srgb, var(--stage-fade) 96%, transparent) 85%,
       var(--stage-fade) 93%
     );
+  }
+}
+
+/* Sidebar "Working" spinner: Material's indeterminate ring, transform-only.
+   The arc's grow-and-reel-in is faked by two filled half-ring SVGs, one per
+   clipped half, counter-rotating with ease-in-out inside a stepped-rotation
+   layer inside a linearly rotating container (MDC's construction and timings).
+   Every animated property is a transform on an HTML element or a root <svg>,
+   so the compositor drives all of it and the main thread never repaints a
+   frame. A stroke-dash animation would look identical but repaint on the main
+   thread every vsync. */
+.working-spinner {
+  position: relative;
+  display: block;
+}
+
+.working-spinner__track,
+.working-spinner__container,
+.working-spinner__layer {
+  position: absolute;
+  inset: 0;
+  display: block;
+}
+
+.working-spinner__track {
+  opacity: 0.25;
+}
+
+.working-spinner__container {
+  opacity: 0.75;
+  animation: working-spinner-container-rotate 1568ms linear infinite;
+}
+
+.working-spinner__layer {
+  animation: working-spinner-layer-rotate 5332ms cubic-bezier(0.4, 0, 0.2, 1) infinite both;
+}
+
+.working-spinner__clipper {
+  position: absolute;
+  top: 0;
+  display: block;
+  width: 50%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.working-spinner__clipper--left {
+  left: 0;
+}
+
+.working-spinner__clipper--right {
+  left: 50%;
+}
+
+.working-spinner__clipper > svg {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 200%;
+  height: 100%;
+}
+
+.working-spinner__clipper--right > svg {
+  left: -100%;
+}
+
+.working-spinner__clipper--left > svg {
+  animation: working-spinner-left-spin 1333ms cubic-bezier(0.4, 0, 0.2, 1) infinite both;
+}
+
+.working-spinner__clipper--right > svg {
+  animation: working-spinner-right-spin 1333ms cubic-bezier(0.4, 0, 0.2, 1) infinite both;
+}
+
+@keyframes working-spinner-container-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes working-spinner-layer-rotate {
+  12.5% {
+    transform: rotate(135deg);
+  }
+  25% {
+    transform: rotate(270deg);
+  }
+  37.5% {
+    transform: rotate(405deg);
+  }
+  50% {
+    transform: rotate(540deg);
+  }
+  62.5% {
+    transform: rotate(675deg);
+  }
+  75% {
+    transform: rotate(810deg);
+  }
+  87.5% {
+    transform: rotate(945deg);
+  }
+  100% {
+    transform: rotate(1080deg);
+  }
+}
+
+@keyframes working-spinner-left-spin {
+  from {
+    transform: rotate(265deg);
+  }
+  50% {
+    transform: rotate(130deg);
+  }
+  to {
+    transform: rotate(265deg);
+  }
+}
+
+@keyframes working-spinner-right-spin {
+  from {
+    transform: rotate(-265deg);
+  }
+  50% {
+    transform: rotate(-130deg);
+  }
+  to {
+    transform: rotate(-265deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .working-spinner__container,
+  .working-spinner__layer,
+  .working-spinner__clipper > svg {
+    animation: none;
+  }
+  /* Static ~125° arc, the footprint the old fixed arc had. */
+  .working-spinner__clipper--left > svg {
+    transform: rotate(208deg);
+  }
+  .working-spinner__clipper--right > svg {
+    transform: rotate(-208deg);
   }
 }
 
@@ -1235,7 +1380,8 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     --sidebar-muted-foreground: var(--muted-foreground);
     --sidebar-control-surface: var(--muted);
     --sidebar-row-hover: color-mix(in srgb, var(--contrast-foreground) 8%, transparent);
-    --sidebar-row-active: color-mix(in srgb, var(--contrast-foreground) 11%, transparent);
+    /* The open title carries selection, so the surface stays just above hover. */
+    --sidebar-row-active: color-mix(in srgb, var(--contrast-foreground) 9%, transparent);
     --sidebar-row-selected: color-mix(in srgb, var(--contrast-foreground) 7%, transparent);
     --sidebar-border: var(--border);
     --sidebar-stage-fade: var(--card);
@@ -1704,14 +1850,13 @@ code {
   font-family: var(--font-mono);
 }
 
-/* Code blocks in chat carry the size preference. Scoped to chat markdown
-   rather than every pre: a global rule would beat text-size utilities and
-   inherited sizes on unrelated pre surfaces (terminal previews, approvals).
-   Inline code stays relative to its sentence so it never towers over prose;
-   diffs and file previews take the size through --diffs-font-size. */
+/* Code blocks in chat belong to the surrounding response typography, so
+   fenced and inline code stay proportional to the prose around them. Diffs
+   and file previews remain editor-like surfaces and take the configurable
+   code size through --diffs-font-size. */
 .chat-markdown .chat-markdown-shiki .shiki,
 :is(.chat-markdown, .composer-tiptap) pre code {
-  font-size: var(--font-size-code, inherit);
+  font-size: inherit;
 }
 
 /* @pierre/diffs surfaces (diffs, file previews, annotatable code, search
@@ -1909,6 +2054,18 @@ code {
   color: var(--contrast-muted-foreground);
 }
 
+/* Markdown rules take their color from the surrounding text instead of
+   --border. --border is tuned against the canvas, and the user bubble sits at
+   the same lightness step, so a --border hr vanishes inside it. currentColor is
+   already contrast-solved against whichever surface the markdown is on. */
+.chat-markdown hr {
+  border-top-color: color-mix(in srgb, currentcolor 18%, transparent);
+}
+
+.chat-markdown blockquote {
+  border-left-color: color-mix(in srgb, currentcolor 18%, transparent);
+}
+
 /* A quote in the composer is text the user is still writing; muting it reads
    as disabled in an input, so the border alone carries the quote. */
 .composer-tiptap blockquote {
@@ -1929,7 +2086,7 @@ code {
 
 .chat-markdown section[data-footnotes] {
   margin-top: 1.25rem;
-  border-top: 1px solid var(--contrast-border);
+  border-top: 1px solid color-mix(in srgb, currentcolor 18%, transparent);
   padding-top: 0.75rem;
   color: var(--contrast-muted-foreground);
   font-size: 0.75rem;

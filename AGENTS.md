@@ -192,10 +192,12 @@ section by keeping the fork's version.
   one. After all merges are complete, end the final handoff by telling Adam to
   run `t3r`. That restart runs `t3start`, which fast-forwards the main checkout
   and launches `t3wt prune` in the background. The prune stops leftover
-  processes (dev servers included) and removes clean worktrees and local
-  branches whose tips are merged into `origin/main`; it does not require Adam
-  to delete remote branches on GitHub. Never stash anything valuable in a
-  merged worktree or count on its dev server outliving the restart.
+  processes (dev servers included) and removes clean worktrees whose branch
+  tips are merged into `origin/main`; it does not require Adam to delete
+  remote branches on GitHub. It keeps the local branch, so if Adam writes to a
+  pruned thread again, T3 rebuilds its worktree and reruns the project's setup
+  script. Never stash anything valuable in a merged worktree or count on its
+  dev server outliving the restart.
 - Verification handoff: when the thread's work is done and viewable in the
   web app, never end with a bare "done" — Adam verifies changes himself in a
   running app before merging. Start the dev server in the background from

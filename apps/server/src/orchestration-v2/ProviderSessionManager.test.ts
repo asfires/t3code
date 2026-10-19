@@ -4,6 +4,10 @@ import { assert, it } from "@effect/vitest";
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import {
   EnvironmentId,
+  MessageId,
+  RunId,
+  ProviderTurnId,
+  type OrchestrationV2Run,
   type ModelSelection,
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
@@ -4907,4 +4911,73 @@ it.effect(
       });
       assert.isFalse(denied?.capabilities?.has("device"));
     }),
+);
+
+it.effect("persists late prompt suggestions without a run subscriber", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("late-suggestion-thread");
+      const providerSessionId = yield* ids.allocate.providerSession({
+        threadId,
+        providerInstanceId: modelSelection.instanceId,
+      });
+      const run: OrchestrationV2Run = {
+        id: RunId.make("late-suggestion-run"),
+        threadId,
+        ordinal: 1,
+        providerInstanceId: modelSelection.instanceId,
+        modelSelection,
+        providerThreadId: null,
+        userMessageId: MessageId.make("late-suggestion-message"),
+        rootNodeId: null,
+        activeAttemptId: null,
+        status: "completed",
+        requestedAt: now,
+        startedAt: now,
+        completedAt: now,
+        checkpointId: null,
+        contextHandoffId: null,
+      };
+      yield* sink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            type: "run.created",
+            threadId,
+            occurredAt: now,
+            payload: run,
+          },
+        ],
+      });
+      yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+      const afterSequence = yield* sink.latestSequence({ threadId });
+      const persisted = yield* sink.stream({ threadId, afterSequence }).pipe(
+        Stream.filter((stored) => stored.event.type === "run.prompt-suggestion-updated"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      const adapterEvents = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+      assert.isDefined(adapterEvents);
+      yield* Queue.offer(adapterEvents!, {
+        type: "prompt_suggestion.updated",
+        driver: ProviderDriverKind.make("claudeAgent"),
+        threadId,
+        runId: run.id,
+        providerTurnId: ProviderTurnId.make("late-suggestion-turn"),
+        suggestedPrompt: "run the tests",
+      });
+      yield* Fiber.join(persisted);
+      const projection = yield* projections.getThreadProjection(threadId);
+      assert.equal(projection.runs[0]?.suggestedPrompt, "run the tests");
+      assert.equal(projection.runs[0]?.status, "completed");
+    }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 1000 })));
+  }),
 );

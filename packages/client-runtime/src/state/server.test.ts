@@ -2,6 +2,7 @@ import {
   EnvironmentId,
   type ServerConfig,
   type ServerConfigStreamEvent,
+  type ServerLifecycleReadyPayload,
   type ServerLifecycleWelcomePayload,
   WS_METHODS,
 } from "@t3tools/contracts";
@@ -33,6 +34,7 @@ import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import type { RpcSession } from "../rpc/session.ts";
 import {
   applyServerWelcomeEvent,
+  projectServerReady,
   makeEnvironmentServerWelcomeState,
   makeEnvironmentServerConfigState,
   isLegacyUpdateHandoffLoss,
@@ -492,6 +494,41 @@ describe("server state projection", () => {
       } as unknown as ServerConfig,
     });
     expect(Option.getOrThrow(downgraded).config.environmentThemes).toBeUndefined();
+  });
+
+  it("projects ready events from the lifecycle stream", () => {
+    const ready = {
+      at: "2026-08-12T12:00:00.000Z",
+      environment: {} as ServerLifecycleReadyPayload["environment"],
+    } as ServerLifecycleReadyPayload;
+    const [afterWelcome, welcomeEmitted] = projectServerReady(Option.none(), {
+      type: "welcome",
+      payload: {},
+    });
+    const [afterReady, readyEmitted] = projectServerReady(afterWelcome, {
+      type: "ready",
+      payload: ready,
+    });
+
+    expect(Option.isNone(afterWelcome)).toBe(true);
+    expect(welcomeEmitted).toEqual([]);
+    expect(Option.getOrThrow(afterReady)).toBe(ready);
+    expect(readyEmitted).toEqual([ready]);
+
+    const [afterMigration, migrationEmitted] = projectServerReady(afterReady, {
+      type: "legacyThreadMigration",
+      payload: {},
+    });
+    expect(afterMigration).toBe(afterReady);
+    expect(migrationEmitted).toEqual([]);
+
+    const restarted = { ...ready, at: "2026-08-12T13:00:00.000Z" };
+    const [afterRestart, restartEmitted] = projectServerReady(afterMigration, {
+      type: "ready",
+      payload: restarted,
+    });
+    expect(Option.getOrThrow(afterRestart)).toBe(restarted);
+    expect(restartEmitted).toEqual([restarted]);
   });
 
   it("keeps a current welcome on ready and rejects a buffered welcome from the old session", () => {

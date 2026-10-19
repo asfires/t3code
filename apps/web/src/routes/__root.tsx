@@ -54,7 +54,8 @@ import {
 } from "../components/ui/toast";
 import { isElectron } from "../env";
 import { cn } from "../lib/utils";
-import { applyAppearanceFontVariables } from "~/appearanceFonts";
+import { applyAppearanceFontVariables, isFontFamilyAvailable } from "~/appearanceFonts";
+import { loadHostFontFamily } from "../hostFonts";
 import { applyAppearanceContrast } from "~/appearanceContrast";
 import { useClientSettings } from "../hooks/useSettings";
 import {
@@ -313,6 +314,7 @@ function FontAppearanceSync() {
   const fontSizeInterface = useClientSettings((settings) => settings.fontSizeInterface);
   const fontSizePrompt = useClientSettings((settings) => settings.fontSizePrompt);
   const fontSizeCode = useClientSettings((settings) => settings.fontSizeCode);
+  const fontSizeToolOutput = useClientSettings((settings) => settings.fontSizeToolOutput);
   const fontSmoothing = useClientSettings((settings) => settings.fontSmoothing);
 
   useEffect(() => {
@@ -323,13 +325,25 @@ function FontAppearanceSync() {
       sizeInterface: fontSizeInterface,
       sizePrompt: fontSizePrompt,
       sizeCode: fontSizeCode,
+      sizeToolOutput: fontSizeToolOutput,
       smoothing: fontSmoothing,
     });
+    for (const family of new Set([fontFamilySans, fontFamilyCode, fontFamilyComposer])) {
+      const normalized = family.trim();
+      if (
+        normalized.length > 0 &&
+        !normalized.includes(",") &&
+        !isFontFamilyAvailable(normalized)
+      ) {
+        void loadHostFontFamily(normalized);
+      }
+    }
   }, [
     fontFamilyCode,
     fontFamilyComposer,
     fontFamilySans,
     fontSizeCode,
+    fontSizeToolOutput,
     fontSizeInterface,
     fontSizePrompt,
     fontSmoothing,

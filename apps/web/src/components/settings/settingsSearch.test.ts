@@ -45,6 +45,19 @@ const ITEMS: ReadonlyArray<SettingsSearchItem> = [
 ];
 
 describe("searchSettings", () => {
+  it("indexes typography typefaces and sizes as separate settings", () => {
+    expect(searchSettings("typeface").map((item) => item.id)).toEqual([
+      "interface-font",
+      "prompt-font",
+      "code-font",
+      "terminal-font",
+    ]);
+    expect(
+      searchSettings("size")
+        .map((item) => item.id)
+        .slice(0, 5),
+    ).toEqual(["interface-size", "prompt-size", "code-size", "tool-output-font", "terminal-size"]);
+  });
   it.each(["OTel", "OTLP", "telemetry export", "Grafana"])(
     "finds environment telemetry settings for %s",
     (query) => {

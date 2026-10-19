@@ -388,6 +388,7 @@ import {
   waitForThreadShell,
 } from "../state/entities";
 import { useEnvironmentShellHasSnapshot } from "../state/shell";
+import { deriveLatestPromptSuggestion } from "../lib/promptSuggestion";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { createPageScrollController, type PageScrollKey } from "./chat/pageScrollController";
 import { isTimelineScrollTarget } from "./chat/timelineScrollTarget";
@@ -8318,6 +8319,11 @@ export default function ChatView(props: ChatViewProps) {
                               activeThreadId={activeThreadId}
                               activeThreadEnvironmentId={activeThread?.environmentId}
                               activeThread={activeThread}
+                              suggestedPrompt={deriveLatestPromptSuggestion(
+                                serverProjection?.runs.find(
+                                  (run) => run.id === serverLatestRun?.runId,
+                                ),
+                              )}
                               activeThreadShell={activeThreadShell}
                               promptHistoryMessages={timelineMessages}
                               isServerThread={isServerThread}

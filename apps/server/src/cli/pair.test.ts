@@ -63,6 +63,12 @@ describe("pair tailscale local target", () => {
     expect(resolveTailscaleLocalTarget({ ...baseState, devUrl: "http://localhost:5733/" })).toEqual(
       { localPort: 5_733 },
     );
+    expect(
+      resolveTailscaleLocalTarget({
+        ...baseState,
+        devUrl: "http://feature-worktree.localhost:5733/",
+      }),
+    ).toEqual({ localPort: 5_733 });
     // A dev server on a non-loopback interface must be proxied at that
     // interface; tailscale serve defaults to 127.0.0.1 otherwise.
     expect(
@@ -241,14 +247,14 @@ describe("t3 pair", () => {
         yield* persistServerRuntimeState({
           path: statePath,
           state: yield* makePersistedServerRuntimeState({
-            config: { host: undefined, devUrl: new URL("http://localhost:5733") },
+            config: { host: undefined, devUrl: new URL("http://feature-worktree.localhost:5733") },
             port,
           }),
         });
 
         const output = yield* captureStdout(runCli(["pair", "--base-dir", baseDir]));
 
-        assert.include(output, "Pairing URL: http://localhost:5733/pair#token=");
+        assert.include(output, "Pairing URL: http://feature-worktree.localhost:5733/pair#token=");
       }),
     ).pipe(Effect.provide(NodeServices.layer)),
   );
