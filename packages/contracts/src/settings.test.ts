@@ -627,6 +627,22 @@ describe("ClientSettings panel animations", () => {
   });
 });
 
+describe("ClientSettings tool output font size", () => {
+  it("defaults to 11px", () => {
+    expect(decodeClientSettings({}).fontSizeToolOutput).toBe(11);
+  });
+
+  it.each([9, 19, 11.5])("rejects a size outside the supported integer range: %s", (value) => {
+    expect(() => decodeClientSettings({ fontSizeToolOutput: value })).toThrow();
+    expect(() => decodeClientSettingsPatch({ fontSizeToolOutput: value })).toThrow();
+  });
+
+  it.each([10, 11, 18])("accepts a size within the supported range: %s", (value) => {
+    expect(decodeClientSettings({ fontSizeToolOutput: value }).fontSizeToolOutput).toBe(value);
+    expect(decodeClientSettingsPatch({ fontSizeToolOutput: value }).fontSizeToolOutput).toBe(value);
+  });
+});
+
 describe("ClientSettings environment identification", () => {
   it("defaults to artwork and accepts each presentation mode", () => {
     expect(decodeClientSettings({}).environmentIdentificationMode).toBe("artwork");
@@ -1201,5 +1217,60 @@ describe("server model preferences", () => {
     expect(decodeServerSettingsPatch({ migrateModelPreferences: input })).toEqual({
       migrateModelPreferences: input,
     });
+  });
+});
+
+describe("ClaudeSettings prompt suggestions", () => {
+  it("defaults on and preserves an explicit opt-out", () => {
+    expect(decodeClaudeSettings({}).promptSuggestions).toBe(true);
+    expect(decodeClaudeSettings({ promptSuggestions: true }).promptSuggestions).toBe(true);
+    expect(decodeClaudeSettings({ promptSuggestions: false }).promptSuggestions).toBe(false);
+  });
+});
+
+describe("ServerSettings new-thread defaults", () => {
+  it("decodes legacy settings with last-used model and no provider defaults", () => {
+    const decoded = decodeServerSettings({});
+
+    expect(decoded.defaultModelSelection).toBeNull();
+    expect(decoded.providerNewThreadDefaults).toEqual({});
+  });
+
+  it("round-trips configured model, options, and runtime mode through patches", () => {
+    const patch = decodeServerSettingsPatch({
+      defaultModelSelection: { instanceId: "codex_personal", model: "gpt-5.6-sol" },
+      providerNewThreadDefaults: {
+        codex_personal: {
+          modelOptions: [
+            { id: "reasoningEffort", value: "high" },
+            { id: "fastMode", value: true },
+          ],
+          runtimeMode: "auto-accept-edits",
+        },
+      },
+    });
+
+    expect(patch).toEqual({
+      defaultModelSelection: { instanceId: "codex_personal", model: "gpt-5.6-sol" },
+      providerNewThreadDefaults: {
+        codex_personal: {
+          modelOptions: [
+            { id: "reasoningEffort", value: "high" },
+            { id: "fastMode", value: true },
+          ],
+          runtimeMode: "auto-accept-edits",
+        },
+      },
+    });
+    const decoded = decodeServerSettings({
+      defaultModelSelection: patch.defaultModelSelection,
+      providerNewThreadDefaults: patch.providerNewThreadDefaults,
+    });
+    expect(encodeServerSettings(decoded).defaultModelSelection).toEqual(
+      patch.defaultModelSelection,
+    );
+    expect(encodeServerSettings(decoded).providerNewThreadDefaults).toEqual(
+      patch.providerNewThreadDefaults,
+    );
   });
 });

@@ -92,6 +92,7 @@ import {
   expandCollapsedComposerCursor,
   formatAssistantCitationForComposer,
   replaceTextRange,
+  shouldAcceptPromptSuggestionOnTab,
 } from "../../composer-logic";
 import { DISCONNECTED_COMPOSER_PLACEHOLDER } from "../../composerPlaceholder";
 import { listContinuationForEnter, listIndentForTab } from "../../composer-list-continuation";
@@ -1508,6 +1509,7 @@ export interface ChatComposerProps {
   activeThreadId: ThreadId | null;
   activeThreadEnvironmentId: EnvironmentId | undefined;
   activeThread: Thread | undefined;
+  suggestedPrompt: string | null;
   activeThreadShell: ThreadShell | null;
   promptHistoryMessages: ReadonlyArray<ChatMessage>;
   isServerThread: boolean;
@@ -2388,6 +2390,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       : (normalizeModelSlug(selectedModelForPicker, selectedProvider) ?? selectedModelForPicker);
   })();
 
+  const latestPromptSuggestion =
+    selectedProvider === "claudeAgent" && phase === "ready" ? props.suggestedPrompt : null;
   const activeThreadModelDisplayName = resolveContextWindowModelDisplayName(
     activeThreadModelSelection,
     modelOptionsByInstance,
@@ -4234,6 +4238,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         onSelectComposerItem(selectedItem);
         return true;
       }
+    }
+    if (
+      shouldAcceptPromptSuggestionOnTab({
+        key,
+        shiftKey: event.shiftKey,
+        prompt,
+        suggestedPrompt: latestPromptSuggestion,
+      })
+    ) {
+      return applyPromptReplacement(0, 0, latestPromptSuggestion ?? "");
     }
     if ((key === "ArrowUp" || key === "ArrowDown") && submissionIntent === null) {
       return navigatePromptHistory(key === "ArrowUp" ? "backward" : "forward", event);
@@ -7253,7 +7267,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                                   ? "Enable a provider in Settings to send a message"
                                   : phase === "disconnected"
                                     ? DISCONNECTED_COMPOSER_PLACEHOLDER
-                                    : "Ask anything, @tag files/folders, $use skills, or / for commands"
+                                    : (latestPromptSuggestion ??
+                                      "Ask anything, @tag files/folders, $use skills, or / for commands")
                       }
                       disabled={
                         isConnecting ||

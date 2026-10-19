@@ -22,6 +22,7 @@ import {
   findFirstAvailableOffset,
   getDevRunnerModeArgs,
   isBrowserAllowedPort,
+  resolveDevHostSlug,
   resolveModePortOffsets,
   resolveOffset,
   runDevRunnerWithInput,
@@ -147,7 +148,48 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
     );
   });
 
+  describe("resolveDevHostSlug", () => {
+    it.each([
+      [
+        "/home/adam/Code/t3code-worktrees/t3code-fork-migration-ledger",
+        "t3code-fork-migration-ledger",
+      ],
+      ["/home/adam/Code/t3code", "t3code"],
+      ["~/.t3/userdata/worktrees/t3code/Fix_Thing", "fix-thing"],
+      ["/tmp/---", "dev"],
+      ["C:\\Code\\T3 Code\\", "t3-code"],
+    ])("derives %s as %s", (directoryPath, expected) => {
+      assert.equal(resolveDevHostSlug(directoryPath), expected);
+    });
+
+    it("caps the hostname label at 63 characters", () => {
+      assert.equal(resolveDevHostSlug(`/tmp/${"A".repeat(70)}`), "a".repeat(63));
+      assert.equal(resolveDevHostSlug(`/tmp/${"A".repeat(62)}--b`), "a".repeat(62));
+    });
+  });
+
   describe("createDevRunnerEnv", () => {
+    it.effect("uses the worktree slug as the default browser dev host", () =>
+      Effect.gen(function* () {
+        const env = yield* createDevRunnerEnv({
+          mode: "dev",
+          baseEnv: {},
+          serverOffset: 0,
+          webOffset: 4,
+          t3Home: undefined,
+          browser: undefined,
+          autoBootstrapProjectFromCwd: undefined,
+          logWebSocketEvents: undefined,
+          host: undefined,
+          port: undefined,
+          devUrl: undefined,
+          devHostSlug: "feature-worktree",
+        });
+
+        assert.equal(env.VITE_DEV_SERVER_URL, "http://feature-worktree.localhost:5737");
+      }),
+    );
+
     it.effect("forwards the reusable auth token to web dev and removes it for desktop", () =>
       Effect.gen(function* () {
         const input = {
@@ -245,6 +287,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           host: "0.0.0.0",
           port: 4222,
           devUrl: new URL("http://localhost:7331"),
+          devHostSlug: "ignored-worktree",
         });
 
         assert.equal(env.T3CODE_HOME, path.resolve("/tmp/custom-t3"));
@@ -371,6 +414,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           host: "127.0.0.1",
           port: 4222,
           devUrl: undefined,
+          devHostSlug: "ignored-worktree",
         });
 
         assert.equal(env.T3CODE_HOME, path.resolve("/tmp/my-t3"));
@@ -1076,6 +1120,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
         Effect.gen(function* () {
           const env = yield* shareSpawnedEnv({ ambientBundledDev: undefined });
           assert.equal(env?.T3CODE_BUNDLED_DEV, "1");
+          assert.match(env?.VITE_DEV_SERVER_URL ?? "", /^https:\/\/host\.example\.ts\.net:\d+\/$/);
         }),
       );
 

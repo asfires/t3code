@@ -29,6 +29,7 @@ import {
   OrchestrationV2Command,
   OrchestrationV2LimitRecoveryUpdate,
   OrchestrationV2DomainEvent,
+  OrchestrationV2DomainEventJson,
   OrchestrationV2ProviderCapabilities,
   OrchestrationV2ProviderThread,
   OrchestrationV2ProviderThreadJson,
@@ -111,6 +112,8 @@ const decodeOrchestrationV2CheckpointScope = Schema.decodeUnknownSync(
 );
 const decodeOrchestrationV2Checkpoint = Schema.decodeUnknownSync(OrchestrationV2Checkpoint);
 const decodeOrchestrationV2DomainEvent = Schema.decodeUnknownSync(OrchestrationV2DomainEvent);
+const encodeOrchestrationV2DomainEventJson = Schema.encodeSync(OrchestrationV2DomainEventJson);
+const decodeOrchestrationV2DomainEventJson = Schema.decodeSync(OrchestrationV2DomainEventJson);
 const decodeProviderReplayTranscript = Schema.decodeUnknownSync(ProviderReplayTranscript);
 const decodeOrchestrationV2Subagent = Schema.decodeUnknownSync(OrchestrationV2Subagent);
 const encodeOrchestrationV2SubagentJson = Schema.encodeSync(OrchestrationV2SubagentJson);
@@ -1553,4 +1556,18 @@ describe("latestProviderTurnForAttempt", () => {
     expect(latestProviderTurnForAttempt(turns, RunAttemptId.make("goal-attempt"))?.id).toBe("last");
     expect(latestProviderTurnForAttempt(turns, null)).toBeUndefined();
   });
+});
+
+it("round-trips a compact prompt suggestion through the wire event schema", () => {
+  const event = {
+    id: EventId.make("suggestion-event"),
+    type: "run.prompt-suggestion-updated",
+    threadId: ThreadId.make("suggestion-thread"),
+    runId: RunId.make("suggestion-run"),
+    occurredAt: now,
+    payload: { runId: RunId.make("suggestion-run"), suggestedPrompt: "run the tests" },
+  } satisfies OrchestrationV2DomainEvent;
+  const encoded = encodeOrchestrationV2DomainEventJson(event);
+  expect(encoded.payload).toEqual({ runId: "suggestion-run", suggestedPrompt: "run the tests" });
+  expect(decodeOrchestrationV2DomainEventJson(encoded)).toEqual(event);
 });

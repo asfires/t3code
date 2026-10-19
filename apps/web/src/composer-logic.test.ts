@@ -24,6 +24,7 @@ import {
   isCollapsedCursorAdjacentToInlineToken,
   parseStandaloneComposerSlashCommand,
   replaceTextRange,
+  shouldAcceptPromptSuggestionOnTab,
 } from "./composer-logic";
 import { carryDisplacedCustomAnswerIntoPrompt } from "./pendingUserInput";
 import { formatTerminalContextReference } from "./lib/terminalContext";
@@ -861,5 +862,37 @@ describe("literal editor answer cursor state", () => {
       });
     }
     expect(composerStateAtPromptEnd("Use $my").trigger?.kind).toBe("skill");
+  });
+});
+
+describe("shouldAcceptPromptSuggestionOnTab", () => {
+  it("accepts a suggestion with plain Tab in an empty composer", () => {
+    expect(
+      shouldAcceptPromptSuggestionOnTab({
+        key: "Tab",
+        shiftKey: false,
+        prompt: "",
+        suggestedPrompt: "run the tests",
+      }),
+    ).toBe(true);
+  });
+
+  it("does not replace user input or handle Shift+Tab", () => {
+    expect(
+      shouldAcceptPromptSuggestionOnTab({
+        key: "Tab",
+        shiftKey: false,
+        prompt: "already typing",
+        suggestedPrompt: "run the tests",
+      }),
+    ).toBe(false);
+    expect(
+      shouldAcceptPromptSuggestionOnTab({
+        key: "Tab",
+        shiftKey: true,
+        prompt: "",
+        suggestedPrompt: "run the tests",
+      }),
+    ).toBe(false);
   });
 });

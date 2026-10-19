@@ -213,6 +213,8 @@ import {
   resolveTimelineMinimapInteractiveWidth,
   resolveTimelineMinimapNavigationInteractive,
   resolveTimelineMinimapTopPercent,
+  resolveTimelineMinimapWheelIndex,
+  timelineMinimapWheelTargetsHitStrip,
   resolveWorkGroupScrollIndex,
   shouldCollapseUserMessage,
   shouldFollowWorkGroupAppend,
@@ -283,6 +285,7 @@ import {
   formatUpcomingTimestamp,
 } from "../../timestampFormat";
 import { FetchedToolOutput, V2ItemInspector } from "./V2ItemInspector";
+import { ToolRowCopyButton } from "./ToolRowCopyButton";
 import { useV2ItemSupport } from "../../state/v2ItemSupport";
 import { Collapsible, CollapsibleTrigger, CollapsiblePanel } from "../ui/collapsible";
 import {
@@ -1550,7 +1553,7 @@ function resolveTimelineRowHeight(state: TimelinePositionState, rowIndex: number
   return typeof height === "number" && Number.isFinite(height) ? height : null;
 }
 
-function timelineMinimapEventTargetsPreview(target: EventTarget): boolean {
+function timelineMinimapEventTargetsPreview(target: EventTarget | null): boolean {
   return target instanceof Element && target.closest("[data-minimap-preview]") !== null;
 }
 
@@ -1589,6 +1592,7 @@ function TimelineMinimap({
   onSelect: (item: TimelineMinimapItem) => void;
 }) {
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  const wheelIndexRef = useRef<number | null>(null);
   const wheelTargetRef = (node: HTMLDivElement | null) => {
     if (!node) return;
     node.addEventListener("wheel", onWheel, { passive: false });
@@ -1628,6 +1632,53 @@ function TimelineMinimap({
     resolvedCurrentIndex === null ? null : (items[resolvedCurrentIndex - 1] ?? null);
   const nextItem = resolvedCurrentIndex === null ? null : (items[resolvedCurrentIndex + 1] ?? null);
 
+  useEffect(() => {
+    wheelIndexRef.current = resolvedActiveIndex;
+  }, [resolvedActiveIndex]);
+
+  const stripWheelTargetRef = (button: HTMLButtonElement | null) => {
+    if (!button) return;
+    const navigateFromWheel = (event: WheelEvent) => {
+      if (event.deltaY === 0 || timelineMinimapEventTargetsPreview(event.target)) return;
+
+      const rect = button.getBoundingClientRect();
+      if (
+        !timelineMinimapWheelTargetsHitStrip({
+          pointerX: event.clientX,
+          hitStripLeft: rect.left,
+          hitStripWidth,
+        })
+      ) {
+        return;
+      }
+
+      const pointerIndex = resolveTimelineMinimapIndexFromPointer({
+        itemCount: items.length,
+        railTop: rect.top,
+        railHeight: rect.height,
+        pointerY: event.clientY,
+      });
+      const currentIndex = wheelIndexRef.current ?? pointerIndex;
+      if (currentIndex === null) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      const nextIndex = resolveTimelineMinimapWheelIndex({
+        currentIndex,
+        itemCount: items.length,
+        deltaY: event.deltaY,
+      });
+      const nextItem = nextIndex === null ? null : (items[nextIndex] ?? null);
+      if (nextIndex === null || nextIndex === currentIndex || nextItem === null) return;
+
+      setActiveIndex(nextIndex);
+      wheelIndexRef.current = nextIndex;
+      onSelect(nextItem);
+    };
+    button.addEventListener("wheel", navigateFromWheel, { passive: false });
+    return () => button.removeEventListener("wheel", navigateFromWheel);
+  };
+
   const resolveActiveIndexFromPointer = (event: MouseEvent<HTMLElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
     return resolveTimelineMinimapIndexFromPointer({
@@ -1641,6 +1692,7 @@ function TimelineMinimap({
   const updateActiveIndexFromPointer = (event: MouseEvent<HTMLElement>) => {
     const nextIndex = resolveActiveIndexFromPointer(event);
     setActiveIndex(nextIndex);
+    wheelIndexRef.current = nextIndex;
   };
 
   const moveActiveIndex = (delta: number) => {
@@ -1696,6 +1748,7 @@ function TimelineMinimap({
             }}
           />
           <button
+            ref={stripWheelTargetRef}
             aria-label={`Jump to message: ${activeItem?.userText ?? "User message"}`}
             className="absolute inset-y-0 left-0 w-full cursor-pointer bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
             onBlur={() => setActiveIndex(null)}
@@ -5091,7 +5144,7 @@ function buildToolCallExpandedBody(
 }
 
 const toolCallExpandedBodyClassName =
-  "max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-secondary-label text-(length:--font-size-code,var(--text-2xs)) leading-relaxed select-text";
+  "max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-secondary-label text-(length:--font-size-tool-output,0.6875rem) leading-relaxed select-text";
 
 function workEntryIconName(workEntry: TimelineWorkEntry): WorkEntryIconName {
   if (workEntry.structuredPayload?.type === "notification") {
@@ -5528,7 +5581,21 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
           !toolIconAcceptsTint(entryToolIcon) ? (
             <XIcon aria-hidden className={cn("size-3 shrink-0", failedToolIconClassName)} />
           ) : null}
-          <TimelineRowTimestamp createdAt={workEntry.createdAt} timestampFormat={timestampFormat} />
+          <TimelineRowTimestamp
+            createdAt={workEntry.createdAt}
+            timestampFormat={timestampFormat}
+            // The timestamp takes up space only while the row is hovered, so it
+            // sits before the copy button, which would otherwise shift under the
+            // pointer. The copy menu's backdrop takes hover away from the row, so
+            // an open popup keeps the timestamp in place too.
+            className="group-has-[[data-popup-open]]/timeline-row:pointer-events-auto group-has-[[data-popup-open]]/timeline-row:static group-has-[[data-popup-open]]/timeline-row:opacity-100"
+          />
+          {workEntry.projectedItem ? (
+            <ToolRowCopyButton
+              projectedItem={workEntry.projectedItem}
+              environmentId={ctx.activeThreadEnvironmentId}
+            />
+          ) : null}
           <span
             className={cn(
               "flex size-4 shrink-0 items-center justify-center",
@@ -5574,6 +5641,7 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
           {workEntry.projectedItem && plainOutput === undefined ? (
             <V2ItemInspector
               projectedItem={workEntry.projectedItem}
+              plainCommand
               environmentId={ctx.activeThreadEnvironmentId}
               cwd={ctx.markdownCwd}
               workspaceRoot={workspaceRoot}

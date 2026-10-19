@@ -221,7 +221,10 @@ export class EnvironmentInternalError extends Schema.TaggedError<EnvironmentInte
   }
 }
 
-export const EnvironmentResourceNotFoundReason = Schema.Literals(["thread_not_found"]);
+export const EnvironmentResourceNotFoundReason = Schema.Literals([
+  "thread_not_found",
+  "font_not_found",
+]);
 export type EnvironmentResourceNotFoundReason = typeof EnvironmentResourceNotFoundReason.Type;
 
 export class EnvironmentResourceNotFoundError extends Schema.TaggedError<EnvironmentResourceNotFoundError>()(
@@ -440,6 +443,20 @@ export const AuthOtherClientSessionsRevokeResult = Schema.Struct({
   revokedCount: Schema.Number,
 });
 export type AuthOtherClientSessionsRevokeResult = typeof AuthOtherClientSessionsRevokeResult.Type;
+
+export const EnvironmentSystemFontsResult = Schema.Struct({
+  families: Schema.Array(Schema.String),
+  status: Schema.Literals(["available", "unsupported"]),
+});
+export type EnvironmentSystemFontsResult = typeof EnvironmentSystemFontsResult.Type;
+
+const EnvironmentSystemFontFileQuery = {
+  family: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+};
+
+const EnvironmentSystemFontFile = Schema.Uint8Array.pipe(
+  HttpApiSchema.asUint8Array({ contentType: "application/octet-stream" }),
+);
 
 class EnvironmentMetadataHttpApi extends HttpApiGroup.make("metadata").add(
   HttpApiEndpoint.get("descriptor", "/.well-known/t3/environment", {
@@ -665,6 +682,28 @@ class EnvironmentPullRequestsHttpApi extends HttpApiGroup.make("pullRequests").a
   }).middleware(EnvironmentAuthenticatedAuth),
 ) {}
 
+class EnvironmentSystemHttpApi extends HttpApiGroup.make("system")
+  .add(
+    HttpApiEndpoint.get("fonts", "/api/system/fonts", {
+      headers: OptionalBearerHeaders,
+      success: EnvironmentSystemFontsResult,
+      error: [EnvironmentAuthInvalidError, EnvironmentScopeRequiredError, EnvironmentInternalError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("fontFile", "/api/system/font-file", {
+      headers: OptionalBearerHeaders,
+      query: Schema.Struct(EnvironmentSystemFontFileQuery),
+      success: EnvironmentSystemFontFile,
+      error: [
+        EnvironmentAuthInvalidError,
+        EnvironmentScopeRequiredError,
+        EnvironmentResourceNotFoundError,
+        EnvironmentInternalError,
+      ],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  ) {}
+
 class EnvironmentConnectHttpApi extends HttpApiGroup.make("connect")
   .add(
     HttpApiEndpoint.post("linkProof", "/api/connect/link-proof", {
@@ -757,5 +796,6 @@ export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentOrchestrationHttpApi)
   .add(EnvironmentPullRequestsHttpApi)
   .add(EnvironmentProjectsHttpApi)
+  .add(EnvironmentSystemHttpApi)
   .add(EnvironmentConnectHttpApi)
   .add(EnvironmentWebhooksHttpApi) {}

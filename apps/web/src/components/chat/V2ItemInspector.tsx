@@ -32,6 +32,7 @@ import type { ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ShellCommandBlock } from "./ShellCommandBlock";
 
 interface V2ItemInspectorProps {
+  readonly plainCommand?: boolean;
   readonly projectedItem: OrchestrationV2ProjectedTurnItem;
   readonly environmentId: EnvironmentId;
   readonly cwd?: string | undefined;
@@ -69,7 +70,7 @@ function SyntaxTokens({
 }
 
 const monoClassName =
-  "font-mono text-(length:--font-size-code,var(--text-2xs)) leading-relaxed whitespace-pre-wrap break-words select-text";
+  "font-mono text-(length:--font-size-tool-output,0.6875rem) leading-relaxed whitespace-pre-wrap break-words select-text";
 
 function isJsonText(text: string): boolean {
   if (!text) return false;
@@ -167,13 +168,13 @@ function ToolOutput(props: ToolOutputState) {
     />
   ));
   const text = props.output ? (
-    <div className="max-h-80 overflow-auto text-muted-foreground">{props.output}</div>
+    <div className="max-h-80 overflow-auto text-foreground/80">{props.output}</div>
   ) : props.pending ? (
     <div className="text-muted-foreground italic">Loading output…</div>
   ) : props.error ? (
     <div className="text-destructive">Couldn&apos;t load output: {props.error}</div>
   ) : props.empty && images.length === 0 ? (
-    <div className="text-muted-foreground italic">No output.</div>
+    <div className="text-muted-foreground italic">(No output)</div>
   ) : null;
   return (
     <>
@@ -199,6 +200,7 @@ export function FetchedToolOutput(props: {
 function ToolCallBody(
   props: ToolOutputState & {
     readonly command?: string;
+    readonly plainCommand?: boolean;
     readonly args?: unknown;
     readonly toolName?: string | null;
     readonly exitCode?: number | undefined;
@@ -209,7 +211,15 @@ function ToolCallBody(
   const call = toolCallLines({ command: props.command, args: props.args });
   return (
     <div className={cn("space-y-1.5", monoClassName)}>
-      {call.command ? <ShellCommandBlock command={call.command} /> : null}
+      {call.command ? (
+        props.plainCommand ? (
+          <pre className="max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words text-secondary-label">
+            {call.command}
+          </pre>
+        ) : (
+          <ShellCommandBlock command={call.command} />
+        )
+      ) : null}
       {call.args ? (
         <div className="text-foreground/85">
           {call.args.map(([key, value]) => (
@@ -265,6 +275,7 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
       {item.type === "command_execution" ? (
         <ToolCallBody
           command={item.input}
+          plainCommand={props.plainCommand ?? false}
           exitCode={item.exitCode}
           {...outputState}
           onImageExpand={props.onImageExpand}

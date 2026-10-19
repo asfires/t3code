@@ -587,6 +587,7 @@ interface ProviderInstanceCardProps {
   ) => void;
   readonly onFavoriteModelsChange: (next: ReadonlyArray<string>) => void;
   readonly onToggleFavorite: (model: string) => void;
+  readonly newThreadDefaultsSection?: ReactNode;
   readonly onModelOrderChange: (next: ReadonlyArray<string>) => void;
   readonly onRunUpdate?: (() => void) | undefined;
   readonly onInstallRecommended?: (() => void) | undefined;
@@ -636,6 +637,7 @@ export function ProviderInstanceCard({
   onFavoriteModelsChange,
   onToggleFavorite,
   onModelOrderChange,
+  newThreadDefaultsSection,
   onRunUpdate,
   onInstallRecommended,
   isUpdating = false,
@@ -1254,6 +1256,13 @@ export function ProviderInstanceCard({
         />
       ) : null}
 
+      {newThreadDefaultsSection ? (
+        <SettingsSection title="New thread defaults" hideTitle>
+          <fieldset disabled={!canWriteSettings} className="px-3 py-3 sm:px-4">
+            {newThreadDefaultsSection}
+          </fieldset>
+        </SettingsSection>
+      ) : null}
       {driverOption !== undefined ? (
         <SettingsSection title="Models">
           <div className="px-3 py-3 sm:px-4">

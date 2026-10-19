@@ -1,3 +1,7 @@
+import {
+  resolveProjectSettings,
+  resolveProviderNewThreadDefaults,
+} from "@t3tools/shared/projectSettings";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -828,4 +832,126 @@ describe("synchronized mobile model visibility", () => {
       buildModelOptions(cleared, null, provider, null).map((option) => option.selection.model),
     ).toEqual(["hidden", "first", "second", "custom"]);
   });
+});
+
+it("resolves configured new-thread defaults with configured options", () => {
+  const codexId = ProviderInstanceId.make("codex");
+  const claudeId = ProviderInstanceId.make("claudeAgent");
+  const config = {
+    settings: {
+      ...DEFAULT_SERVER_SETTINGS,
+      defaultModelSelection: { instanceId: claudeId, model: "claude" },
+      providerNewThreadDefaults: {
+        [claudeId]: {
+          modelOptions: [{ id: "effort", value: "high" }],
+          runtimeMode: "approval-required",
+        },
+      },
+    },
+    providers: [
+      {
+        instanceId: codexId,
+        driver: "codex",
+        enabled: true,
+        installed: true,
+        auth: { status: "authenticated" },
+        models: [
+          {
+            slug: "gpt",
+            name: "GPT",
+            isCustom: false,
+            isDefault: true,
+            capabilities: null,
+          },
+        ],
+      },
+      {
+        instanceId: claudeId,
+        driver: "claudeAgent",
+        enabled: true,
+        installed: true,
+        auth: { status: "authenticated" },
+        models: [
+          {
+            slug: "claude",
+            name: "Claude",
+            isCustom: false,
+            capabilities: {
+              optionDescriptors: [
+                {
+                  id: "effort",
+                  label: "Effort",
+                  type: "select",
+                  options: [
+                    { id: "low", label: "Low", isDefault: true },
+                    { id: "high", label: "High" },
+                  ],
+                },
+              ],
+            },
+          },
+        ],
+      },
+    ],
+  } as unknown as ServerConfig;
+
+  const resolve = (input: {
+    draftSelection: ModelSelection | null;
+    projectDefaultSelection?: ModelSelection;
+  }) => {
+    const projectSettings = resolveProjectSettings(
+      {
+        ...config.settings,
+        projectSettingsOverrides: input.projectDefaultSelection
+          ? {
+              [ProjectId.make("project")]: { defaultModelSelection: input.projectDefaultSelection },
+            }
+          : {},
+      },
+      ProjectId.make("project"),
+    );
+    return resolveNewTaskModelSelection({
+      draftSelection: input.draftSelection,
+      projectDefaultSelection: projectSettings.settings.defaultModelSelection,
+      stickySelection: null,
+      modelOptions: buildModelOptions(config, null, undefined, null),
+      projectSettings,
+      providers: config.providers,
+    });
+  };
+  expect(
+    resolve({
+      draftSelection: null,
+      projectDefaultSelection: {
+        instanceId: claudeId,
+        model: "claude",
+        options: [{ id: "effort", value: "low" }],
+      },
+    })?.options,
+  ).toEqual([{ id: "effort", value: "low" }]);
+
+  const configured = resolve({
+    draftSelection: null,
+  });
+  expect(configured).toEqual({
+    instanceId: claudeId,
+    model: "claude",
+    options: [{ id: "effort", value: "high" }],
+  });
+  expect(
+    resolveProviderNewThreadDefaults({
+      projectSettings: resolveProjectSettings(config.settings, null),
+      modelSelection: configured!,
+      providers: config.providers,
+    }).runtimeMode,
+  ).toBe("approval-required");
+  expect(
+    resolve({
+      draftSelection: {
+        instanceId: claudeId,
+        model: "claude",
+        options: [{ id: "effort", value: "low" }],
+      },
+    })?.options,
+  ).toEqual([{ id: "effort", value: "low" }]);
 });

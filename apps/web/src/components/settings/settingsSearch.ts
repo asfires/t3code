@@ -252,25 +252,50 @@ export const SETTINGS_SEARCH_ITEMS = [
   },
   {
     id: "interface-font",
-    title: "Interface font",
+    title: "Interface typeface",
     to: "/settings/appearance",
     searchTerms: ["typography family size system sans"],
   },
   {
     id: "prompt-font",
-    title: "Prompt font",
+    title: "Prompt typeface",
     to: "/settings/appearance",
     searchTerms: ["typography family size composer input"],
   },
   {
     id: "code-font",
-    title: "Code font",
+    title: "Monospace typeface",
     to: "/settings/appearance",
     searchTerms: ["typography family size monospace code blocks diffs file previews"],
   },
   {
     id: "terminal-font",
-    title: "Terminal font",
+    title: "Terminal typeface",
+    to: "/settings/appearance",
+  },
+  {
+    id: "interface-size",
+    title: "Interface and response size",
+    to: "/settings/appearance",
+  },
+  {
+    id: "prompt-size",
+    title: "Prompt size",
+    to: "/settings/appearance",
+  },
+  {
+    id: "code-size",
+    title: "Diff and file size",
+    to: "/settings/appearance",
+  },
+  {
+    id: "tool-output-font",
+    title: "Tool output size",
+    to: "/settings/appearance",
+  },
+  {
+    id: "terminal-size",
+    title: "Terminal size",
     to: "/settings/appearance",
     searchTerms: ["typography family size monospace output"],
   },
@@ -633,6 +658,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: [
       "agents cli codex claude cursor grok opencode antigravity google sign in sign out install subscription instances authentication api key models configuration binary path config directory endpoint arguments environment variables display name accent color custom favorite hidden auto compact",
     ],
+  },
+  {
+    id: "provider-new-thread-defaults",
+    title: "Provider new thread defaults",
+    to: "/settings/providers",
+    targetId: "providers",
+    searchTerms: ["traits effort context speed permission runtime mode"],
   },
   {
     id: "usage-providers",

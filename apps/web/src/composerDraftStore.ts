@@ -1186,11 +1186,12 @@ export function deriveEffectiveComposerModelState(input: {
         activeSelection.model,
       ))
     : baseModel;
-  const modelOptions =
-    modelSelectionByProviderToOptions(input.draft?.modelSelectionByProvider) ??
-    providerSelectionsFromModelSelection(input.threadModelSelection) ??
-    providerSelectionsFromModelSelection(input.projectModelSelection) ??
-    null;
+  const combinedModelOptions = {
+    ...providerSelectionsFromModelSelection(input.projectModelSelection),
+    ...providerSelectionsFromModelSelection(input.threadModelSelection),
+    ...modelSelectionByProviderToOptions(input.draft?.modelSelectionByProvider),
+  };
+  const modelOptions = Object.keys(combinedModelOptions).length > 0 ? combinedModelOptions : null;
 
   return {
     selectedModel,

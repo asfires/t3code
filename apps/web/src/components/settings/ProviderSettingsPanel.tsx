@@ -97,6 +97,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
 import { ExpandableText } from "./ExpandableText";
+import { ProviderNewThreadDefaultsSection } from "./ProviderNewThreadDefaultsSection";
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
 import { UsageProviderSettings } from "./UsageProviderSettings";
 import { ProviderSetupSection, readAntigravityAuthMethod } from "./ProviderSetupSection";
@@ -1276,6 +1277,8 @@ function ProviderInstanceRow({
   readonly favorites: UnifiedSettings["favorites"];
   readonly actions: ProviderInstanceRowActions;
 }) {
+  const settings = useEnvironmentSettings(environmentId);
+  const updateSettings = useUpdateEnvironmentSettings(environmentId);
   const allProjects = useProjects();
   const acpProjects =
     mode === "editor" && liveProvider?.driver === "acpRegistry"
@@ -1442,6 +1445,28 @@ function ProviderInstanceRow({
           setProviderModelOrder: { provider: instanceId, modelOrder: nextOrder },
         });
       }}
+      newThreadDefaultsSection={
+        mode === "editor" ? (
+          <ProviderNewThreadDefaultsSection
+            instanceId={instanceId}
+            displayName={instance.displayName ?? driverOption?.label ?? String(driver)}
+            driverKind={driver}
+            models={liveProvider?.models ?? []}
+            newThreadDefaults={settings.providerNewThreadDefaults[instanceId]}
+            newThreadModel={settings.defaultModelSelection}
+            fallbackRuntimeMode={settings.defaultRuntimeMode}
+            onNewThreadDefaultsChange={(next) => {
+              const { [instanceId]: _removed, ...rest } = settings.providerNewThreadDefaults;
+              updateSettings({
+                providerNewThreadDefaults:
+                  next.modelOptions === undefined && next.runtimeMode === undefined
+                    ? rest
+                    : { ...rest, [instanceId]: next },
+              });
+            }}
+          />
+        ) : undefined
+      }
       onInstallRecommended={
         canInstallRecommended
           ? () => {

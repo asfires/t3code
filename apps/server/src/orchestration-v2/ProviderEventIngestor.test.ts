@@ -2242,3 +2242,93 @@ layer("ProviderEventIngestorV2", (it) => {
     }),
   );
 });
+
+it.effect("projects a late prompt suggestion without regressing run completion", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const sink = yield* EventSink.EventSinkV2;
+    const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const ids = yield* IdAllocator.IdAllocatorV2;
+    const thread = yield* threadCreatedEvent(now);
+    const threadId = thread.threadId;
+    const run: OrchestrationV2Run = {
+      id: RunId.make("suggestion-run"),
+      threadId,
+      ordinal: 1,
+      providerInstanceId: modelSelection.instanceId,
+      modelSelection,
+      providerThreadId: null,
+      userMessageId: MessageId.make("suggestion-message"),
+      rootNodeId: null,
+      activeAttemptId: null,
+      status: "waiting",
+      requestedAt: now,
+      startedAt: now,
+      completedAt: null,
+      checkpointId: null,
+      contextHandoffId: null,
+    };
+    yield* sink.write({
+      events: [
+        thread,
+        {
+          id: yield* ids.allocate.event({ threadId }),
+          type: "run.created",
+          threadId,
+          occurredAt: now,
+          payload: run,
+        },
+      ],
+    });
+    const providerSessionId = yield* ids.allocate.providerSession({
+      threadId,
+      providerInstanceId: modelSelection.instanceId,
+    });
+    const input = {
+      providerSessionId,
+      providerInstanceId: modelSelection.instanceId,
+      threadId,
+      event: {
+        type: "prompt_suggestion.updated" as const,
+        driver: ProviderDriverKind.make("claudeAgent"),
+        threadId,
+        runId: run.id,
+        providerTurnId: ProviderTurnId.make("suggestion-turn"),
+        suggestedPrompt: "  run the tests  ",
+      },
+    };
+    const before = yield* projections.getThreadProjection(threadId);
+    const stored = yield* ingestor.ingestNormalized(input);
+    assert.equal(stored.length, 1);
+    assert.deepEqual(stored[0]?.event.payload, { runId: run.id, suggestedPrompt: "run the tests" });
+    const replayed = ProjectionStore.applyToProjection(before, stored[0]!.event);
+    assert.equal(replayed.runs[0]?.suggestedPrompt, "run the tests");
+    assert.equal((yield* projections.getThreadProjection(threadId)).runs[0]?.status, "waiting");
+    const completed = yield* sink.write({
+      events: [
+        {
+          id: yield* ids.allocate.event({ threadId }),
+          type: "run.updated",
+          threadId,
+          occurredAt: now,
+          payload: { ...run, status: "completed", completedAt: now },
+        },
+      ],
+    });
+    const projection = yield* projections.getThreadProjection(threadId);
+    assert.equal(projection.runs[0]?.suggestedPrompt, "run the tests");
+    assert.equal(projection.runs[0]?.status, "completed");
+    assert.deepEqual(
+      ProjectionStore.applyToProjection(replayed, completed[0]!.event).runs,
+      projection.runs,
+    );
+    assert.isEmpty(projection.turnItems);
+    assert.isEmpty(
+      yield* ingestor.ingestNormalized({
+        ...input,
+        event: { ...input.event, suggestedPrompt: "  " },
+      }),
+    );
+  }).pipe(Effect.provide(layerTest)),
+);

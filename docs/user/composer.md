@@ -107,11 +107,18 @@ instance:
 
 ## Model defaults
 
-T3 Code remembers your provider, model, and model options for new threads. A
-project's configured model takes precedence; resetting that project setting
-returns to the remembered selection.
+Choose the model for new threads in **Settings > General > New threads**: automatic (last used)
+or a fixed model. Set each provider's traits and permission mode in its card under
+**Settings > Providers**. Traits a model does not support are skipped.
 
-Leaving reasoning level or service tier unset uses the provider's own configuration.
+Project overrides win over these defaults. Otherwise, a new thread uses its provider's saved
+traits and permission mode. Resetting a provider's defaults restores last-used traits and the
+global permission mode. Leaving reasoning level or service tier unset uses the provider's
+own configuration.
+
+Empty, unstarted drafts follow changes to defaults. Once you type, attach content, or explicitly
+choose model options or a permission mode, the draft keeps its choices. Started threads are
+not changed.
 
 ## Quote an assistant response
 

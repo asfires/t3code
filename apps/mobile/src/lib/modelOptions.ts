@@ -1,3 +1,7 @@
+import {
+  resolveProviderNewThreadDefaults,
+  type ResolvedProjectSettings,
+} from "@t3tools/shared/projectSettings";
 import type { MenuAction } from "@react-native-menu/menu";
 import type {
   ModelCapabilities,
@@ -216,15 +220,26 @@ export function resolveNewTaskModelSelection(input: {
   readonly projectDefaultSelection: ModelSelection | null;
   readonly stickySelection: ModelSelection | null;
   readonly modelOptions: ReadonlyArray<ModelOption>;
+  readonly projectSettings?: ResolvedProjectSettings;
+  readonly providers?: T3ServerConfig["providers"];
 }): ModelSelection | null {
-  return (
+  const selection =
     input.draftSelection ??
     input.projectDefaultSelection ??
     input.stickySelection ??
     input.modelOptions.find((option) => option.isDefault && !option.isUnavailable)?.selection ??
     input.modelOptions.find((option) => !option.isUnavailable)?.selection ??
-    null
-  );
+    null;
+  if (!selection || input.draftSelection || !input.projectSettings) return selection;
+  return resolveProviderNewThreadDefaults({
+    projectSettings: input.projectSettings,
+    modelSelection: selection,
+    providers: input.providers ?? [],
+    lastUsedOptions:
+      input.stickySelection?.instanceId === selection.instanceId
+        ? input.stickySelection.options
+        : undefined,
+  }).modelSelection;
 }
 
 export function buildModelOptions(

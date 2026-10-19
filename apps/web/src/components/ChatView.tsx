@@ -132,7 +132,11 @@ import {
   latestUnheldRun,
   usageLimitRunPresentedAsLatest,
 } from "@t3tools/shared/orchestrationV2ThreadError";
-import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
+import {
+  resolveNewThreadConfiguredState,
+  resolveProjectSettings,
+  resolveProviderNewThreadDefaults,
+} from "@t3tools/shared/projectSettings";
 import { sourceControlRepositorySelector } from "@t3tools/shared/sourceControl";
 import { truncate } from "@t3tools/shared/String";
 import { resolveThreadReferenceCopyTarget } from "@t3tools/shared/threadReference";
@@ -385,6 +389,7 @@ import {
   waitForThreadShell,
 } from "../state/entities";
 import { useEnvironmentShellHasSnapshot } from "../state/shell";
+import { deriveLatestPromptSuggestion } from "../lib/promptSuggestion";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { createPageScrollController, type PageScrollKey } from "./chat/pageScrollController";
 import { isTimelineScrollTarget } from "./chat/timelineScrollTarget";
@@ -1523,7 +1528,7 @@ export default function ChatView(props: ChatViewProps) {
     .settings.defaultRuntimeMode;
   const runtimeMode =
     composerRuntimeMode ??
-    (isServerThread ? activeThread?.runtimeMode : undefined) ??
+    (isServerThread ? activeThread?.runtimeMode : localDraftThread?.runtimeMode) ??
     defaultRuntimeMode;
   const isLocalDraftThread = !isServerThread && localDraftThread !== undefined;
   const canCheckoutPullRequestIntoThread = canWriteSourceControl && isLocalDraftThread;
@@ -2140,14 +2145,28 @@ export default function ChatView(props: ChatViewProps) {
 
     const nextDraftId = newDraftId();
     const nextThreadId = newThreadId();
+    const draftStore = useComposerDraftStore.getState();
+    const defaults = resolveNewThreadConfiguredState({
+      projectSettings: activeProjectSettings,
+      carryModel: activeThread?.modelSelection,
+      stickyModel: draftStore.stickyActiveProvider
+        ? draftStore.stickyModelSelectionByProvider[draftStore.stickyActiveProvider]
+        : null,
+      stickySelections: draftStore.stickyModelSelectionByProvider,
+      providers: providersByEnvironment.get(activeProject.environmentId) ?? EMPTY_PROVIDERS,
+    });
     setLogicalProjectDraftThreadId(logicalProjectKey, activeProjectRef, nextDraftId, {
       threadId: nextThreadId,
       createdAt: new Date().toISOString(),
-      runtimeMode: resolveProjectSettings(settings, activeProject.id, activeProject).settings
-        .defaultRuntimeMode,
+      runtimeMode: defaults.runtimeMode,
       interactionMode: DEFAULT_INTERACTION_MODE,
       ...input,
     });
+    if (defaults.modelSelection) {
+      setComposerDraftModelSelection(nextDraftId, defaults.modelSelection, {
+        replaceOptions: true,
+      });
+    }
     await navigate({
       to: "/draft/$draftId",
       params: buildDraftThreadRouteParams(nextDraftId),
@@ -7566,12 +7585,24 @@ export default function ChatView(props: ChatViewProps) {
       if (options?.focusComposer !== false) scheduleComposerFocus();
       return;
     }
+    const draftStore = useComposerDraftStore.getState();
+    const existingSelection =
+      draftStore.getComposerDraft(composerDraftTarget)?.modelSelectionByProvider[instanceId];
     const rememberedOptions =
-      useComposerDraftStore.getState().stickyOptionsByModelByProvider[instanceId]?.[resolvedModel];
-    const nextModelSelection: ModelSelection =
-      rememberedOptions !== undefined && rememberedOptions.length > 0
-        ? { instanceId, model: resolvedModel, options: [...rememberedOptions] }
-        : { instanceId, model: resolvedModel };
+      draftStore.stickyOptionsByModelByProvider[instanceId]?.[resolvedModel];
+    const defaults = resolveProviderNewThreadDefaults({
+      projectSettings: activeProjectSettings,
+      modelSelection: { instanceId, model: resolvedModel },
+      providers: providerStatuses,
+      lastUsedOptions: rememberedOptions,
+    });
+    const nextModelSelection: ModelSelection = isLocalDraftThread
+      ? createModelSelection(
+          instanceId,
+          resolvedModel,
+          existingSelection ? existingSelection.options : defaults.modelSelection.options,
+        )
+      : createModelSelection(instanceId, resolvedModel, rememberedOptions);
     const modelChangeBlockReason = getStartedThreadModelChangeBlockReason({
       providers: providerStatuses,
       hasStartedSession: activeRuntime !== null,
@@ -7595,6 +7626,12 @@ export default function ChatView(props: ChatViewProps) {
       { explicit: true, replaceOptions: true },
     );
     setStickyComposerModelSelection(nextModelSelection);
+    const previousInstanceId = composerActiveProvider ?? activeThread.modelSelection.instanceId;
+    if (isLocalDraftThread && instanceId !== previousInstanceId) {
+      setComposerDraftRuntimeMode(composerDraftTarget, defaults.runtimeMode);
+      setDraftThreadContext(composerDraftTarget, { runtimeMode: defaults.runtimeMode });
+    }
+
     if (options?.focusComposer !== false) scheduleComposerFocus();
   };
   const onProviderModelSelectStable = useStableCallback(onProviderModelSelect);
@@ -8308,6 +8345,11 @@ export default function ChatView(props: ChatViewProps) {
                               activeThreadId={activeThreadId}
                               activeThreadEnvironmentId={activeThread?.environmentId}
                               activeThread={activeThread}
+                              suggestedPrompt={deriveLatestPromptSuggestion(
+                                serverProjection?.runs.find(
+                                  (run) => run.id === serverLatestRun?.runId,
+                                ),
+                              )}
                               activeThreadShell={activeThreadShell}
                               promptHistoryMessages={timelineMessages}
                               isServerThread={isServerThread}
