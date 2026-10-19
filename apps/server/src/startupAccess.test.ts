@@ -3,11 +3,18 @@ import { assert, expect, it } from "@effect/vitest";
 import {
   buildPairingUrl,
   formatHeadlessServeOutput,
+  isLoopbackHost,
   renderTerminalQrCode,
   resolveHeadlessConnectionHost,
   resolveHeadlessConnectionString,
   resolveListeningPort,
 } from "./startupAccess.ts";
+
+it("recognizes localhost subdomains as loopback hosts", () => {
+  expect(isLoopbackHost("feature-worktree.localhost")).toBe(true);
+  expect(isLoopbackHost("FEATURE-WORKTREE.LOCALHOST")).toBe(true);
+  expect(isLoopbackHost("localhost.example.com")).toBe(false);
+});
 
 it("prefers localhost when no explicit host is configured", () => {
   expect(resolveHeadlessConnectionHost(undefined)).toBe("localhost");
@@ -55,6 +62,9 @@ it("prefers the actual bound port when an http server address is available", () 
 it("builds a pairing URL that embeds the token in the hash", () => {
   expect(buildPairingUrl("http://192.168.1.42:3773", "PAIRCODE")).toBe(
     "http://192.168.1.42:3773/pair#token=PAIRCODE",
+  );
+  expect(buildPairingUrl("http://feature-worktree.localhost:5733", "PAIRCODE")).toBe(
+    "http://feature-worktree.localhost:5733/pair#token=PAIRCODE",
   );
 });
 

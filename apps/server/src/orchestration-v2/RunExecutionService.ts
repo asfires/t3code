@@ -365,6 +365,7 @@ export function routeProviderEvent(
 
   switch (event.type) {
     case "provider_session.updated":
+    case "prompt_suggestion.updated":
       return [false, state];
     case "app_thread.created": {
       if (event.appThread.id === input.threadId) {

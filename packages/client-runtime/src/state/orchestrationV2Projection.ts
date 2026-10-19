@@ -231,9 +231,23 @@ export function applyOrchestrationV2ProjectionEvent(
       return { ...projection, thread: event.payload };
     case "run.created":
     case "run.updated": {
-      const next = { ...base, runs: upsertEntity(base.runs, event.payload) };
+      const current = base.runs.find((run) => run.id === event.payload.id);
+      const payload =
+        event.payload.suggestedPrompt === undefined && current?.suggestedPrompt !== undefined
+          ? { ...event.payload, suggestedPrompt: current.suggestedPrompt }
+          : event.payload;
+      const next = { ...base, runs: upsertEntity(base.runs, payload) };
       return { ...next, visibleTurnItems: activeVisibleTurnItems(next) };
     }
+    case "run.prompt-suggestion-updated":
+      return {
+        ...base,
+        runs: base.runs.map((run) =>
+          run.id === event.payload.runId
+            ? { ...run, suggestedPrompt: event.payload.suggestedPrompt }
+            : run,
+        ),
+      };
     case "run.background-work-cancelled":
       return {
         ...base,

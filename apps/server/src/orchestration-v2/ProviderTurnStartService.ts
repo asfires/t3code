@@ -28,6 +28,7 @@ import * as ServerConfig from "../config.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { makeIsManagedWorktreePath } from "../worktreesDirectory.ts";
@@ -96,6 +97,7 @@ export const layer: Layer.Layer<
   | ServerSettings.ServerSettingsService
   | GitWorkflowService.GitWorkflowService
   | ProjectService.ProjectService
+  | ProjectSetupScriptRunner.ProjectSetupScriptRunner
   | ProviderAuthService.ProviderAuthService
   | ProjectionStore.ProjectionStoreV2
   | ProviderSessionManager.ProviderSessionManagerV2
@@ -113,6 +115,8 @@ export const layer: Layer.Layer<
     const serverSettings = yield* ServerSettings.ServerSettingsService;
     const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
     const projects = yield* ProjectService.ProjectService;
+    const setupScripts = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
+    const serviceScope = yield* Effect.scope;
     const providerAuth = yield* ProviderAuthService.ProviderAuthService;
     const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
     const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
@@ -475,6 +479,29 @@ export const layer: Layer.Layer<
                   refName: branch,
                   path: worktreePath,
                 }),
+              ),
+              // Opening the setup terminal takes the lease held by turn startup.
+              // Fork into the service scope so it can acquire the lease after startup releases it.
+              Effect.andThen(() =>
+                setupScripts
+                  .runForThread({
+                    threadId: projection.thread.id,
+                    projectId: projection.thread.projectId,
+                    projectCwd: project.workspaceRoot,
+                    worktreePath,
+                  })
+                  .pipe(
+                    Effect.catchCause((cause) =>
+                      Cause.hasInterruptsOnly(cause)
+                        ? Effect.void
+                        : Effect.logWarning("failed to run setup script for recreated worktree", {
+                            threadId: projection.thread.id,
+                            worktreePath,
+                            cause: Cause.pretty(cause),
+                          }),
+                    ),
+                    Effect.forkIn(serviceScope),
+                  ),
               ),
               Effect.catchCause((cause) =>
                 Cause.hasInterruptsOnly(cause)

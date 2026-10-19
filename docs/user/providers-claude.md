@@ -1,5 +1,9 @@
 # Claude
 
+After Claude finishes a turn, it may suggest a likely follow-up in the empty message composer.
+Press Tab to copy that suggestion into the composer; T3 Code does not send it until you submit it.
+Prompt suggestions are on by default and can be changed for each Claude provider in Settings.
+
 T3 Code uses Claude Code's login and configuration. Start with the default provider
 for one account; [provider setup](./install.md#providers) covers installation and
 shared provider settings.

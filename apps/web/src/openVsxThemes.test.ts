@@ -416,7 +416,7 @@ describe("Open VSX themes", () => {
     expect(paired.label).toBe("Demo");
     expect(themeColorToHex(paired.colors.canvas)).toBe("#fafafa");
     expect(themeColorToHex(getThemeColorsForMode(paired, "dark")!.canvas)).toBe("#111111");
-    expect(themeColorToHex(getThemeColorsForMode(paired, "dark")!.text)).toBe("#eeeeee");
+    expect(themeColorToHex(getThemeColorsForMode(paired, "dark")!.text)).toBe("#f3f3f3");
     const darkColors = getThemeColorsForMode(paired, "dark")!;
     expect(themeColorToHex(darkColors.searchMatchActiveBackground)).toBe("#663399");
     expect(themeColorToHex(darkColors.searchMatchActiveForeground)).toBe("#ffffff");

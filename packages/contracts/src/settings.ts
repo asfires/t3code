@@ -142,6 +142,14 @@ export const CodeFontSize = Schema.Int.check(
 export type CodeFontSize = typeof CodeFontSize.Type;
 export const DEFAULT_CODE_FONT_SIZE: CodeFontSize = 13;
 
+export const MIN_TOOL_OUTPUT_FONT_SIZE = 10;
+export const MAX_TOOL_OUTPUT_FONT_SIZE = 18;
+export const ToolOutputFontSize = Schema.Int.check(
+  Schema.isBetween({ minimum: MIN_TOOL_OUTPUT_FONT_SIZE, maximum: MAX_TOOL_OUTPUT_FONT_SIZE }),
+);
+export type ToolOutputFontSize = typeof ToolOutputFontSize.Type;
+export const DEFAULT_TOOL_OUTPUT_FONT_SIZE: ToolOutputFontSize = 11;
+
 export const MIN_TERMINAL_FONT_SIZE = 8;
 export const MAX_TERMINAL_FONT_SIZE = 20;
 export const TerminalFontSize = Schema.Int.check(
@@ -371,6 +379,9 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   fontSizeCode: CodeFontSize.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_CODE_FONT_SIZE)),
+  ),
+  fontSizeToolOutput: ToolOutputFontSize.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_TOOL_OUTPUT_FONT_SIZE)),
   ),
   fontSizeTerminal: TerminalFontSize.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_TERMINAL_FONT_SIZE)),
@@ -649,6 +660,15 @@ export const ClaudeSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    promptSuggestions: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(true)),
+      Schema.annotateKey({
+        title: "Prompt suggestions",
+        description:
+          "Let Claude suggest a likely follow-up after each turn. Press Tab in the composer to use it.",
+        providerSettingsForm: { control: "switch" },
+      }),
+    ),
     autoCompactWindow: TrimmedString.check(
       Schema.isPattern(CLAUDE_AUTO_COMPACT_WINDOW_PATTERN),
     ).pipe(
@@ -665,7 +685,7 @@ export const ClaudeSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["binaryPath", "homePath", "autoCompactWindow", "launchArgs"],
+    order: ["binaryPath", "homePath", "autoCompactWindow", "launchArgs", "promptSuggestions"],
   },
 );
 export type ClaudeSettings = typeof ClaudeSettings.Type;
@@ -1551,6 +1571,7 @@ export const ClientSettingsPatch = Schema.Struct({
   fontSizeInterface: Schema.optionalKey(InterfaceFontSize),
   fontSizePrompt: Schema.optionalKey(PromptFontSize),
   fontSizeCode: Schema.optionalKey(CodeFontSize),
+  fontSizeToolOutput: Schema.optionalKey(ToolOutputFontSize),
   fontSizeTerminal: Schema.optionalKey(TerminalFontSize),
   fontFamilyCode: Schema.optionalKey(FontFamilyPreference),
   fontFamilyComposer: Schema.optionalKey(FontFamilyPreference),

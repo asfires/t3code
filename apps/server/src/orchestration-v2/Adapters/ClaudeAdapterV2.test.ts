@@ -215,6 +215,23 @@ function makeClaudeTestTurnInput(input: {
 }
 
 describe("ClaudeAdapterV2 runtime query policy", () => {
+  it.each([undefined, true, false])(
+    "requests prompt suggestions according to the setting %s",
+    (enabled) => {
+      const options = ClaudeAdapterV2.makeClaudeQueryOptions({
+        modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+        nativeThreadId: "suggestions-thread",
+        resume: false,
+        cwd: "/workspace",
+        ...(enabled === undefined
+          ? {}
+          : { settings: { ...DEFAULT_CLAUDE_SETTINGS, promptSuggestions: enabled } }),
+      });
+      assert.equal(DEFAULT_CLAUDE_SETTINGS.promptSuggestions, true);
+      assert.equal(options.promptSuggestions, enabled ?? true);
+    },
+  );
+
   it.each([false, true])("requests thinking summaries with resume=%s", (resume) => {
     const options = ClaudeAdapterV2.makeClaudeQueryOptions({
       modelSelection: CLAUDE_TEST_MODEL_SELECTION,
@@ -2370,6 +2387,10 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         [];
       const continuationReceipts =
         yield* Queue.unbounded<ProviderContinuationRequests.ProviderContinuationRequest>();
+      const suggestionReceipts =
+        yield* Queue.unbounded<
+          Extract<ProviderAdapter.ProviderAdapterV2Event, { type: "prompt_suggestion.updated" }>
+        >();
       const terminalReceipts =
         yield* Queue.unbounded<
           Extract<ProviderAdapter.ProviderAdapterV2Event, { type: "turn.terminal" }>
@@ -2483,6 +2504,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         Stream.runForEach((event) =>
           Effect.gen(function* () {
             events.push(event);
+            if (event.type === "prompt_suggestion.updated") {
+              yield* Queue.offer(suggestionReceipts, event);
+            }
             if (event.type === "subagent.updated") {
               yield* Queue.offer(subagentReceipts, event);
             }
@@ -2526,6 +2550,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         continuationReceipts,
         events,
         terminalReceipts,
+        suggestionReceipts,
         subagentReceipts,
         systemNoticeReceipts,
         getOpenedOptions: () => openedOptions,
@@ -2534,6 +2559,52 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       };
     });
   const makeWakeHarness = makeWakeHarnessWithOptions();
+
+  it.effect("forwards late prompt suggestions to the finished turn without waking Claude", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarness;
+      const turn = makeClaudeTestTurnInput({
+        threadId: harness.threadId,
+        providerThread: harness.providerThread,
+        now: yield* DateTime.now,
+        attemptId: RunAttemptId.make("suggestion-attempt"),
+        text: "Check this",
+        attachments: [],
+      });
+      const suggestion = (text: string) =>
+        claudeSdkFrame({
+          type: "prompt_suggestion",
+          suggestion: text,
+          session_id: WAKE_NATIVE_SESSION,
+          uuid: "prompt-suggestion",
+        });
+      yield* harness.runtime.startTurn(turn);
+      yield* harness.offerAndWait(suggestion("before result"));
+      yield* harness.offerAndWait(makeResultFrame({ uuid: "suggestion-result", result: "Done" }));
+      const terminal = yield* Queue.take(harness.terminalReceipts);
+      yield* harness.offerAndWait(suggestion("  "));
+      yield* harness.offerAndWait(suggestion("  run the tests  "));
+      const forwarded = yield* Queue.take(harness.suggestionReceipts);
+      assert.deepEqual(forwarded, {
+        type: "prompt_suggestion.updated",
+        driver: ProviderDriverKind.make("claudeAgent"),
+        threadId: harness.threadId,
+        runId: turn.runId,
+        providerTurnId: terminal.providerTurnId,
+        suggestedPrompt: "run the tests",
+      });
+      assert.lengthOf(
+        harness.events.filter((event) => event.type === "prompt_suggestion.updated"),
+        1,
+      );
+      assert.isEmpty(harness.continuationRequests);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
 
   it.effect.each([
     { isError: false, title: "Check weather" },
@@ -5784,6 +5855,134 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         ),
       ),
     ),
+  );
+
+  it.effect.each([
+    {
+      content: "(Bash completed with no output)",
+      structured: true,
+      isError: false,
+      expected: undefined,
+    },
+    {
+      content: " \n(bAsH completed with no output)\n",
+      structured: false,
+      isError: false,
+      expected: undefined,
+    },
+    {
+      content: "(completed with no output)",
+      structured: true,
+      isError: false,
+      expected: undefined,
+    },
+    { content: "(no output)", structured: false, isError: false, expected: undefined },
+    { content: "(NO CONTENT)", structured: true, isError: false, expected: undefined },
+    {
+      content: "(Bash completed with no output)",
+      structured: true,
+      isError: true,
+      expected: "(Bash completed with no output)",
+    },
+    { content: "(no output)", structured: false, isError: true, expected: "(no output)" },
+    {
+      content: "prefix (Bash completed with no output)",
+      structured: true,
+      isError: false,
+      expected: "prefix (Bash completed with no output)",
+    },
+    { content: "actual output", structured: false, isError: false, expected: "actual output" },
+  ])(
+    "normalizes empty Bash output without hiding errors: %j",
+    ({ content, structured, isError, expected }) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeWakeHarness;
+          const now = yield* DateTime.now;
+          const attemptId = RunAttemptId.make("attempt-claude-bash-output");
+          const bashToolUseId = "toolu_01BashOutput";
+
+          yield* harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId,
+              text: "Run it.",
+              attachments: [],
+            }),
+          );
+          yield* Queue.offer(
+            harness.sdkMessages,
+            claudeSdkFrame({
+              type: "assistant",
+              message: {
+                model: "claude-sonnet-4-6",
+                id: "msg_bash_output",
+                type: "message",
+                role: "assistant",
+                content: [
+                  {
+                    type: "tool_use",
+                    id: bashToolUseId,
+                    name: "Bash",
+                    input: { command: "git status" },
+                  },
+                ],
+              },
+              parent_tool_use_id: null,
+              uuid: "00000000-0000-4000-8000-000000000790",
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+          );
+          yield* Queue.offer(
+            harness.sdkMessages,
+            claudeSdkFrame({
+              type: "user",
+              message: {
+                role: "user",
+                content: [
+                  { type: "tool_result", tool_use_id: bashToolUseId, content, is_error: isError },
+                ],
+              },
+              parent_tool_use_id: null,
+              uuid: "00000000-0000-4000-8000-000000000791",
+              session_id: WAKE_NATIVE_SESSION,
+              ...(structured
+                ? {
+                    tool_use_result: {
+                      stdout: "",
+                      stderr: "",
+                      interrupted: false,
+                      isImage: false,
+                    },
+                  }
+                : {}),
+            }),
+          );
+          yield* Queue.offer(
+            harness.sdkMessages,
+            makeResultFrame({ uuid: "00000000-0000-4000-8000-000000000792", result: "Done." }),
+          );
+          yield* Queue.take(harness.terminalReceipts);
+
+          const bash = harness.events.findLast(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.nativeItemRef?.nativeId === bashToolUseId,
+          );
+          assert.equal(
+            bash?.type === "turn_item.updated" && bash.turnItem.type === "command_execution"
+              ? bash.turnItem.output
+              : undefined,
+            expected,
+          );
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
   );
 
   it.effect("answers an approval a held wake turn raises without waiting for the echo", () =>

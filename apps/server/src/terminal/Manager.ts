@@ -99,6 +99,15 @@ const DEFAULT_MAX_RETAINED_INACTIVE_SESSIONS = 128;
 const DEFAULT_OPEN_COLS = 120;
 const DEFAULT_OPEN_ROWS = 30;
 const TERMINAL_ENV_BLOCKLIST = new Set(["PORT", "ELECTRON_RENDERER_PORT", "ELECTRON_RUN_AS_NODE"]);
+const PYTHON_VENV_DIRECTORY_NAMES = [".venv", "venv"] as const;
+const PYTHON_PROJECT_MARKER_NAMES = new Set([
+  "pyproject.toml",
+  "requirements.txt",
+  "setup.py",
+  "setup.cfg",
+  "Pipfile",
+]);
+const MAX_PYTHON_VENV_STARTUP_OUTPUT_LENGTH = 65_536;
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 const MAX_TERMINAL_LABEL_LENGTH = 128;
 const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
@@ -1282,6 +1291,109 @@ function createTerminalSpawnEnv(
   return stripAppImageRuntimeEnv(spawnEnv);
 }
 
+function quotePosixShellArgument(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function isZshShellLabel(shellLabel: string): boolean {
+  return /(^|[/\\])zsh(?:\s|$)/i.test(shellLabel);
+}
+
+function isBashShellLabel(shellLabel: string): boolean {
+  return /(^|[/\\])bash(?:\s|$)/i.test(shellLabel);
+}
+
+function pythonVenvPosixMarkerScript(venvPath: string): string {
+  const activationScript = quotePosixShellArgument(`${venvPath}/bin/activate`);
+  return `. ${activationScript}
+__t3code_venv_status=$?
+if [ "$__t3code_venv_status" -eq 0 ]; then
+  printf '\\036T3_VENV_%s:0\\037' "$$"
+else
+  printf '\\036T3_VENV_%s:1\\037' "$$"
+fi
+unset __t3code_venv_status`;
+}
+
+interface PythonVenvActivationBootstrap {
+  readonly venvPath: string;
+  readonly command: string;
+  readonly successMarker: string;
+  readonly failureMarker: string;
+}
+
+function pythonVenvActivationCommand(
+  venvPath: string,
+  shellLabel: string,
+  platform: NodeJS.Platform,
+  processPid: number,
+): PythonVenvActivationBootstrap {
+  const markerKey = `T3_VENV_${processPid}`;
+
+  if (platform !== "win32") {
+    const activationScript = quotePosixShellArgument(`${venvPath}/bin/activate`);
+    return {
+      venvPath,
+      command: ` . ${activationScript}; __t3code_venv_status=$?; if [ "$__t3code_venv_status" -eq 0 ]; then printf '\\036%s:0\\037' '${markerKey}'; else printf '\\036%s:1\\037' '${markerKey}'; fi; unset __t3code_venv_status\r`,
+      successMarker: `\x1e${markerKey}:0\x1f`,
+      failureMarker: `\x1e${markerKey}:1\x1f`,
+    };
+  }
+
+  if (/powershell|pwsh/i.test(shellLabel)) {
+    const activationScript = `${venvPath}\\Scripts\\Activate.ps1`.replaceAll("'", "''");
+    const markerExpression = (status: 0 | 1) => `"$([char]30)${markerKey}:${status}$([char]31)"`;
+    return {
+      venvPath,
+      command: `. '${activationScript}'; if ($?) { [Console]::Write(${markerExpression(0)}) } else { [Console]::Write(${markerExpression(1)}) }\r`,
+      successMarker: `\x1e${markerKey}:0\x1f`,
+      failureMarker: `\x1e${markerKey}:1\x1f`,
+    };
+  }
+
+  return {
+    venvPath,
+    command: `call "${venvPath}\\Scripts\\activate.bat" && echo __T3^_VENV_${processPid}_0__ || echo __T3^_VENV_${processPid}_1__\r`,
+    successMarker: `__T3_VENV_${processPid}_0__`,
+    failureMarker: `__T3_VENV_${processPid}_1__`,
+  };
+}
+
+interface PythonVenvStartupOutputGate {
+  readonly venvPath: string;
+  readonly successMarker: string;
+  readonly failureMarker: string;
+  bufferedOutput: string;
+}
+
+function filterPythonVenvStartupOutput(
+  gate: PythonVenvStartupOutputGate,
+  data: string,
+): { readonly output: string; readonly complete: boolean } {
+  gate.bufferedOutput += data;
+  const successIndex = gate.bufferedOutput.indexOf(gate.successMarker);
+  const failureIndex = gate.bufferedOutput.indexOf(gate.failureMarker);
+  const succeeded = successIndex >= 0 && (failureIndex < 0 || successIndex < failureIndex);
+  const markerIndex = succeeded ? successIndex : failureIndex;
+
+  if (markerIndex >= 0) {
+    const marker = succeeded ? gate.successMarker : gate.failureMarker;
+    const remainingOutput = gate.bufferedOutput.slice(markerIndex + marker.length);
+    return {
+      output: succeeded
+        ? remainingOutput
+        : `\r\nAutomatic Python virtual environment activation failed: ${gate.venvPath}\r\n${remainingOutput}`,
+      complete: true,
+    };
+  }
+
+  if (gate.bufferedOutput.length >= MAX_PYTHON_VENV_STARTUP_OUTPUT_LENGTH) {
+    return { output: gate.bufferedOutput, complete: true };
+  }
+
+  return { output: "", complete: false };
+}
+
 function normalizedRuntimeEnv(
   env: Record<string, string> | undefined,
 ): Record<string, string> | null {
@@ -1499,6 +1611,147 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     options.maxRetainedInactiveSessions ?? DEFAULT_MAX_RETAINED_INACTIVE_SESSIONS;
   const registerTerminalProcesses = options.registerTerminalProcesses ?? (() => Effect.void);
   const unregisterTerminal = options.unregisterTerminal ?? (() => Effect.void);
+
+  const isPythonVenv = Effect.fn("terminal.isPythonVenv")(function* (venvPath: string) {
+    const hasConfig = yield* fileSystem
+      .exists(path.join(venvPath, "pyvenv.cfg"))
+      .pipe(Effect.orElseSucceed(() => false));
+    if (!hasConfig) return false;
+
+    const activationScripts =
+      platform === "win32"
+        ? [
+            path.join(venvPath, "Scripts", "Activate.ps1"),
+            path.join(venvPath, "Scripts", "activate.bat"),
+          ]
+        : [path.join(venvPath, "bin", "activate")];
+    for (const activationScript of activationScripts) {
+      if (yield* fileSystem.exists(activationScript).pipe(Effect.orElseSucceed(() => false))) {
+        return true;
+      }
+    }
+    return false;
+  });
+
+  const findPythonVenv = Effect.fn("terminal.findPythonVenv")(function* (
+    session: TerminalSessionState,
+  ) {
+    const projectRoot = session.runtimeEnv?.T3CODE_PROJECT_ROOT;
+    const searchRoots = [session.cwd, projectRoot].filter(
+      (root, index, roots): root is string => Boolean(root) && roots.indexOf(root) === index,
+    );
+
+    for (const root of searchRoots) {
+      for (const directoryName of PYTHON_VENV_DIRECTORY_NAMES) {
+        const venvPath = path.join(root, directoryName);
+        if (yield* isPythonVenv(venvPath)) return venvPath;
+      }
+    }
+
+    const discovered = new Set<string>();
+    for (const root of searchRoots) {
+      const entries = yield* fileSystem
+        .readDirectory(root)
+        .pipe(Effect.orElseSucceed(() => [] as Array<string>));
+      const isPythonProject = entries.some(
+        (entry) => PYTHON_PROJECT_MARKER_NAMES.has(entry) || entry.endsWith(".py"),
+      );
+      if (!isPythonProject) continue;
+
+      for (const entry of entries) {
+        if (PYTHON_VENV_DIRECTORY_NAMES.some((directoryName) => directoryName === entry)) continue;
+        const candidate = path.join(root, entry);
+        if (yield* isPythonVenv(candidate)) discovered.add(candidate);
+      }
+    }
+
+    return discovered.size === 1 ? (discovered.values().next().value ?? null) : null;
+  });
+
+  const preparePythonVenvZshStartup = Effect.fn("terminal.preparePythonVenvZshStartup")(function* (
+    venvPath: string,
+    spawnEnv: NodeJS.ProcessEnv,
+  ) {
+    const userZdotdir = spawnEnv.ZDOTDIR?.trim() || spawnEnv.HOME?.trim();
+    if (!userZdotdir) return null;
+
+    const directory = yield* fileSystem.makeTempDirectory({
+      directory: logsDir,
+      prefix: ".zsh-venv-",
+    });
+    const quotedUserZdotdir = quotePosixShellArgument(userZdotdir);
+    const quotedWrapperZdotdir = quotePosixShellArgument(directory);
+    const sourceUserStartupFile = (name: string) => `ZDOTDIR="$__t3code_user_zdotdir"
+if [[ -r "$ZDOTDIR/${name}" ]]; then
+  source "$ZDOTDIR/${name}"
+fi
+__t3code_user_zdotdir="\${ZDOTDIR:-$HOME}"`;
+
+    yield* Effect.gen(function* () {
+      yield* fileSystem.writeFileString(
+        path.join(directory, ".zshenv"),
+        `typeset -g __t3code_user_zdotdir=${quotedUserZdotdir}
+typeset -g __t3code_wrapper_zdotdir=${quotedWrapperZdotdir}
+${sourceUserStartupFile(".zshenv")}
+ZDOTDIR="$__t3code_wrapper_zdotdir"
+`,
+      );
+      yield* fileSystem.writeFileString(
+        path.join(directory, ".zprofile"),
+        `${sourceUserStartupFile(".zprofile")}
+ZDOTDIR="$__t3code_wrapper_zdotdir"
+`,
+      );
+      yield* fileSystem.writeFileString(
+        path.join(directory, ".zshrc"),
+        `${sourceUserStartupFile(".zshrc")}
+IFS= read -r __t3code_venv_trigger
+unset __t3code_venv_trigger
+${pythonVenvPosixMarkerScript(venvPath)}
+ZDOTDIR="$__t3code_user_zdotdir"
+unset __t3code_user_zdotdir __t3code_wrapper_zdotdir
+`,
+      );
+    }).pipe(
+      Effect.onError(() =>
+        fileSystem.remove(directory, { recursive: true, force: true }).pipe(Effect.ignore),
+      ),
+    );
+
+    return {
+      directory,
+      env: { ...spawnEnv, ZDOTDIR: directory },
+    };
+  });
+
+  const preparePythonVenvBashStartup = Effect.fn("terminal.preparePythonVenvBashStartup")(
+    function* (venvPath: string) {
+      const directory = yield* fileSystem.makeTempDirectory({
+        directory: logsDir,
+        prefix: ".bash-venv-",
+      });
+      const rcfile = path.join(directory, "bashrc");
+
+      yield* fileSystem
+        .writeFileString(
+          rcfile,
+          `if [ -r "$HOME/.bashrc" ]; then
+  . "$HOME/.bashrc"
+fi
+IFS= read -r __t3code_venv_trigger
+unset __t3code_venv_trigger
+${pythonVenvPosixMarkerScript(venvPath)}
+`,
+        )
+        .pipe(
+          Effect.onError(() =>
+            fileSystem.remove(directory, { recursive: true, force: true }).pipe(Effect.ignore),
+          ),
+        );
+
+      return { directory, rcfile };
+    },
+  );
 
   yield* fileSystem.makeDirectory(logsDir, { recursive: true }).pipe(Effect.orDie);
 
@@ -2202,8 +2455,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       increment(terminalSessionsTotal, { lifecycle: eventType }).pipe(
         Effect.andThen(
           Effect.gen(function* () {
-            const shellCandidates = resolveShellCandidates(shellResolver, platform, baseEnv);
-            const terminalEnv = createTerminalSpawnEnv(
+            let shellCandidates = resolveShellCandidates(shellResolver, platform, baseEnv);
+            let terminalEnv = createTerminalSpawnEnv(
               baseEnv,
               session.runtimeEnv,
               platform,
@@ -2243,11 +2496,91 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
                 }
               }
             }
+            const pythonVenv = yield* findPythonVenv(session);
+            const preferredShell = shellCandidates[0];
+            const preferredShellLabel = preferredShell
+              ? formatShellCandidate(preferredShell)
+              : null;
+            const preparedZshStartup =
+              pythonVenv && preferredShellLabel && isZshShellLabel(preferredShellLabel)
+                ? yield* preparePythonVenvZshStartup(pythonVenv, terminalEnv).pipe(
+                    Effect.catch((error) =>
+                      Effect.logWarning("failed to prepare zsh virtual environment startup", {
+                        error,
+                        venvPath: pythonVenv,
+                      }).pipe(Effect.as(null)),
+                    ),
+                  )
+                : null;
+            if (preparedZshStartup) terminalEnv = preparedZshStartup.env;
+            const preparedBashStartup =
+              pythonVenv &&
+              preferredShell &&
+              preferredShellLabel &&
+              isBashShellLabel(preferredShellLabel)
+                ? yield* preparePythonVenvBashStartup(pythonVenv).pipe(
+                    Effect.catch((error) =>
+                      Effect.logWarning("failed to prepare bash virtual environment startup", {
+                        error,
+                        venvPath: pythonVenv,
+                      }).pipe(Effect.as(null)),
+                    ),
+                  )
+                : null;
+            if (preparedBashStartup) {
+              shellCandidates = shellCandidates.map((candidate) =>
+                isBashShellLabel(formatShellCandidate(candidate))
+                  ? {
+                      ...candidate,
+                      args: [...(candidate.args ?? []), "--rcfile", preparedBashStartup.rcfile],
+                    }
+                  : candidate,
+              );
+            }
             const spawnResult = yield* trySpawn(shellCandidates, terminalEnv, session);
             ptyProcess = spawnResult.process;
             startedShell = spawnResult.shellLabel;
 
             const processPid = ptyProcess.pid;
+            const usesZshStartup =
+              preparedZshStartup !== null && isZshShellLabel(spawnResult.shellLabel);
+            const usesBashStartup =
+              preparedBashStartup !== null &&
+              isBashShellLabel(spawnResult.shellLabel) &&
+              spawnResult.shellLabel.includes(preparedBashStartup.rcfile);
+            const usesPreparedStartup = usesZshStartup || usesBashStartup;
+            let startupDirectory =
+              preparedZshStartup?.directory ?? preparedBashStartup?.directory ?? null;
+            if (startupDirectory && !usesPreparedStartup) {
+              yield* fileSystem
+                .remove(startupDirectory, { recursive: true, force: true })
+                .pipe(Effect.ignore);
+              startupDirectory = null;
+            }
+            const cleanupPreparedStartup = () => {
+              const directory = startupDirectory;
+              if (!directory) return;
+              startupDirectory = null;
+              runFork(
+                fileSystem.remove(directory, { recursive: true, force: true }).pipe(Effect.ignore),
+              );
+            };
+            const activationBootstrap = pythonVenv
+              ? pythonVenvActivationCommand(
+                  pythonVenv,
+                  spawnResult.shellLabel,
+                  platform,
+                  processPid,
+                )
+              : null;
+            let startupOutputGate: PythonVenvStartupOutputGate | null = activationBootstrap
+              ? {
+                  venvPath: activationBootstrap.venvPath,
+                  successMarker: activationBootstrap.successMarker,
+                  failureMarker: activationBootstrap.failureMarker,
+                  bufferedOutput: "",
+                }
+              : null;
             let eventsActivated = false;
 
             let eventStamp: ReturnType<typeof advanceEventSequence> = {
@@ -2260,20 +2593,56 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
               session.status = "running";
               // onExit may replay an exit immediately; accept it before subscribing.
               session.unsubscribeData = spawnResult.process.onData((data) => {
-                if (!enqueueProcessEvent(session, processPid, { type: "output", data })) {
+                let output = data;
+                if (startupOutputGate) {
+                  const filtered = filterPythonVenvStartupOutput(startupOutputGate, data);
+                  output = filtered.output;
+                  if (filtered.complete) {
+                    startupOutputGate = null;
+                    cleanupPreparedStartup();
+                  }
+                }
+                if (output.length === 0) return;
+                if (!enqueueProcessEvent(session, processPid, { type: "output", data: output })) {
                   return;
                 }
                 if (eventsActivated) runFork(drainProcessEvents(session, processPid));
               });
               session.unsubscribeExit = spawnResult.process.onExit((event) => {
-                if (!enqueueProcessEvent(session, processPid, { type: "exit", event })) {
-                  return;
+                let shouldDrain = false;
+                if (startupOutputGate) {
+                  const { venvPath } = startupOutputGate;
+                  startupOutputGate = null;
+                  cleanupPreparedStartup();
+                  shouldDrain = enqueueProcessEvent(session, processPid, {
+                    type: "output",
+                    data: `\r\nAutomatic Python virtual environment activation did not complete: ${venvPath}\r\n`,
+                  });
                 }
-                if (eventsActivated) runFork(drainProcessEvents(session, processPid));
+                shouldDrain =
+                  enqueueProcessEvent(session, processPid, { type: "exit", event }) || shouldDrain;
+                if (shouldDrain && eventsActivated)
+                  runFork(drainProcessEvents(session, processPid));
               });
               eventStamp = advanceEventSequence(session);
               return [undefined, state] as const;
             });
+
+            if (activationBootstrap) {
+              yield* Effect.try({
+                try: () =>
+                  spawnResult.process.write(
+                    usesPreparedStartup ? "\r" : activationBootstrap.command,
+                  ),
+                catch: (cause) =>
+                  new TerminalWriteError({
+                    threadId: session.threadId,
+                    terminalId: session.terminalId,
+                    terminalPid: processPid,
+                    cause,
+                  }),
+              });
+            }
 
             yield* publishEvent({
               type: eventType,

@@ -488,6 +488,11 @@ export const OrchestrationV2RestartCancelledBackgroundWork = Schema.Struct({
 export type OrchestrationV2RestartCancelledBackgroundWork =
   typeof OrchestrationV2RestartCancelledBackgroundWork.Type;
 
+const OrchestrationV2RunPromptSuggestionUpdated = Schema.Struct({
+  runId: RunId,
+  suggestedPrompt: TrimmedNonEmptyString,
+});
+
 export const OrchestrationV2RunBackgroundWorkCancelled = Schema.Struct({
   runId: RunId,
   restartCancelledBackgroundWork: Schema.Array(OrchestrationV2RestartCancelledBackgroundWork),
@@ -528,6 +533,7 @@ export const OrchestrationV2Run = Schema.Struct({
   rootNodeId: Schema.NullOr(NodeId),
   activeAttemptId: Schema.NullOr(RunAttemptId),
   status: OrchestrationV2RunStatus,
+  suggestedPrompt: Schema.optional(TrimmedNonEmptyString),
   queuePosition: Schema.optional(Schema.NullOr(PositiveInt)),
   queueHeld: Schema.optional(Schema.Boolean),
   requestedAt: Schema.DateTimeUtc,
@@ -1634,6 +1640,11 @@ export const OrchestrationV2DomainEvent = Schema.Union([
   }),
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
+    type: Schema.Literal("run.prompt-suggestion-updated"),
+    payload: OrchestrationV2RunPromptSuggestionUpdated,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2EventBase.fields,
     type: Schema.Literal("run.background-work-cancelled"),
     payload: OrchestrationV2RunBackgroundWorkCancelled,
   }),
@@ -2437,6 +2448,11 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
     ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literal("run.updated"),
     payload: OrchestrationV2RunJson,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2JsonEventBaseFields,
+    type: Schema.Literal("run.prompt-suggestion-updated"),
+    payload: OrchestrationV2RunPromptSuggestionUpdated,
   }),
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
