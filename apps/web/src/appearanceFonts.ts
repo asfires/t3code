@@ -2,12 +2,15 @@ import {
   DEFAULT_CODE_FONT_SIZE,
   DEFAULT_INTERFACE_FONT_SIZE,
   DEFAULT_PROMPT_FONT_SIZE,
+  DEFAULT_TOOL_OUTPUT_FONT_SIZE,
   MAX_CODE_FONT_SIZE,
   MAX_INTERFACE_FONT_SIZE,
   MAX_PROMPT_FONT_SIZE,
+  MAX_TOOL_OUTPUT_FONT_SIZE,
   MIN_CODE_FONT_SIZE,
   MIN_INTERFACE_FONT_SIZE,
   MIN_PROMPT_FONT_SIZE,
+  MIN_TOOL_OUTPUT_FONT_SIZE,
 } from "@t3tools/contracts";
 
 export const DEFAULT_SANS_FONT_STACK =
@@ -66,6 +69,7 @@ export interface AppearanceFontPreferences {
   readonly sizeInterface: number;
   readonly sizePrompt: number;
   readonly sizeCode: number;
+  readonly sizeToolOutput: number;
   readonly smoothing: boolean;
 }
 
@@ -95,7 +99,10 @@ export function applyAppearanceFontVariables(
   root.style.fontSize = `${clampInterfaceFontSize(preferences.sizeInterface)}px`;
   root.style.setProperty("--font-size-prompt", `${clampPromptFontSize(preferences.sizePrompt)}px`);
   const code = clampCodeFontSize(preferences.sizeCode);
-  root.style.setProperty("--font-size-code", `${code}px`);
+  root.style.setProperty(
+    "--font-size-tool-output",
+    `${clampToolOutputFontSize(preferences.sizeToolOutput)}px`,
+  );
   root.style.setProperty("--diffs-font-size", `${code}px`);
 
   if (preferences.smoothing) {
@@ -125,6 +132,15 @@ export function clampPromptFontSize(value: number): number {
 
 export function clampCodeFontSize(value: number): number {
   return clampFontSize(value, MIN_CODE_FONT_SIZE, MAX_CODE_FONT_SIZE, DEFAULT_CODE_FONT_SIZE);
+}
+
+export function clampToolOutputFontSize(value: number): number {
+  return clampFontSize(
+    value,
+    MIN_TOOL_OUTPUT_FONT_SIZE,
+    MAX_TOOL_OUTPUT_FONT_SIZE,
+    DEFAULT_TOOL_OUTPUT_FONT_SIZE,
+  );
 }
 
 const FONT_PROBE_TEXT = "mmmmmmmmMMWli1O0@# fjord";

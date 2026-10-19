@@ -1,10 +1,12 @@
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   areFontAdvancesMonospace,
   clampCodeFontSize,
   clampInterfaceFontSize,
   clampPromptFontSize,
+  clampToolOutputFontSize,
+  applyAppearanceFontVariables,
   DEFAULT_CODE_FONT_STACK,
   DEFAULT_SANS_FONT_STACK,
   appearanceFontStack,
@@ -115,11 +117,41 @@ describe("font size clamping", () => {
     expect(clampInterfaceFontSize(96)).toBe(20);
     expect(clampPromptFontSize(40)).toBe(20);
     expect(clampCodeFontSize(1)).toBe(10);
+    expect(clampToolOutputFontSize(1)).toBe(10);
+    expect(clampToolOutputFontSize(99)).toBe(18);
   });
 
   it("rounds fractional values and falls back for unusable input", () => {
     expect(clampCodeFontSize(13.4)).toBe(13);
     expect(clampInterfaceFontSize(Number.NaN)).toBe(16);
     expect(clampPromptFontSize(Number.POSITIVE_INFINITY)).toBe(14);
+    expect(clampToolOutputFontSize(Number.NaN)).toBe(11);
+  });
+});
+
+describe("appearance font variables", () => {
+  it("emits an independently clamped absolute tool-output size", () => {
+    const setProperty = vi.fn();
+    const root = {
+      style: {
+        fontSize: "",
+        removeProperty: vi.fn(),
+        setProperty,
+      },
+    } as unknown as HTMLElement;
+
+    applyAppearanceFontVariables(root, {
+      sans: "",
+      code: "",
+      composer: "",
+      sizeInterface: 16,
+      sizePrompt: 14,
+      sizeCode: 14,
+      sizeToolOutput: 8,
+      smoothing: true,
+    });
+
+    expect(setProperty).toHaveBeenCalledWith("--diffs-font-size", "14px");
+    expect(setProperty).toHaveBeenCalledWith("--font-size-tool-output", "10px");
   });
 });
