@@ -178,7 +178,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
                 setModel(createModelSelection(instanceId, model))
               }
             />
-            {!mixedModel ? (
+            {!mixedModel && isProjectScope ? (
               <TraitsPicker
                 provider={activeEntry.driverKind}
                 models={activeEntry.models}

@@ -1,3 +1,4 @@
+import { DraftDefaultsSync } from "./draftDefaultsSync";
 import { RouterProvider } from "@tanstack/react-router";
 
 import { BrowserProfileReporter } from "./browser/BrowserProfileReporter";
@@ -17,6 +18,7 @@ export function AppRoot({ router }: { readonly router: AppRouter }) {
     <AppAtomRegistryProvider>
       <ServerBootReload />
       <RouterProvider router={router} />
+      <DraftDefaultsSync />
       <ElectronBrowserHost />
       <BrowserProfileReporter />
       <QuitHoldOverlay />

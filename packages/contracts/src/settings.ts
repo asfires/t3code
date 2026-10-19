@@ -898,6 +898,12 @@ export const WorktreeCleanup = Schema.NullOr(
 );
 export type WorktreeCleanup = typeof WorktreeCleanup.Type;
 
+export const ProviderNewThreadDefaults = Schema.Struct({
+  modelOptions: Schema.optional(ProviderOptionSelections),
+  runtimeMode: Schema.optional(RuntimeMode),
+});
+export type ProviderNewThreadDefaults = typeof ProviderNewThreadDefaults.Type;
+
 export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "worktreeCleanup",
   "defaultModelSelection",
@@ -1097,6 +1103,9 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
   projectAutoPullOverrides: Schema.Record(ProjectId, Schema.Boolean).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  providerNewThreadDefaults: Schema.Record(ProviderInstanceId, ProviderNewThreadDefaults).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
   defaultModelSelection: Schema.NullOr(ModelSelection).pipe(
@@ -1412,6 +1421,9 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   projectAutoPullOverrides: Schema.optionalKey(
     Schema.Record(ProjectId, Schema.NullOr(Schema.Boolean)),
+  ),
+  providerNewThreadDefaults: Schema.optionalKey(
+    Schema.Record(ProviderInstanceId, ProviderNewThreadDefaults),
   ),
   defaultModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   defaultRuntimeMode: Schema.optionalKey(RuntimeMode),

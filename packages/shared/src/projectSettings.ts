@@ -1,3 +1,5 @@
+import type { ProviderOptionSelection, ServerProvider } from "@t3tools/contracts";
+import { createModelSelection, resolveConfiguredProviderOptionDefaults } from "./model.ts";
 import {
   type ModelSelection,
   PROJECT_FILE_BACKED_SETTINGS,
@@ -257,4 +259,85 @@ export function resolveWorktreeCleanup(
     worktreeOnDelete,
     worktreeUnchanged,
   };
+}
+
+export function resolveProviderNewThreadDefaults(input: {
+  readonly projectSettings: ResolvedProjectSettings;
+  readonly modelSelection: ModelSelection;
+  readonly providers: ReadonlyArray<ServerProvider>;
+  readonly lastUsedOptions?: ReadonlyArray<ProviderOptionSelection> | undefined;
+}) {
+  const { settings, sources } = input.projectSettings;
+  const { instanceId, model } = input.modelSelection;
+  const projectModel =
+    sources.defaultModelSelection === "project" ? settings.defaultModelSelection : null;
+  const configured = settings.providerNewThreadDefaults[instanceId];
+  const descriptors =
+    input.providers
+      .find((provider) => provider.instanceId === instanceId)
+      ?.models.find((candidate) => candidate.slug === model)?.capabilities?.optionDescriptors ?? [];
+  const options =
+    (projectModel?.instanceId === instanceId ? projectModel.options : undefined) ??
+    (configured?.modelOptions !== undefined
+      ? resolveConfiguredProviderOptionDefaults({ settings, instanceId, descriptors })
+      : input.lastUsedOptions);
+  return {
+    modelSelection: createModelSelection(instanceId, model, options),
+    runtimeMode:
+      sources.defaultRuntimeMode === "project"
+        ? settings.defaultRuntimeMode
+        : (configured?.runtimeMode ?? settings.defaultRuntimeMode),
+  };
+}
+
+export function resolveNewThreadConfiguredState(input: {
+  readonly projectSettings: ResolvedProjectSettings;
+  readonly carryModel?: ModelSelection | null | undefined;
+  readonly stickyModel?: ModelSelection | null | undefined;
+  readonly stickySelections?: Readonly<Record<string, ModelSelection | undefined>>;
+  readonly providers: ReadonlyArray<ServerProvider>;
+}) {
+  const { settings } = input.projectSettings;
+  const isUsable = (provider: ServerProvider) =>
+    (input.projectSettings.overrides.providerInstances?.[provider.instanceId]?.enabled ??
+      provider.enabled) &&
+    provider.installed &&
+    provider.availability !== "unavailable" &&
+    provider.auth.status !== "unauthenticated";
+  const selectable = (selection: ModelSelection | null | undefined) => {
+    if (!selection) return null;
+    const provider = input.providers.find(
+      (candidate) => candidate.instanceId === selection.instanceId,
+    );
+    return provider &&
+      isUsable(provider) &&
+      provider.models.some((model) => model.slug === selection.model && !model.isLegacy)
+      ? selection
+      : null;
+  };
+  const provider = input.providers.find(
+    (candidate) => isUsable(candidate) && candidate.models.some((model) => !model.isLegacy),
+  );
+  const model =
+    provider?.models.find((candidate) => candidate.isDefault && !candidate.isLegacy) ??
+    provider?.models.find((candidate) => !candidate.isLegacy);
+  const selection =
+    selectable(settings.defaultModelSelection) ??
+    selectable(input.carryModel) ??
+    selectable(input.stickyModel) ??
+    (provider && model ? createModelSelection(provider.instanceId, model.slug) : null);
+  if (!selection) return { modelSelection: null, runtimeMode: settings.defaultRuntimeMode };
+  return resolveProviderNewThreadDefaults({
+    projectSettings: input.projectSettings,
+    modelSelection: selection,
+    providers: input.providers,
+    lastUsedOptions:
+      (input.carryModel?.instanceId === selection.instanceId
+        ? input.carryModel.options
+        : undefined) ??
+      input.stickySelections?.[selection.instanceId]?.options ??
+      (input.stickyModel?.instanceId === selection.instanceId
+        ? input.stickyModel.options
+        : undefined),
+  });
 }

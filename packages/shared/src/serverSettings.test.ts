@@ -1147,3 +1147,28 @@ describe("synchronized model preferences", () => {
     });
   });
 });
+
+it("replaces new-thread defaults so resets remove stale instance entries", () => {
+  const codexId = ProviderInstanceId.make("codex");
+  const claudeId = ProviderInstanceId.make("claudeAgent");
+  const current = {
+    ...DEFAULT_SERVER_SETTINGS,
+    defaultModelSelection: createModelSelection(codexId, "gpt-5.6-sol"),
+    providerNewThreadDefaults: {
+      [codexId]: { runtimeMode: "approval-required" as const },
+      [claudeId]: { modelOptions: [{ id: "effort", value: "high" }] },
+    },
+  };
+
+  const next = applyServerSettingsPatch(current, {
+    defaultModelSelection: null,
+    providerNewThreadDefaults: {
+      [claudeId]: { modelOptions: [{ id: "effort", value: "low" }] },
+    },
+  });
+
+  expect(next.defaultModelSelection).toBeNull();
+  expect(next.providerNewThreadDefaults).toEqual({
+    [claudeId]: { modelOptions: [{ id: "effort", value: "low" }] },
+  });
+});

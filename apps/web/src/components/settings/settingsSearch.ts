@@ -660,6 +660,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
+    id: "provider-new-thread-defaults",
+    title: "Provider new thread defaults",
+    to: "/settings/providers",
+    targetId: "providers",
+    searchTerms: ["traits effort context speed permission runtime mode"],
+  },
+  {
     id: "usage-providers",
     title: "Usage providers",
     to: "/settings/providers",
