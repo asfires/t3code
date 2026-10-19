@@ -54,7 +54,8 @@ import {
 } from "../components/ui/toast";
 import { isElectron } from "../env";
 import { cn } from "../lib/utils";
-import { applyAppearanceFontVariables } from "~/appearanceFonts";
+import { applyAppearanceFontVariables, isFontFamilyAvailable } from "~/appearanceFonts";
+import { loadHostFontFamily } from "../hostFonts";
 import { applyAppearanceContrast } from "~/appearanceContrast";
 import { useClientSettings } from "../hooks/useSettings";
 import {
@@ -327,6 +328,16 @@ function FontAppearanceSync() {
       sizeToolOutput: fontSizeToolOutput,
       smoothing: fontSmoothing,
     });
+    for (const family of new Set([fontFamilySans, fontFamilyCode, fontFamilyComposer])) {
+      const normalized = family.trim();
+      if (
+        normalized.length > 0 &&
+        !normalized.includes(",") &&
+        !isFontFamilyAvailable(normalized)
+      ) {
+        void loadHostFontFamily(normalized);
+      }
+    }
   }, [
     fontFamilyCode,
     fontFamilyComposer,
