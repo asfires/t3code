@@ -71,6 +71,7 @@ import { BrowserDeviceToolbar } from "~/browser/BrowserDeviceToolbar";
 import { BROWSER_DEVICE_TOOLBAR_HEIGHT } from "~/browser/browserViewportLayout";
 import { previewRuntimeTabId } from "~/browser/previewRuntimeTabId";
 import { BrowserSettingsReadError } from "~/browser/openFileInPreview";
+import { BrowserDocumentFrame, isPdfPreviewFile } from "~/components/files/BrowserDocumentFrame";
 import { PreviewFileNotShown, PreviewUnreachable } from "./PreviewUnreachable";
 import { revealInFileExplorerLabel } from "./fileExplorerLabel";
 import { shouldShowPreviewEmptyState } from "./previewEmptyStateLogic";
@@ -121,18 +122,24 @@ function ServerTabFileNotShown(props: {
   readonly download: { readonly id: string; readonly fileName: string };
 }) {
   const access = usePreviewStreamAccess(props.threadRef.environmentId);
+  const target = access ? { access, threadId: props.threadRef.threadId, tabId: props.tabId } : null;
+  // The server's headless browser downloads PDFs, so this browser's viewer shows them.
+  if (target && isPdfPreviewFile(props.download.fileName)) {
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <BrowserDocumentFrame
+          src={previewStreamDownloadUrl(target, props.download.id, { inline: true })}
+          title={props.download.fileName}
+          pdf
+        />
+      </div>
+    );
+  }
   return (
     <PreviewFileNotShown
       url={props.url}
       fileName={props.download.fileName}
-      downloadUrl={
-        access
-          ? previewStreamDownloadUrl(
-              { access, threadId: props.threadRef.threadId, tabId: props.tabId },
-              props.download.id,
-            )
-          : null
-      }
+      downloadUrl={target ? previewStreamDownloadUrl(target, props.download.id) : null}
       onOpen={() => void localApi?.shell.openExternal(props.url).catch(() => undefined)}
     />
   );

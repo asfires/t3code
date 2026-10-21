@@ -210,7 +210,9 @@ it.effect("serves a tab's download only to an authorized session", () =>
           requests.push(input);
           return input.downloadId === "download-1"
             ? Option.some({ path, fileName: "Q3 report.csv" })
-            : Option.none();
+            : input.downloadId === "download-2"
+              ? Option.some({ path, fileName: "Q3 report.PDF" })
+              : Option.none();
         }),
       answerFileChooser: () => Effect.succeed(false),
       attachViewer: () => Effect.die("unused"),
@@ -244,6 +246,11 @@ it.effect("serves a tab's download only to an authorized session", () =>
     expect(yield* Effect.promise(() => response.text())).toBe("report contents");
     const missing = yield* serve([AuthOrchestrationReadScope], `${base}&id=other`);
     expect(missing.status).toBe(404);
+    const pdf = yield* serve([AuthOrchestrationReadScope], `${base}&id=download-2&inline=1`);
+    expect(pdf.headers.get("content-type")).toBe("application/pdf");
+    expect(pdf.headers.get("content-disposition")).toBeNull();
+    const notPdf = yield* serve([AuthOrchestrationReadScope], `${base}&id=download-1&inline=1`);
+    expect(notPdf.headers.get("content-disposition")).toBe('attachment; filename="Q3 report.csv"');
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 

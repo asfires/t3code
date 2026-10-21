@@ -215,11 +215,16 @@ const serveDownload = (browser: ServerBrowser.ServerBrowser["Service"], params: 
       downloadId: params.get("id") ?? "",
     });
     if (Option.isNone(download)) return HttpServerResponse.text("Not Found", { status: 404 });
+    // The server's headless browser has no PDF viewer, so the client shows a
+    // downloaded PDF in its own. `nosniff` keeps a mislabeled file from rendering as anything else.
+    const inline = params.get("inline") === "1" && /\.pdf$/i.test(download.value.fileName);
     return yield* HttpServerResponse.file(download.value.path, {
-      headers: assetResponseHeaders(download.value.path, {
-        download: true,
-        fileName: download.value.fileName,
-      }),
+      headers: assetResponseHeaders(
+        download.value.path,
+        inline
+          ? { mimeType: "application/pdf" }
+          : { download: true, fileName: download.value.fileName },
+      ),
     });
   });
 
