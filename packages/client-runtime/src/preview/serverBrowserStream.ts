@@ -137,12 +137,14 @@ export async function uploadPreviewStreamFiles(
 export const previewStreamDownloadUrl = (
   target: Pick<PreviewStreamTarget, "access" | "threadId" | "tabId">,
   id: string,
+  options?: { readonly inline?: boolean },
 ): string =>
   withDeviceHubQuery(
     `${target.access.httpBase}/download?${new URLSearchParams({
       threadId: target.threadId,
       tabId: target.tabId,
       id,
+      ...(options?.inline ? { inline: "1" } : {}),
     }).toString()}`,
     target.access,
   );
